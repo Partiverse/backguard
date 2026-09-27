@@ -79,7 +79,14 @@ backup_borg_class() {
 
     if [[ ! -d "$repo" ]]; then
         info "[$cls] 初始化仓库: $repo"
-        BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" init --encryption=repokey "$repo" 2>&1 | tee -a "$LOG"
+        # borg init 不会自动创建父目录
+        mkdir -p "$(dirname "$repo")"
+        # 注意: 本函数在 || 列表中被调用，set -e 在函数体内失效，必须显式判错
+        if ! BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" init --encryption=repokey "$repo" 2>&1 | tee -a "$LOG"; then
+            error "[$cls] borg init 失败"
+            echo "::error::[$cls] borg init failed: $(tail -n 3 "$LOG" 2>/dev/null | tr '\n' ' ' | cut -c1-250)"
+            return 1
+        fi
     fi
 
     set +e
@@ -95,7 +102,7 @@ backup_borg_class() {
 
     if [[ $create_rc -ne 0 && $create_rc -ne 1 ]]; then
         error "[$cls] borg create 失败 (exit $create_rc)"
-        echo "::error::[$cls] borg create exit $create_rc ($PLATFORM, line $LINENO)"
+        echo "::error::[$cls] borg create exit $create_rc: $(tail -n 3 "$LOG" 2>/dev/null | tr '\n' ' ' | cut -c1-250)"
         return 1
     fi
     [[ $create_rc -eq 1 ]] && warn "[$cls] 部分路径不存在（已归档）"

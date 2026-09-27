@@ -165,13 +165,17 @@ jobs:
 
       - name: Run backup
         shell: pwsh
-        run: .\backup.ps1 -Task Backup
+        run: |
+          # GITHUB_PATH 对本进程无效，显式前置 bin 目录
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          .\backup.ps1 -Task Backup
         env:
           SKIP_WEBDAV: "1"
 
       - name: Assert snapshots exist
         shell: pwsh
         run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
           $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
           $env:RESTIC_PASSWORD = $pass
