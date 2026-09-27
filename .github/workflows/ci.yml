@@ -192,32 +192,57 @@ jobs:
         env:
           SKIP_WEBDAV: "1"
         run: |
-          # 全程诊断写入 Job Step Summary（check-runs API 匿名可读）
-          $SUM = $env:GITHUB_STEP_SUMMARY
-          Add-Content $SUM "## windows run $(Get-Date -Format o)"
-          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
-          Add-Content $SUM "restic: $(restic version 2>&1 | Select-Object -First 1)"
-          .\backup.ps1 -Task Backup 2>&1 | Tee-Object -Variable backupOut
-          Add-Content $SUM "backup exit=$LASTEXITCODE"
-          $backupOut | Select-Object -Last 25 | ForEach-Object { Add-Content $SUM "    $_" }
-          if ($LASTEXITCODE -ne 0) { Add-Content $SUM "**backup.ps1 FAILED**"; throw "backup.ps1 failed" }
-          Write-Host "=== backup done, asserting snapshots ==="
-          $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
-          $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
-          Add-Content $SUM "pass parsed len=$($pass.Length)"
-          if (-not $pass) { Add-Content $SUM "**password parse failed**"; throw "no password" }
-          $env:RESTIC_PASSWORD = $pass
-          foreach ($cls in @("config", "files", "system")) {
-            $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
-            Add-Content $SUM "- $cls repo exists: $(Test-Path $repo)"
-            if (-not (Test-Path $repo)) { throw "$cls repo missing" }
-            $ret = & restic -r $repo snapshots --json 2>$null
-            Add-Content $SUM "- $cls restic snapshots exit=$LASTEXITCODE"
-            if ($LASTEXITCODE -ne 0) { throw "$cls snapshots failed" }
-            $json = ($ret | ForEach-Object { "$_" }) -join "`n"
-            $out = $json | ConvertFrom-Json
-            Add-Content $SUM "- $cls snapshots: $($out.Count)"
-            if ($out.Count -lt 1) { throw "$cls no snapshots" }
+          Start-Transcript -Path "$env:RUNNER_TEMP\transcript.txt" | Out-Null
+          try {
+            $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+            Write-Host "restic: $(restic version 2>&1 | Select-Object -First 1)"
+            .\backup.ps1 -Task Backup 2>&1 | Tee-Object -Variable backupOut
+            Write-Host "backup exit=$LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) { throw "backup.ps1 failed" }
+            Write-Host "=== backup done, asserting snapshots ==="
+            $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
+            $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
+            Write-Host "pass parsed len=$($pass.Length)"
+            if (-not $pass) { throw "no password" }
+            $env:RESTIC_PASSWORD = $pass
+            foreach ($cls in @("config", "files", "system")) {
+              $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
+              Write-Host "$cls repo exists: $(Test-Path $repo)"
+              if (-not (Test-Path $repo)) { throw "$cls repo missing" }
+              $ret = & restic -r $repo snapshots --json 2>$null
+              Write-Host "$cls restic snapshots exit=$LASTEXITCODE"
+              if ($LASTEXITCODE -ne 0) { throw "$cls snapshots failed" }
+              $json = ($ret | ForEach-Object { "$_" }) -join "`n"
+              $out = $json | ConvertFrom-Json
+              Write-Host "$cls snapshots: $($out.Count)"
+              if ($out.Count -lt 1) { throw "$cls no snapshots" }
+            }
+            Write-Host "=== ALL WINDOWS ASSERTIONS PASSED ==="
+          } finally {
+            Stop-Transcript | Out-Null
           }
-          Add-Content $SUM "**ALL WINDOWS ASSERTIONS PASSED**"
-          exit 0
+
+      - name: Push debug logs
+        if: failure()
+        shell: pwsh
+        run: |
+          git config --global user.email "ci@partiverse.local"
+          git config --global user.name "ci-debug"
+          $tok = "${{ github.token }}"
+          $repo = "https://x-access-token:$tok@github.com/${{ github.repository }}.git"
+          if (Test-Path debug) { Remove-Item -Recurse -Force debug }
+          git clone --depth 1 --branch ci-debug $repo debug 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path debug) { Remove-Item -Recurse -Force debug }
+            git clone --depth 1 --branch main $repo debug
+            Push-Location debug
+            git checkout --orphan ci-debug
+            git rm -rf . -q
+          } else { Push-Location debug }
+          New-Item -ItemType Directory -Force -Path logs | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\transcript.txt" logs\ -Force -ErrorAction SilentlyContinue
+          Copy-Item "$env:LOCALAPPDATA\PartiverseBackup\logs\*" logs\ -Force -ErrorAction SilentlyContinue
+          git add -A
+          git commit -m "ci debug dump $(Get-Date -Format o)"
+          git push origin ci-debug
+          Pop-Location
