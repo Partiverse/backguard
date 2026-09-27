@@ -5,8 +5,8 @@
 # 用法: ./backup.sh
 #================================================================
 set -euo pipefail
-# 出错时打印行号与命令（CI 中同时写入 Step Summary，公开可查）
-trap 'error "line ${LINENO}: ${BASH_COMMAND}"; [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "**ERR** line ${LINENO}: \`${BASH_COMMAND}\`" >> "$GITHUB_STEP_SUMMARY"' ERR
+# 出错时打印行号与命令；::error:: 会成为 CI 检查注解（匿名可查）
+trap 'error "line ${LINENO}: ${BASH_COMMAND}"; echo "::error::backup.sh line ${LINENO}: ${BASH_COMMAND}"; [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "**ERR** line ${LINENO}: \`${BASH_COMMAND}\`" >> "$GITHUB_STEP_SUMMARY"' ERR
 
 # ---------- 彩色输出 ----------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'

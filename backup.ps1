@@ -97,6 +97,8 @@ function Start-PartiverseBackup {
     $BACKUP_BASE = "$env:USERPROFILE\PartiverseBackup\repo"
     $RCLONE_LOG = "$LOG_DIR\rclone.log"
     $BACKUP_LOG = "$LOG_DIR\backup.log"
+    # Backup-ResticClass 通过 $env:BACKUP_LOG 引用日志路径
+    $env:BACKUP_LOG = $BACKUP_LOG
 
     New-Item -ItemType Directory -Force -Path $CONF_DIR, $LOG_DIR, $BACKUP_BASE | Out-Null
 
@@ -240,5 +242,14 @@ function Initialize-PartiverseBackup {
 
 switch ($Task) {
     "Init"  { Initialize-PartiverseBackup }
-    "Backup" { Start-PartiverseBackup }
+    "Backup" {
+        try {
+            Start-PartiverseBackup
+        } catch {
+            # CI 可匿名读取 error 注解，本地打印完整堆栈
+            Write-Host "::error::$($_.Exception.Message) @ $($_.InvocationInfo.PositionMessage)"
+            Write-Host $_.ScriptStackTrace
+            exit 1
+        }
+    }
 }
