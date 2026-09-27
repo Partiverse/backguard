@@ -207,9 +207,11 @@ jobs:
           foreach ($cls in @("config", "files", "system")) {
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
             if (-not (Test-Path $repo)) { Write-Output "::error::$cls repo 不存在: $repo"; exit 1 }
-            $ret = & restic -r $repo snapshots --json 2>&1
+            # stderr 落盘，避免污染 JSON 流
+            $errFile = "$env:RUNNER_TEMP\restic-$cls.err"
+            $ret = & restic -r $repo snapshots --json 2>$errFile
             if ($LASTEXITCODE -ne 0) {
-              $msg = ($ret | ForEach-Object { "$_" }) -join ' | '
+              $msg = (Get-Content $errFile -ErrorAction SilentlyContinue) -join ' | '
               Write-Output "::error::$cls restic snapshots 失败: $($msg.Substring(0, [Math]::Min(250, $msg.Length)))"
               exit 1
             }
