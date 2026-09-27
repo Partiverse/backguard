@@ -192,22 +192,32 @@ jobs:
         env:
           SKIP_WEBDAV: "1"
         run: |
-          # GITHUB_PATH 对本进程无效，显式前置 bin 目录
+          # 全程诊断写入 Job Step Summary（check-runs API 匿名可读）
+          $SUM = $env:GITHUB_STEP_SUMMARY
+          Add-Content $SUM "## windows run $(Get-Date -Format o)"
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
-          .\backup.ps1 -Task Backup
+          Add-Content $SUM "restic: $(restic version 2>&1 | Select-Object -First 1)"
+          .\backup.ps1 -Task Backup 2>&1 | Tee-Object -Variable backupOut
+          Add-Content $SUM "backup exit=$LASTEXITCODE"
+          $backupOut | Select-Object -Last 25 | ForEach-Object { Add-Content $SUM "    $_" }
+          if ($LASTEXITCODE -ne 0) { Add-Content $SUM "**backup.ps1 FAILED**"; throw "backup.ps1 failed" }
           Write-Host "=== backup done, asserting snapshots ==="
           $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
-          if (-not $pass) { Write-Error "RESTIC_PASSWORD parse failed"; throw "no password" }
+          Add-Content $SUM "pass parsed len=$($pass.Length)"
+          if (-not $pass) { Add-Content $SUM "**password parse failed**"; throw "no password" }
           $env:RESTIC_PASSWORD = $pass
           foreach ($cls in @("config", "files", "system")) {
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
-            if (-not (Test-Path $repo)) { Write-Error "$cls repo missing: $repo"; throw "repo missing" }
+            Add-Content $SUM "- $cls repo exists: $(Test-Path $repo)"
+            if (-not (Test-Path $repo)) { throw "$cls repo missing" }
             $ret = & restic -r $repo snapshots --json 2>$null
-            if ($LASTEXITCODE -ne 0) { Write-Error "$cls snapshots exit $LASTEXITCODE"; throw "snapshots failed" }
+            Add-Content $SUM "- $cls restic snapshots exit=$LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) { throw "$cls snapshots failed" }
             $json = ($ret | ForEach-Object { "$_" }) -join "`n"
             $out = $json | ConvertFrom-Json
-            Write-Host "$cls: $($out.Count) snapshot(s)"
-            if ($out.Count -lt 1) { Write-Error "$cls no snapshots"; throw "no snapshots" }
+            Add-Content $SUM "- $cls snapshots: $($out.Count)"
+            if ($out.Count -lt 1) { throw "$cls no snapshots" }
           }
-          Write-Host "=== ALL WINDOWS ASSERTIONS PASSED ==="
+          Add-Content $SUM "**ALL WINDOWS ASSERTIONS PASSED**"
+          exit 0
