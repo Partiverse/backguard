@@ -187,73 +187,27 @@ jobs:
           "RESTIC_PASSWORD='ci-$(-join ((1..24) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) }))'" |
             Out-File "$conf\secrets.env" -Encoding utf8
 
-      - name: Run backup
+      - name: Run backup and assert
         shell: pwsh
+        env:
+          SKIP_WEBDAV: "1"
         run: |
           # GITHUB_PATH 对本进程无效，显式前置 bin 目录
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
           .\backup.ps1 -Task Backup
-        env:
-          SKIP_WEBDAV: "1"
-
-      - name: Assert snapshots exist
-        shell: pwsh
-        run: |
-          Start-Transcript -Path "$env:RUNNER_TEMP\assert-transcript.txt" | Out-Null
-          try {
-            Write-Host "MILESTONE 1: start"
-            $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
-            $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
-            $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
-            Write-Host "MILESTONE 2: pass parsed, len=$($pass.Length)"
-            if (-not $pass) { Write-Output "::error::RESTIC_PASSWORD parse failed"; throw "no password" }
-            $env:RESTIC_PASSWORD = $pass
-            Write-Host "repos under $env:RUNNER_TEMP\repos :"
-            Get-ChildItem "$env:RUNNER_TEMP\repos" -Recurse -ErrorAction SilentlyContinue |
-              ForEach-Object { Write-Host "   $($_.FullName)" }
-            foreach ($cls in @("config", "files", "system")) {
-              Write-Host "MILESTONE 3: checking $cls"
-              $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
-              if (-not (Test-Path $repo)) { Write-Output "::error::$cls repo missing: $repo"; throw "repo missing" }
-              $errFile = "$env:RUNNER_TEMP\restic-$cls.err"
-              $ret = & restic -r $repo snapshots --json 2>$errFile
-              Write-Host "MILESTONE 4: $cls restic exit=$LASTEXITCODE rawlines=$(@($ret).Count)"
-              if ($LASTEXITCODE -ne 0) {
-                $msg = (Get-Content $errFile -ErrorAction SilentlyContinue) -join ' | '
-                Write-Output "::error::$cls snapshots failed: $msg"
-                throw "snapshots failed"
-              }
-              $json = ($ret | ForEach-Object { "$_" }) -join "`n"
-              $out = $json | ConvertFrom-Json
-              Write-Host "$cls: $($out.Count) snapshot(s)"
-              if ($out.Count -lt 1) { Write-Output "::error::$cls no snapshots"; throw "no snapshots" }
-            }
-            Write-Host "MILESTONE 5: ALL WINDOWS ASSERTIONS PASSED"
-          } catch {
-            Write-Output "::error::assert exception: $($_.Exception.Message)"
-            throw
-          } finally {
-            Stop-Transcript | Out-Null
+          Write-Host "=== backup done, asserting snapshots ==="
+          $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
+          $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
+          if (-not $pass) { Write-Output "::error::RESTIC_PASSWORD parse failed"; throw "no password" }
+          $env:RESTIC_PASSWORD = $pass
+          foreach ($cls in @("config", "files", "system")) {
+            $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
+            if (-not (Test-Path $repo)) { Write-Output "::error::$cls repo missing: $repo"; throw "repo missing" }
+            $ret = & restic -r $repo snapshots --json 2>$null
+            if ($LASTEXITCODE -ne 0) { Write-Output "::error::$cls snapshots exit $LASTEXITCODE"; throw "snapshots failed" }
+            $json = ($ret | ForEach-Object { "$_" }) -join "`n"
+            $out = $json | ConvertFrom-Json
+            Write-Host "$cls: $($out.Count) snapshot(s)"
+            if ($out.Count -lt 1) { Write-Output "::error::$cls no snapshots"; throw "no snapshots" }
           }
-
-      - name: Push debug artifacts
-        if: failure()
-        shell: pwsh
-        run: |
-          git config --global user.email "ci@partiverse.local"
-          git config --global user.name "ci-debug"
-          $tok = "${{ github.token }}"
-          git clone --depth 1 --branch ci-debug "https://x-access-token:$tok@github.com/${{ github.repository }}.git" debug 2>$null
-          if (-not (Test-Path ".\debug")) {
-            git clone --depth 1 "https://x-access-token:$tok@github.com/${{ github.repository }}.git" debug
-            Push-Location debug
-            git checkout --orphan ci-debug
-            git rm -rf . -q 2>$null
-          } else { Push-Location debug }
-          Copy-Item "$env:RUNNER_TEMP\assert-transcript.txt" . -Force -ErrorAction SilentlyContinue
-          Copy-Item "$env:RUNNER_TEMP\restic-*.err" . -Force -ErrorAction SilentlyContinue
-          Copy-Item "$env:LOCALAPPDATA\PartiverseBackup\logs\*.log" . -Force -ErrorAction SilentlyContinue
-          git add -A
-          git commit -m "ci debug dump $(Get-Date -Format o)"
-          git push origin ci-debug
-          Pop-Location
+          Write-Host "=== ALL WINDOWS ASSERTIONS PASSED ==="
