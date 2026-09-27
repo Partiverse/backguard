@@ -150,7 +150,9 @@ jobs:
             curl.exe -fsSL -o "$env:RUNNER_TEMP\restic.zip" $zipUrl
             if ($LASTEXITCODE -ne 0) { Write-Output "::error::restic 下载失败 exe 与 zip 均失败"; throw "restic download failed" }
             Expand-Archive "$env:RUNNER_TEMP\restic.zip" -DestinationPath $binDir -Force
-            $exe = Get-ChildItem "$binDir" -Recurse -Filter restic.exe | Select-Object -First 1
+            # zip 内文件名为 restic_<ver>_windows_amd64.exe，需改名
+            $exe = Get-ChildItem "$binDir" -Recurse -Filter "restic*.exe" | Select-Object -First 1
+            if (-not $exe) { Write-Output "::error::zip 内未找到 restic 可执行文件"; throw "no restic exe in zip" }
             if ($exe.FullName -ne "$binDir\restic.exe") { Move-Item $exe.FullName "$binDir\restic.exe" -Force }
           }
           if ((Get-Item "$binDir\restic.exe").Length -lt 1MB) { throw "restic.exe 尺寸异常" }

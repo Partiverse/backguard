@@ -25,8 +25,9 @@ function Install-Deps-Windows {
                         curl.exe -fsSL -o "$env:TEMP\restic.zip" "$base/restic_${v}_windows_amd64.zip" 2>&1 | Out-Null
                         if ($LASTEXITCODE -eq 0) {
                             Expand-Archive "$env:TEMP\restic.zip" -DestinationPath "$binDir" -Force
-                            $exe = Get-ChildItem "$binDir" -Recurse -Filter restic.exe | Select-Object -First 1
-                            if ($exe.FullName -ne $out) { Move-Item $exe.FullName $out -Force }
+                            # zip 内文件名为 restic_<ver>_windows_amd64.exe，需改名
+                            $exe = Get-ChildItem "$binDir" -Recurse -Filter "restic*.exe" | Select-Object -First 1
+                            if ($exe -and $exe.FullName -ne $out) { Move-Item $exe.FullName $out -Force }
                         }
                     }
                 } catch {
