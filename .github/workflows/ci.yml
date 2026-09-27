@@ -126,6 +126,8 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -197,28 +199,61 @@ jobs:
       - name: Assert snapshots exist
         shell: pwsh
         run: |
-          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
-          $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
-          $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
-          if (-not $pass) { Write-Output "::error::secrets.env 中未解析到 RESTIC_PASSWORD"; Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" | Write-Host; exit 1 }
-          $env:RESTIC_PASSWORD = $pass
-          Write-Host "repos dir: $env:RUNNER_TEMP\repos"
-          Get-ChildItem "$env:RUNNER_TEMP\repos" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  repo: $($_.Name)" }
-          foreach ($cls in @("config", "files", "system")) {
-            $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
-            if (-not (Test-Path $repo)) { Write-Output "::error::$cls repo 不存在: $repo"; exit 1 }
-            # stderr 落盘，避免污染 JSON 流
-            $errFile = "$env:RUNNER_TEMP\restic-$cls.err"
-            $ret = & restic -r $repo snapshots --json 2>$errFile
-            if ($LASTEXITCODE -ne 0) {
-              $msg = (Get-Content $errFile -ErrorAction SilentlyContinue) -join ' | '
-              Write-Output "::error::$cls restic snapshots 失败: $($msg.Substring(0, [Math]::Min(250, $msg.Length)))"
-              exit 1
+          Start-Transcript -Path "$env:RUNNER_TEMP\assert-transcript.txt" | Out-Null
+          try {
+            Write-Host "MILESTONE 1: start"
+            $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+            $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
+            $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
+            Write-Host "MILESTONE 2: pass parsed, len=$($pass.Length)"
+            if (-not $pass) { Write-Output "::error::RESTIC_PASSWORD parse failed"; throw "no password" }
+            $env:RESTIC_PASSWORD = $pass
+            Write-Host "repos under $env:RUNNER_TEMP\repos :"
+            Get-ChildItem "$env:RUNNER_TEMP\repos" -Recurse -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "   $($_.FullName)" }
+            foreach ($cls in @("config", "files", "system")) {
+              Write-Host "MILESTONE 3: checking $cls"
+              $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
+              if (-not (Test-Path $repo)) { Write-Output "::error::$cls repo missing: $repo"; throw "repo missing" }
+              $errFile = "$env:RUNNER_TEMP\restic-$cls.err"
+              $ret = & restic -r $repo snapshots --json 2>$errFile
+              Write-Host "MILESTONE 4: $cls restic exit=$LASTEXITCODE rawlines=$(@($ret).Count)"
+              if ($LASTEXITCODE -ne 0) {
+                $msg = (Get-Content $errFile -ErrorAction SilentlyContinue) -join ' | '
+                Write-Output "::error::$cls snapshots failed: $msg"
+                throw "snapshots failed"
+              }
+              $json = ($ret | ForEach-Object { "$_" }) -join "`n"
+              $out = $json | ConvertFrom-Json
+              Write-Host "$cls: $($out.Count) snapshot(s)"
+              if ($out.Count -lt 1) { Write-Output "::error::$cls no snapshots"; throw "no snapshots" }
             }
-            # restic 输出多行 JSON；必须先合并为单字符串，逐行管道会给 ConvertFrom-Json 造成逐行解析错误
-            $json = ($ret | ForEach-Object { "$_" }) -join "`n"
-            $out = $json | ConvertFrom-Json
-            Write-Host "$cls: $($out.Count) snapshot(s)"
-            if ($out.Count -lt 1) { Write-Output "::error::$cls 无快照"; exit 1 }
+            Write-Host "MILESTONE 5: ALL WINDOWS ASSERTIONS PASSED"
+          } catch {
+            Write-Output "::error::assert exception: $($_.Exception.Message)"
+            throw
+          } finally {
+            Stop-Transcript | Out-Null
           }
-          Write-Host "ALL WINDOWS ASSERTIONS PASSED"
+
+      - name: Push debug artifacts
+        if: failure()
+        shell: pwsh
+        run: |
+          git config --global user.email "ci@partiverse.local"
+          git config --global user.name "ci-debug"
+          $tok = "${{ github.token }}"
+          git clone --depth 1 --branch ci-debug "https://x-access-token:$tok@github.com/${{ github.repository }}.git" debug 2>$null
+          if (-not (Test-Path ".\debug")) {
+            git clone --depth 1 "https://x-access-token:$tok@github.com/${{ github.repository }}.git" debug
+            Push-Location debug
+            git checkout --orphan ci-debug
+            git rm -rf . -q 2>$null
+          } else { Push-Location debug }
+          Copy-Item "$env:RUNNER_TEMP\assert-transcript.txt" . -Force -ErrorAction SilentlyContinue
+          Copy-Item "$env:RUNNER_TEMP\restic-*.err" . -Force -ErrorAction SilentlyContinue
+          Copy-Item "$env:LOCALAPPDATA\PartiverseBackup\logs\*.log" . -Force -ErrorAction SilentlyContinue
+          git add -A
+          git commit -m "ci debug dump $(Get-Date -Format o)"
+          git push origin ci-debug
+          Pop-Location
