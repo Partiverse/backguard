@@ -1,5 +1,6 @@
 # Partiverse Backup System — Windows 平台 (PowerShell)
 # 使用 restic 作为备份引擎，rclone 同步 WebDAV
+param([string]$Task = "Backup")
 
 # ---------- 依赖安装 ----------
 function Install-Deps-Windows {
@@ -16,7 +17,7 @@ function Install-Deps-Windows {
                 $url = "https://github.com/restic/restic/releases/latest/download/restic_windows_amd64.exe"
                 $out = "$binDir\restic.exe"
                 try {
-                    Invoke-WebRequest $url -OutFile $out -TimeoutSec 30
+                    Invoke-WebRequest $url -OutFile $out -TimeoutSec 120
                 } catch {
                     Write-Warning "下载失败，请手动安装 restic: https://restic.net"
                 }
@@ -25,7 +26,7 @@ function Install-Deps-Windows {
                 $url = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
                 $out = "$env:TEMP\rclone.zip"
                 try {
-                    Invoke-WebRequest $url -OutFile $out -TimeoutSec 60
+                    Invoke-WebRequest $url -OutFile $out -TimeoutSec 120
                     Expand-Archive $out -DestinationPath "$binDir" -Force
                     Move-Item "$binDir\rclone-*-windows-amd64\rclone.exe" "$binDir\rclone.exe" -Force
                 } catch {
@@ -53,7 +54,6 @@ function Setup-Scheduler-Windows {
     Register-ScheduledTask -TaskName $taskName -Action $action `
         -Trigger $trigger -Settings $settings -Force | Out-Null
 
-    Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Write-Host "[Windows] Task Scheduler 任务 '$taskName' 已创建"
 }
 
@@ -63,24 +63,32 @@ function Backup-ResticClass {
 
     Write-Host "[$Class] 归档: $ArcName"
 
-    # 初始化 repo（幂等）
-    $env:RESTIC_PASSWORD = $env:RESTIC_PASSWORD
+    # 初始化 repo（幂等，已初始化则忽略报错）
     & restic -r $RepoPath init 2>&1 | Out-Null
 
-    # 备份
-    $inclKey = "RESTIC_INCLUDES_$Class"
-    $exclKey = "RESTIC_EXCLUDES_$Class"
-    $incl = (Get-Variable $inclKey -ValueOnly -ErrorAction SilentlyContinue) -split ';'
-    $excl = (Get-Variable $exclKey -ValueOnly -ErrorAction SilentlyContinue) -split ';'
+    # includes/excludes：由 config.ps1 dot-source 进本函数作用域
+    $incl = (Get-Variable "RESTIC_INCLUDES_$Class" -ValueOnly -ErrorAction SilentlyContinue) -split ';' |
+        Where-Object { $_ }
+    $excl = (Get-Variable "RESTIC_EXCLUDES_$Class" -ValueOnly -ErrorAction SilentlyContinue) -split ';' |
+        Where-Object { $_ }
 
     $resticArgs = @("-r", $RepoPath, "backup", "--host", $env:DEVICE_ID)
-    foreach ($e in $excl) { if ($e) { $resticArgs += "--exclude"; $resticArgs += $e } }
-    foreach ($i in $incl) { if ($i) { $resticArgs += $i } }
+    foreach ($e in $excl) { $resticArgs += @("--exclude", $e) }
+    foreach ($i in $incl) { $resticArgs += $i }
+
+    if ($incl.Count -eq 0) {
+        Write-Warning "[$Class] 无备份路径，跳过"
+        return
+    }
 
     & restic @resticArgs 2>&1 | Tee-Object -FilePath $env:BACKUP_LOG -Append
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3) {
+        throw "[$Class] restic backup 失败 (exit $LASTEXITCODE)"
+    }
 
-    # 清理
-    & restic -r $RepoPath forget --keep-daily=7 --keep-weekly=4 --keep-monthly=6 2>&1 | Tee-Object -FilePath $env:BACKUP_LOG -Append
+    # 清理：本地保留 7d/4w/6m
+    & restic -r $RepoPath forget --keep-daily=7 --keep-weekly=4 --keep-monthly=6 2>&1 |
+        Tee-Object -FilePath $env:BACKUP_LOG -Append | Out-Null
 }
 
 # ---------- 主函数 ----------
@@ -99,14 +107,14 @@ function Start-PartiverseBackup {
     if (Test-Path "$CONF_DIR\config.ps1") {
         . "$CONF_DIR\config.ps1"
     } else {
-        Write-Error "配置文件不存在，请先运行 init.ps1"
+        Write-Error "配置文件不存在，请先运行 .\backup.ps1 -Task Init"
         exit 1
     }
 
     # 加载密码
     if (Test-Path "$CONF_DIR\secrets.env") {
         Get-Content "$CONF_DIR\secrets.env" | ForEach-Object {
-            if ($_ -match '^(\w+)=(.+)') {
+            if ($_ -match "^(\w+)='(.+)'") {
                 [Environment]::SetEnvironmentVariable($matches[1], $matches[2])
             }
         }
@@ -115,21 +123,34 @@ function Start-PartiverseBackup {
     Write-Host "=== Partiverse Backup STARTED (Windows) ==="
     Write-Host "Device: $env:DEVICE_ID"
 
+    $failed = 0
     $classes = @("config", "files", "system")
     foreach ($cls in $classes) {
         $repo = "$BACKUP_BASE\restic-$cls"
         $arcName = "$env:DEVICE_ID-$cls-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        $remote = "${env:WEBDAV_REMOTE}:${env:WEBDAV_ROOT}${env:SYSTEM_ID}/$cls/"
 
-        Backup-ResticClass -Class $cls -RepoPath $repo -ArcName $arcName
+        try {
+            Backup-ResticClass -Class $cls -RepoPath $repo -ArcName $arcName
 
-        # rclone sync to WebDAV
-        $remote = "WebDAV:${env:WEBDAV_ROOT}${env:SYSTEM_ID}/$cls/"
-        Write-Host "同步 -> $remote"
-        & rclone mkdir $remote 2>$null
-        & rclone sync "$repo/" $remote --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG 2>&1 | Out-Null
+            # 云端用 copy 只增不删（本地已 prune，云端保留全部历史）
+            if ($env:SKIP_WEBDAV -ne "1") {
+                & rclone mkdir $remote 2>$null
+                & rclone copy "$repo/" $remote --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
+                if ($LASTEXITCODE -ne 0) { Write-Warning "[WebDAV] 同步失败" }
+            }
+        } catch {
+            Write-Warning $_
+            $failed++
+        }
     }
 
-    Write-Host "=== Backup FULLY COMPLETE ==="
+    if ($failed -eq 0) {
+        Write-Host "=== Backup FULLY COMPLETE ==="
+    } else {
+        Write-Error "=== Backup FINISHED WITH ERRORS ($failed failed) ==="
+        exit 1
+    }
 }
 
 # ---------- 交互式初始化 ----------
@@ -155,6 +176,7 @@ function Initialize-PartiverseBackup {
     if ($pass1txt -ne $pass2txt) { Write-Error "密码不匹配"; exit 1 }
 
     $webdavUrl = Read-Host "  WebDAV URL [https://webdav.123pan.cn/webdav]"
+    if (-not $webdavUrl) { $webdavUrl = "https://webdav.123pan.cn/webdav" }
     $webdavUser = Read-Host "  WebDAV 用户名"
     $webdavPass = Read-Host "  WebDAV 密码" -AsSecureString
     $bstr3 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($webdavPass)
@@ -165,16 +187,28 @@ function Initialize-PartiverseBackup {
     & rclone config create "Universal Backups" webdav `
         url "$webdavUrl" vendor other user "$webdavUser" pass "$webdavPasstxt" 2>&1 | Out-Null
 
-    $deviceId = "$env:COMPUTERNAME-Windows"
+    $deviceId = "$env:COMPUTERNAME-Windows11"
     $systemId = $deviceId
 
-    # 生成配置
+    # 生成配置（三档案默认路径）
     @"
 `$env:DEVICE_ID = "$deviceId"
 `$env:SYSTEM_ID = "$systemId"
 `$env:BACKUP_BASE = "$BACKUP_BASE"
 `$env:WEBDAV_REMOTE = "Universal Backups"
 `$env:WEBDAV_ROOT = ""
+
+# config: 敏感凭证与应用配置
+`$RESTIC_INCLUDES_config = "$env:USERPROFILE\.ssh;$env:APPDATA"
+`$RESTIC_EXCLUDES_config = "node_modules;__pycache__;Cache;*.log"
+
+# files: 用户数据（Known Folders）
+`$RESTIC_INCLUDES_files = "$([Environment]::GetFolderPath('MyDocuments'));$([Environment]::GetFolderPath('Desktop'));$([Environment]::GetFolderPath('MyPictures'));$([Environment]::GetFolderPath('MyVideos'))"
+`$RESTIC_EXCLUDES_files = "node_modules;__pycache__;*.log"
+
+# system: 系统元数据（初始化时采集）
+`$RESTIC_INCLUDES_system = "$CONF_DIR\system-meta"
+`$RESTIC_EXCLUDES_system = ""
 "@ | Out-File -FilePath "$CONF_DIR\config.ps1" -Encoding utf8
 
     # 密码
@@ -186,18 +220,27 @@ function Initialize-PartiverseBackup {
     # 安装依赖
     Install-Deps-Windows
 
+    # 采集系统元数据
+    $metaDir = "$CONF_DIR\system-meta"
+    New-Item -ItemType Directory -Force -Path $metaDir | Out-Null
+    winget list > "$metaDir\installed-programs.txt" 2>$null
+    Get-Service | Select-Object Name, Status, StartType | Format-Table | Out-String |
+        Out-File "$metaDir\services.txt"
+    Get-CimInstance Win32_VideoController, Win32_DiskDrive |
+        Select-Object Name, Size, DriverVersion | Format-Table | Out-String |
+        Out-File "$metaDir\hardware.txt"
+    bcdedit /v > "$metaDir\bcd.txt" 2>$null
+
     # 调度
     Setup-Scheduler-Windows -ScriptPath "$PSScriptRoot\backup.ps1"
 
     Write-Host ""
     Write-Host "  首次备份..."
-    & "$PSScriptRoot\backup.ps1"
+    & "$PSCommandPath" -Task Backup
     Write-Host ""
     Write-Host "  初始化完成！手动触发: & `"$PSCommandPath`" -Task Backup" -ForegroundColor Green
 }
 
-# 根据参数决定行为
-param([string]$Task = "Backup")
 switch ($Task) {
     "Init"  { Initialize-PartiverseBackup }
     "Backup" { Start-PartiverseBackup }

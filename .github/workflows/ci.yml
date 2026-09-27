@@ -1,0 +1,180 @@
+# Partiverse Backup System — 三平台 CI
+# 真实 OS runner 上验证核心备份流程：装依赖 → 写测试配置 → 跑 backup → 断言归档
+# CI 不触网（SKIP_WEBDAV=1），密码为一次性随机值，仅存于 runner 内存
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq borgbackup rclone shellcheck
+
+      - name: Lint
+        run: shellcheck backup.sh restore.sh platform/linux.sh
+
+      - name: Prepare test config
+        run: |
+          mkdir -p ~/.config/partiverse-backup ~/ci-data/docs ~/ci-data/pics
+          echo "test $(date)" > ~/ci-data/docs/hello.txt
+          echo "pic" > ~/ci-data/pics/pic.txt
+          cat > ~/.config/partiverse-backup/config.sh <<CFG
+          export PLATFORM="linux"
+          export DEVICE_ID="ci-linux"
+          export SYSTEM_ID="ci-linux"
+          export BACKUP_BASE="\$HOME/ci-repos"
+          export RCLONE="\$(command -v rclone)"
+          export BORG="\$(command -v borg)"
+          export RESTIC=""
+          export WEBDAV_REMOTE=""
+          export WEBDAV_ROOT=""
+          declare -A BORG_INCLUDES_config
+          BORG_INCLUDES_config[config]="\$HOME/ci-data/docs/"
+          declare -A BORG_INCLUDES_files
+          BORG_INCLUDES_files[files]="\$HOME/ci-data/pics/"
+          declare -A BORG_INCLUDES_system
+          BORG_INCLUDES_system[system]="\$HOME/ci-data/docs/"
+          declare -A BORG_EXCLUDES_config
+          BORG_EXCLUDES_config[config]="--exclude '**/*.log'"
+          declare -A BORG_EXCLUDES_files
+          BORG_EXCLUDES_files[files]=""
+          declare -A BORG_EXCLUDES_system
+          BORG_EXCLUDES_system[system]=""
+          CFG
+          echo "BORG_PASSPHRASE='ci-$(openssl rand -hex 12)'" > ~/.config/partiverse-backup/secrets.env
+
+      - name: Run backup
+        run: ./backup.sh
+        env:
+          SKIP_WEBDAV: "1"
+
+      - name: Assert archives exist
+        run: |
+          set -euo pipefail
+          source ~/.config/partiverse-backup/secrets.env
+          export BORG_PASSPHRASE
+          for cls in config files system; do
+            count=$(borg list --json "$HOME/ci-repos/borg-$cls" | python3 -c "import sys,json;print(len(json.load(sys.stdin)['archives']))")
+            echo "$cls: $count archive(s)"
+            [ "$count" -ge 1 ] || { echo "::error::$cls 无归档"; exit 1; }
+          done
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: brew install borgbackup rclone
+
+      - name: Prepare test config
+        run: |
+          mkdir -p ~/.config/partiverse-backup ~/ci-data/docs ~/ci-data/pics
+          echo "test $(date)" > ~/ci-data/docs/hello.txt
+          cat > ~/.config/partiverse-backup/config.sh <<CFG
+          export PLATFORM="macos"
+          export DEVICE_ID="ci-macos"
+          export SYSTEM_ID="ci-macos"
+          export BACKUP_BASE="\$HOME/ci-repos"
+          export RCLONE="\$(command -v rclone)"
+          export BORG="\$(command -v borg)"
+          export RESTIC=""
+          export WEBDAV_REMOTE=""
+          export WEBDAV_ROOT=""
+          declare -A BORG_INCLUDES_config
+          BORG_INCLUDES_config[config]="\$HOME/ci-data/docs/"
+          declare -A BORG_INCLUDES_files
+          BORG_INCLUDES_files[files]="\$HOME/ci-data/pics/"
+          declare -A BORG_INCLUDES_system
+          BORG_INCLUDES_system[system]="\$HOME/ci-data/docs/"
+          declare -A BORG_EXCLUDES_config
+          BORG_EXCLUDES_config[config]="--exclude '**/*.log'"
+          declare -A BORG_EXCLUDES_files
+          BORG_EXCLUDES_files[files]=""
+          declare -A BORG_EXCLUDES_system
+          BORG_EXCLUDES_system[system]=""
+          CFG
+          echo "BORG_PASSPHRASE='ci-$(openssl rand -hex 12)'" > ~/.config/partiverse-backup/secrets.env
+
+      - name: Run backup
+        run: ./backup.sh
+        env:
+          SKIP_WEBDAV: "1"
+
+      - name: Assert archives exist
+        run: |
+          set -euo pipefail
+          source ~/.config/partiverse-backup/secrets.env
+          export BORG_PASSPHRASE
+          for cls in config files system; do
+            count=$(borg list "$HOME/ci-repos/borg-$cls" | wc -l | tr -d ' ')
+            echo "$cls: $count archive(s)"
+            [ "$count" -ge 1 ] || { echo "::error::$cls 无归档"; exit 1; }
+          done
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        shell: pwsh
+        run: |
+          $binDir = "$env:RUNNER_TEMP\bin"
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          Invoke-WebRequest "https://github.com/restic/restic/releases/latest/download/restic_windows_amd64.exe" -OutFile "$binDir\restic.exe"
+          Invoke-WebRequest "https://downloads.rclone.org/rclone-current-windows-amd64.zip" -OutFile "$env:RUNNER_TEMP\rclone.zip"
+          Expand-Archive "$env:RUNNER_TEMP\rclone.zip" -DestinationPath $binDir -Force
+          Move-Item "$binDir\rclone-*-windows-amd64\rclone.exe" "$binDir\rclone.exe" -Force
+          Add-Content $env:GITHUB_PATH $binDir
+
+      - name: Prepare test config
+        shell: pwsh
+        run: |
+          $conf = "$env:APPDATA\PartiverseBackup"
+          New-Item -ItemType Directory -Force -Path $conf | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\docs", "$env:RUNNER_TEMP\pics" | Out-Null
+          "test $(Get-Date)" | Out-File "$env:RUNNER_TEMP\docs\hello.txt"
+          @"
+          `$env:DEVICE_ID = "ci-windows"
+          `$env:SYSTEM_ID = "ci-windows"
+          `$env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
+          `$env:WEBDAV_REMOTE = ""
+          `$env:WEBDAV_ROOT = ""
+          `$RESTIC_INCLUDES_config = "$env:RUNNER_TEMP\docs"
+          `$RESTIC_EXCLUDES_config = "*.log"
+          `$RESTIC_INCLUDES_files = "$env:RUNNER_TEMP\pics"
+          `$RESTIC_EXCLUDES_files = ""
+          `$RESTIC_INCLUDES_system = "$env:RUNNER_TEMP\docs"
+          `$RESTIC_EXCLUDES_system = ""
+          "@ | Out-File "$conf\config.ps1" -Encoding utf8
+          "RESTIC_PASSWORD='ci-$(-join ((1..24) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) }))'" |
+            Out-File "$conf\secrets.env" -Encoding utf8
+
+      - name: Run backup
+        shell: pwsh
+        run: .\backup.ps1 -Task Backup
+        env:
+          SKIP_WEBDAV: "1"
+
+      - name: Assert snapshots exist
+        shell: pwsh
+        run: |
+          $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
+          $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
+          $env:RESTIC_PASSWORD = $pass
+          foreach ($cls in @("config", "files", "system")) {
+            $out = restic -r "$env:RUNNER_TEMP\repos\restic-$cls" snapshots --json | ConvertFrom-Json
+            Write-Host "$cls: $($out.Count) snapshot(s)"
+            if ($out.Count -lt 1) { Write-Error "::error::$cls 无快照"; exit 1 }
+          }

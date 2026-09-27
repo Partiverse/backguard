@@ -157,6 +157,7 @@ collect_meta() {
         echo "KERNEL=$(uname -r)"
         "$BORG" --version 2>/dev/null | head -1
         "$RCLONE" --version 2>/dev/null | head -1
+        [[ -n "${DOTFILES_REPO:-}" ]] && echo "DOTFILES_REPO=$DOTFILES_REPO"
         command -v dpkg >/dev/null && dpkg --get-selections 2>/dev/null | awk '$2=="install" {print $1}' > "$meta_dir/packages.txt"
         command -v flatpak >/dev/null && flatpak list 2>/dev/null | awk -F'\t' '{print $2}' > "$meta_dir/flatpak.txt"
         lsblk -f -o NAME,FSTYPE,SIZE,UUID,MOUNTPOINT > "$meta_dir/block-devices.txt" 2>/dev/null || true
@@ -209,12 +210,12 @@ main() {
 
         if [[ "$PLATFORM" == windows ]]; then
             local repo_path="$BACKUP_BASE/restic-$cls"
-            backup_restic_class "$cls" "$repo_path" "$archive_name" "${INCLUDES[$cls]}" || { ((failed++)); continue; }
-            sync_webdav "$repo_path" "$remote"
+            backup_restic_class "$cls" "$repo_path" "$archive_name" || { ((failed++)); continue; }
+            [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo_path" "$remote"
         else
             local repo="$BACKUP_BASE/borg-$cls"
             backup_borg_class "$cls" "$repo" "$archive_name" || { ((failed++)); continue; }
-            sync_webdav "$repo" "$remote"
+            [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo" "$remote"
         fi
     done
 

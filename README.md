@@ -29,11 +29,20 @@ cd ~/partiverse-backup
 
 ## 三档案语义
 
-| 档案 | 内容 | 工具 | 备份频率 |
-|------|------|------|----------|
-| `config` | 敏感配置：SSH 密钥、GPG 密钥、密码管理器、KDE 配置 | borg / restic | 每 6h |
-| `files` | 用户数据：Documents、Desktop、Pictures 等 | borg / restic | 每 6h |
-| `system` | 系统元数据：软件包清单、磁盘布局、fstab、EFI 启动项 | borg / restic | 每 6h |
+三个档案类别在**所有平台上语义一致**，但具体路径因 OS 而异。界定原则：
+
+- **config** = 丢了会很痛、难以从头重建的东西（凭证、密钥、应用配置）。体量小，同步频率最高。
+- **files** = 用户自己产生的数据（文档、图片、视频）。丢失不可再生，是备份的核心目标。
+- **system** = 操作系统层面的"图纸"（元数据、清单、布局）。不追求还原整个 OS，只保证**可照着图纸重建**。
+- **dotfiles** 是 config 的子集：config 档案备份的是**实际部署的文件**（即使 dotfiles 仓库丢了也能恢复）；若使用 dotfiles 仓库管理，则在 `config.sh` 中设置 `DOTFILES_REPO`，其地址会记入 system-meta（恢复时知道去哪 clone，但仓库本身不承担备份职责）。
+
+### 各平台明细
+
+| 档案 | Linux (borg) | macOS (borg) | Windows (restic) |
+|------|-------------|--------------|------------------|
+| **config** | `~/.config/`、`~/.ssh/`、`~/.gnupg/`、Bitwarden/kwalletd/konsole 数据 | `~/.ssh/`、`~/.gnupg/`、`~/Library/Keychains/`、`~/Library/Preferences/` | `%USERPROFILE%\.ssh\`、`%APPDATA%`（选定性） |
+| **files** | `~/Documents`、`~/Desktop`、`~/Pictures` | `~/Documents`、`~/Desktop`、`~/Pictures`、`~/Movies`、`~/Music` | Documents、Desktop、Pictures、Videos（Known Folders） |
+| **system** | `/etc/` + 采集元数据：包清单(dpkg/flatpak/snap)、`lsblk`、`findmnt`、`fstab`、`efibootmgr`、crontab、工具版本 | `system_profiler`、`launchctl list`、`brew list`、软件更新历史 | winget 程序清单、服务列表、硬件/驱动信息、`bcdedit /v` |
 
 ### 档案命名
 
