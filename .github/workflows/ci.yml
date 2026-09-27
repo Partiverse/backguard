@@ -215,7 +215,9 @@ jobs:
               Write-Output "::error::$cls restic snapshots 失败: $($msg.Substring(0, [Math]::Min(250, $msg.Length)))"
               exit 1
             }
-            $out = $ret | ConvertFrom-Json
+            # restic 输出多行 JSON；必须先合并为单字符串，逐行管道会给 ConvertFrom-Json 造成逐行解析错误
+            $json = ($ret | ForEach-Object { "$_" }) -join "`n"
+            $out = $json | ConvertFrom-Json
             Write-Host "$cls: $($out.Count) snapshot(s)"
             if ($out.Count -lt 1) { Write-Output "::error::$cls 无快照"; exit 1 }
           }
