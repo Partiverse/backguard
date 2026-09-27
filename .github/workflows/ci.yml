@@ -150,11 +150,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             Write-Host "exe 资产不可用 (404?)，改用 zip: $zipUrl"
             curl.exe -fsSL -o "$env:RUNNER_TEMP\restic.zip" $zipUrl
-            if ($LASTEXITCODE -ne 0) { Write-Output "::error::restic 下载失败 exe 与 zip 均失败"; throw "restic download failed" }
+            if ($LASTEXITCODE -ne 0) { Write-Error "restic 下载失败 exe 与 zip 均失败"; throw "restic download failed" }
             Expand-Archive "$env:RUNNER_TEMP\restic.zip" -DestinationPath $binDir -Force
             # zip 内文件名为 restic_<ver>_windows_amd64.exe，需改名
             $exe = Get-ChildItem "$binDir" -Recurse -Filter "restic*.exe" | Select-Object -First 1
-            if (-not $exe) { Write-Output "::error::zip 内未找到 restic 可执行文件"; throw "no restic exe in zip" }
+            if (-not $exe) { Write-Error "zip 内未找到 restic 可执行文件"; throw "no restic exe in zip" }
             if ($exe.FullName -ne "$binDir\restic.exe") { Move-Item $exe.FullName "$binDir\restic.exe" -Force }
           }
           if ((Get-Item "$binDir\restic.exe").Length -lt 1MB) { throw "restic.exe 尺寸异常" }
@@ -198,16 +198,16 @@ jobs:
           Write-Host "=== backup done, asserting snapshots ==="
           $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
-          if (-not $pass) { Write-Output "::error::RESTIC_PASSWORD parse failed"; throw "no password" }
+          if (-not $pass) { Write-Error "RESTIC_PASSWORD parse failed"; throw "no password" }
           $env:RESTIC_PASSWORD = $pass
           foreach ($cls in @("config", "files", "system")) {
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
-            if (-not (Test-Path $repo)) { Write-Output "::error::$cls repo missing: $repo"; throw "repo missing" }
+            if (-not (Test-Path $repo)) { Write-Error "$cls repo missing: $repo"; throw "repo missing" }
             $ret = & restic -r $repo snapshots --json 2>$null
-            if ($LASTEXITCODE -ne 0) { Write-Output "::error::$cls snapshots exit $LASTEXITCODE"; throw "snapshots failed" }
+            if ($LASTEXITCODE -ne 0) { Write-Error "$cls snapshots exit $LASTEXITCODE"; throw "snapshots failed" }
             $json = ($ret | ForEach-Object { "$_" }) -join "`n"
             $out = $json | ConvertFrom-Json
             Write-Host "$cls: $($out.Count) snapshot(s)"
-            if ($out.Count -lt 1) { Write-Output "::error::$cls no snapshots"; throw "no snapshots" }
+            if ($out.Count -lt 1) { Write-Error "$cls no snapshots"; throw "no snapshots" }
           }
           Write-Host "=== ALL WINDOWS ASSERTIONS PASSED ==="

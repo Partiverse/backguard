@@ -158,7 +158,7 @@ function Start-PartiverseBackup {
         } catch {
             # ::error:: 注解 CI 匿名可读；附上 backup.log 尾部定位真实原因
             $logTail = try { (Get-Content $env:BACKUP_LOG -Tail 4 -ErrorAction SilentlyContinue) -join ' | ' } catch { '' }
-            Write-Output ("::error::[$cls] " + $_.Exception.Message + " | log: " + $logTail)
+            Write-Error ("[$cls] " + $_.Exception.Message + " | log: " + $logTail)
             $failed++
         }
     }
@@ -266,8 +266,8 @@ switch ($Task) {
             Start-PartiverseBackup
         } catch {
             # ::error:: 注解 CI 匿名可读；本地打印完整堆栈
-            Write-Output "::error::$($_.Exception.Message) @ $($_.InvocationInfo.PositionMessage)"
-            Write-Output "::error::stack: $($_.ScriptStackTrace)"
+            Write-Error "$($_.Exception.Message) @ $($_.InvocationInfo.PositionMessage)"
+            Write-Error "stack: $($_.ScriptStackTrace)"
             exit 1
         }
     }
