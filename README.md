@@ -18,7 +18,7 @@ irm https://raw.githubusercontent.com/Partiverse/backup/main/init.ps1 | iex
 
 或手动克隆：
 ```bash
-git clone https://github.com/Partiverse/backup.git ~/partiverse-backup
+git clone git@github.com:Partiverse/backguard.git.git ~/partiverse-backup
 cd ~/partiverse-backup
 ./init.sh        # Linux / macOS
 # 或

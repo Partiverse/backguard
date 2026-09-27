@@ -12,7 +12,7 @@ echo "  ║   Partiverse Backup System 初始化向导   ║"
 echo "  ╚═══════════════════════════════════════════╝"
 echo -e "${NC}"
 echo "  三平台统一备份: Linux (borg) · macOS (borg) · Windows (restic)"
-echo "  GitHub: https://github.com/Partiverse/backup"
+echo "  GitHub: git@github.com:Partiverse/backguard.git"
 echo ""
 
 # ---------- 平台检测 ----------
