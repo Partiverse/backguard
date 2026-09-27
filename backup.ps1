@@ -110,7 +110,8 @@ function Start-PartiverseBackup {
 
     $CONF_DIR = "$env:APPDATA\PartiverseBackup"
     $LOG_DIR = "$env:LOCALAPPDATA\PartiverseBackup\logs"
-    $BACKUP_BASE = "$env:USERPROFILE\PartiverseBackup\repo"
+    # config.ps1 可通过 $env:BACKUP_BASE 覆盖仓库根目录
+    $BACKUP_BASE = if ($env:BACKUP_BASE) { $env:BACKUP_BASE } else { "$env:USERPROFILE\PartiverseBackup\repo" }
     $RCLONE_LOG = "$LOG_DIR\rclone.log"
     $BACKUP_LOG = "$LOG_DIR\backup.log"
     # Backup-ResticClass 通过 $env:BACKUP_LOG 引用日志路径
