@@ -13,11 +13,17 @@ function Install-Deps-Windows {
         if (-not $exe) {
             Write-Host "[Windows] 安装 $bin..."
             if ($bin -eq "restic") {
-                # 下载 restic Windows amd64（curl.exe 比 Invoke-WebRequest 可靠）
-                $url = "https://github.com/restic/restic/releases/latest/download/restic_windows_amd64.exe"
+                # restic 资产名带版本号，先查 latest 再下载（稳定别名不存在）
                 $out = "$binDir\restic.exe"
-                curl.exe -fsSL -o "$out" "$url" 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) { Write-Warning "下载失败，请手动安装 restic: https://restic.net" }
+                try {
+                    $rel = Invoke-RestMethod "https://api.github.com/repos/restic/restic/releases/latest"
+                    $v = $rel.tag_name.TrimStart('v')
+                    $asset = $rel.assets | Where-Object name -eq "restic_${v}_windows_amd64.exe" | Select-Object -First 1
+                    curl.exe -fsSL -o "$out" $asset.browser_download_url 2>&1 | Out-Null
+                } catch {
+                    Write-Warning "下载失败，请手动安装 restic: https://restic.net"
+                }
+                if (-not (Test-Path $out)) { Write-Warning "restic.exe 未下载成功" }
             } elseif ($bin -eq "rclone") {
                 # rclone Windows
                 $url = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"

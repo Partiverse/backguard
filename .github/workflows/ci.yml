@@ -134,11 +134,17 @@ jobs:
         run: |
           $binDir = "$env:RUNNER_TEMP\bin"
           New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          curl.exe -fsSL -o "$binDir\restic.exe" "https://github.com/restic/restic/releases/latest/download/restic_windows_amd64.exe"
+          # restic 资产名带版本号，需先查 latest 版本
+          $rel = Invoke-RestMethod "https://api.github.com/repos/restic/restic/releases/latest"
+          $v = $rel.tag_name.TrimStart('v')
+          $asset = $rel.assets | Where-Object name -eq "restic_${v}_windows_amd64.exe" | Select-Object -First 1
+          curl.exe -fsSL -o "$binDir\restic.exe" $asset.browser_download_url
+          if (-not (Test-Path "$binDir\restic.exe") -or (Get-Item "$binDir\restic.exe").Length -lt 1MB) { throw "restic.exe 下载失败" }
           curl.exe -fsSL -o "$env:RUNNER_TEMP\rclone.zip" "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
           Expand-Archive "$env:RUNNER_TEMP\rclone.zip" -DestinationPath $binDir -Force
           Move-Item "$binDir\rclone-*-windows-amd64\rclone.exe" "$binDir\rclone.exe" -Force
           Add-Content $env:GITHUB_PATH $binDir
+          & "$binDir\restic.exe" version
 
       - name: Prepare test config
         shell: pwsh
