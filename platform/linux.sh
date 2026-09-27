@@ -23,7 +23,7 @@ install_deps_linux() {
 
 # ---------- 调度设置 ----------
 setup_scheduler_linux() {
-    local script="$1"; local hour="${2:-02}"; local min="${3:-34}"
+    local script="$1"; local min="${3:-34}"
     local unit_dir="$HOME/.config/systemd/user"
     mkdir -p "$unit_dir"
 

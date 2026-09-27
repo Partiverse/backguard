@@ -38,18 +38,12 @@ jobs:
           export RESTIC=""
           export WEBDAV_REMOTE=""
           export WEBDAV_ROOT=""
-          declare -A BORG_INCLUDES_config
-          BORG_INCLUDES_config[config]="\$HOME/ci-data/docs/"
-          declare -A BORG_INCLUDES_files
-          BORG_INCLUDES_files[files]="\$HOME/ci-data/pics/"
-          declare -A BORG_INCLUDES_system
-          BORG_INCLUDES_system[system]="\$HOME/ci-data/docs/"
-          declare -A BORG_EXCLUDES_config
-          BORG_EXCLUDES_config[config]="--exclude '**/*.log'"
-          declare -A BORG_EXCLUDES_files
-          BORG_EXCLUDES_files[files]=""
-          declare -A BORG_EXCLUDES_system
-          BORG_EXCLUDES_system[system]=""
+          BORG_INCLUDES_config=("\$HOME/ci-data/docs/")
+          BORG_EXCLUDES_config=("--exclude" "**/*.log")
+          BORG_INCLUDES_files=("\$HOME/ci-data/pics/")
+          BORG_EXCLUDES_files=()
+          BORG_INCLUDES_system=("\$HOME/ci-data/docs/")
+          BORG_EXCLUDES_system=()
           CFG
           echo "BORG_PASSPHRASE='ci-$(openssl rand -hex 12)'" > ~/.config/partiverse-backup/secrets.env
 
@@ -91,18 +85,12 @@ jobs:
           export RESTIC=""
           export WEBDAV_REMOTE=""
           export WEBDAV_ROOT=""
-          declare -A BORG_INCLUDES_config
-          BORG_INCLUDES_config[config]="\$HOME/ci-data/docs/"
-          declare -A BORG_INCLUDES_files
-          BORG_INCLUDES_files[files]="\$HOME/ci-data/pics/"
-          declare -A BORG_INCLUDES_system
-          BORG_INCLUDES_system[system]="\$HOME/ci-data/docs/"
-          declare -A BORG_EXCLUDES_config
-          BORG_EXCLUDES_config[config]="--exclude '**/*.log'"
-          declare -A BORG_EXCLUDES_files
-          BORG_EXCLUDES_files[files]=""
-          declare -A BORG_EXCLUDES_system
-          BORG_EXCLUDES_system[system]=""
+          BORG_INCLUDES_config=("\$HOME/ci-data/docs/")
+          BORG_EXCLUDES_config=("--exclude" "**/*.log")
+          BORG_INCLUDES_files=("\$HOME/ci-data/pics/")
+          BORG_EXCLUDES_files=()
+          BORG_INCLUDES_system=("\$HOME/ci-data/docs/")
+          BORG_EXCLUDES_system=()
           CFG
           echo "BORG_PASSPHRASE='ci-$(openssl rand -hex 12)'" > ~/.config/partiverse-backup/secrets.env
 
@@ -132,8 +120,8 @@ jobs:
         run: |
           $binDir = "$env:RUNNER_TEMP\bin"
           New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          Invoke-WebRequest "https://github.com/restic/restic/releases/latest/download/restic_windows_amd64.exe" -OutFile "$binDir\restic.exe"
-          Invoke-WebRequest "https://downloads.rclone.org/rclone-current-windows-amd64.zip" -OutFile "$env:RUNNER_TEMP\rclone.zip"
+          curl.exe -fsSL -o "$binDir\restic.exe" "https://github.com/restic/restic/releases/latest/download/restic_windows_amd64.exe"
+          curl.exe -fsSL -o "$env:RUNNER_TEMP\rclone.zip" "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
           Expand-Archive "$env:RUNNER_TEMP\rclone.zip" -DestinationPath $binDir -Force
           Move-Item "$binDir\rclone-*-windows-amd64\rclone.exe" "$binDir\rclone.exe" -Force
           Add-Content $env:GITHUB_PATH $binDir

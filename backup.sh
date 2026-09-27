@@ -5,6 +5,8 @@
 # 用法: ./backup.sh
 #================================================================
 set -euo pipefail
+# 出错时打印行号与命令（CI 中同时写入 Step Summary，公开可查）
+trap 'error "line ${LINENO}: ${BASH_COMMAND}"; [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && echo "**ERR** line ${LINENO}: \`${BASH_COMMAND}\`" >> "$GITHUB_STEP_SUMMARY"' ERR
 
 # ---------- 彩色输出 ----------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -68,8 +70,9 @@ check_deps() {
 # ---------- Borg 备份单档案 ----------
 backup_borg_class() {
     local cls="$1"; local repo="$2"; local arc_name="$3"
-    # nameref: 直接解析 config.sh 中的 BORG_INCLUDES_config / BORG_EXCLUDES_config
+    # nameref 引用 config.sh 中的索引数组 BORG_INCLUDES_$cls / BORG_EXCLUDES_$cls
     local -n inc_ref="BORG_INCLUDES_$cls"
+    # shellcheck disable=SC2154  # exc_ref 经 eval 动态绑定
     eval "local -n exc_ref=\"BORG_EXCLUDES_$cls\""
 
     info "[$cls] 归档: $arc_name"
@@ -80,11 +83,12 @@ backup_borg_class() {
     fi
 
     set +e
+    # shellcheck disable=SC2154  # exc_ref 由上方 eval 动态绑定
     BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" create \
         --stats --compression lz4 \
+        "${exc_ref[@]}" \
         "$repo::$arc_name" \
-        ${inc_ref[@]} \
-        ${exc_ref[@]} \
+        "${inc_ref[@]}" \
         2>&1 | tee -a "$LOG"
     local create_rc=${PIPESTATUS[0]}
     set -e
@@ -104,6 +108,7 @@ backup_borg_class() {
 backup_restic_class() {
     local cls="$1"; local repo_path="$2"; local arc_name="$3"
     local -n inc_ref="RESTIC_INCLUDES_$cls"
+    # shellcheck disable=SC2154  # exc_ref 经 eval 动态绑定
     eval "local -n exc_ref=\"RESTIC_EXCLUDES_$cls\""
 
     info "[$cls] 归档: $arc_name"
@@ -112,10 +117,11 @@ backup_restic_class() {
         grep -v "repository already exists" || true
 
     set +e
+    # shellcheck disable=SC2154  # exc_ref 由上方 eval 动态绑定
     RESTIC_PASSWORD="$RESTIC_PASSWORD" "$RESTIC" backup \
         --host "$DEVICE_ID" \
-        ${inc_ref[@]} \
-        ${exc_ref[@]} \
+        "${exc_ref[@]}" \
+        "${inc_ref[@]}" \
         2>&1 | tee -a "$LOG"
     local rc=${PIPESTATUS[0]}
     set -e
@@ -191,7 +197,8 @@ main() {
 
     if [[ -d "$BACKUP_BASE" ]]; then
         local avail_gb
-        avail_gb=$(df -BG "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {print $4}' | tr -d 'G')
+        # df -Pk 为 POSIX 写法，Linux/macOS/BSD 通用（-BG 是 GNU 专有，macOS 上报错）
+        avail_gb=$(df -Pk "$BACKUP_BASE" 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')
         if [[ "${avail_gb:-0}" -lt 5 ]]; then
             error "磁盘空间不足 (${avail_gb}GB < 5GB)，备份中止"
             exit 1
@@ -205,7 +212,8 @@ main() {
     local failed=0
 
     for cls in config files system; do
-        local archive_name="${DEVICE_ID}-${cls}-$(date +%Y%m%d-%H%M%S)"
+        local archive_name
+        archive_name="${DEVICE_ID}-${cls}-$(date +%Y%m%d-%H%M%S)"
         local remote="${WEBDAV_REMOTE}:${WEBDAV_ROOT}${SYSTEM_ID}/${cls}/"
 
         if [[ "$PLATFORM" == windows ]]; then
