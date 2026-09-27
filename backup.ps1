@@ -265,9 +265,9 @@ switch ($Task) {
         try {
             Start-PartiverseBackup
         } catch {
-            # CI 可匿名读取 error 注解，本地打印完整堆栈
-            Write-Host "::error::$($_.Exception.Message) @ $($_.InvocationInfo.PositionMessage)"
-            Write-Host $_.ScriptStackTrace
+            # ::error:: 注解 CI 匿名可读；本地打印完整堆栈
+            Write-Output "::error::$($_.Exception.Message) @ $($_.InvocationInfo.PositionMessage)"
+            Write-Output "::error::stack: $($_.ScriptStackTrace)"
             exit 1
         }
     }
