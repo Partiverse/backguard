@@ -200,9 +200,21 @@ jobs:
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
           $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
+          if (-not $pass) { Write-Output "::error::secrets.env 中未解析到 RESTIC_PASSWORD"; Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" | Write-Host; exit 1 }
           $env:RESTIC_PASSWORD = $pass
+          Write-Host "repos dir: $env:RUNNER_TEMP\repos"
+          Get-ChildItem "$env:RUNNER_TEMP\repos" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  repo: $($_.Name)" }
           foreach ($cls in @("config", "files", "system")) {
-            $out = restic -r "$env:RUNNER_TEMP\repos\restic-$cls" snapshots --json | ConvertFrom-Json
+            $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
+            if (-not (Test-Path $repo)) { Write-Output "::error::$cls repo 不存在: $repo"; exit 1 }
+            $ret = & restic -r $repo snapshots --json 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $msg = ($ret | ForEach-Object { "$_" }) -join ' | '
+              Write-Output "::error::$cls restic snapshots 失败: $($msg.Substring(0, [Math]::Min(250, $msg.Length)))"
+              exit 1
+            }
+            $out = $ret | ConvertFrom-Json
             Write-Host "$cls: $($out.Count) snapshot(s)"
-            if ($out.Count -lt 1) { Write-Error "::error::$cls 无快照"; exit 1 }
+            if ($out.Count -lt 1) { Write-Output "::error::$cls 无快照"; exit 1 }
           }
+          Write-Host "ALL WINDOWS ASSERTIONS PASSED"
