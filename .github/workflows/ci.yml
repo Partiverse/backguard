@@ -134,12 +134,18 @@ jobs:
         run: |
           $binDir = "$env:RUNNER_TEMP\bin"
           New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          # restic 资产名带版本号，需先查 latest 版本
-          $rel = Invoke-RestMethod "https://api.github.com/repos/restic/restic/releases/latest"
-          $v = $rel.tag_name.TrimStart('v')
-          $asset = $rel.assets | Where-Object name -eq "restic_${v}_windows_amd64.exe" | Select-Object -First 1
-          curl.exe -fsSL -o "$binDir\restic.exe" $asset.browser_download_url
-          if (-not (Test-Path "$binDir\restic.exe") -or (Get-Item "$binDir\restic.exe").Length -lt 1MB) { throw "restic.exe 下载失败" }
+          # restic 资产名带版本号；API 解析失败（限流）时回退固定版本
+          $ver = $null
+          try {
+            $rel = Invoke-RestMethod "https://api.github.com/repos/restic/restic/releases/latest" -TimeoutSec 30
+            $ver = $rel.tag_name.TrimStart('v')
+          } catch { Write-Host "::warning::GitHub API 不可用: $($_.Exception.Message)" }
+          if (-not $ver) { $ver = "0.17.3" }
+          $url = "https://github.com/restic/restic/releases/download/v$ver/restic_${ver}_windows_amd64.exe"
+          Write-Host "downloading $url"
+          curl.exe -fsSL -o "$binDir\restic.exe" $url
+          if ($LASTEXITCODE -ne 0) { Write-Output "::error::restic.exe 下载失败 (url=$url, exit=$LASTEXITCODE)"; throw "restic download failed" }
+          if ((Get-Item "$binDir\restic.exe").Length -lt 1MB) { throw "restic.exe 尺寸异常" }
           curl.exe -fsSL -o "$env:RUNNER_TEMP\rclone.zip" "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
           Expand-Archive "$env:RUNNER_TEMP\rclone.zip" -DestinationPath $binDir -Force
           Move-Item "$binDir\rclone-*-windows-amd64\rclone.exe" "$binDir\rclone.exe" -Force
