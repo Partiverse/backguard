@@ -155,6 +155,8 @@ collect_meta() {
         echo "OS=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
         echo "HOSTNAME=$(hostname)"
         echo "KERNEL=$(uname -r)"
+        "$BORG" --version 2>/dev/null | head -1
+        "$RCLONE" --version 2>/dev/null | head -1
         command -v dpkg >/dev/null && dpkg --get-selections 2>/dev/null | awk '$2=="install" {print $1}' > "$meta_dir/packages.txt"
         command -v flatpak >/dev/null && flatpak list 2>/dev/null | awk -F'\t' '{print $2}' > "$meta_dir/flatpak.txt"
         lsblk -f -o NAME,FSTYPE,SIZE,UUID,MOUNTPOINT > "$meta_dir/block-devices.txt" 2>/dev/null || true
