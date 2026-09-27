@@ -13,13 +13,22 @@ function Install-Deps-Windows {
         if (-not $exe) {
             Write-Host "[Windows] 安装 $bin..."
             if ($bin -eq "restic") {
-                # restic 资产名带版本号，先查 latest 再下载（稳定别名不存在）
+                # restic 0.19+ Windows 资产为 .zip（旧版为 .exe），先查 latest 再下载
                 $out = "$binDir\restic.exe"
                 try {
                     $rel = Invoke-RestMethod "https://api.github.com/repos/restic/restic/releases/latest"
                     $v = $rel.tag_name.TrimStart('v')
-                    $asset = $rel.assets | Where-Object name -eq "restic_${v}_windows_amd64.exe" | Select-Object -First 1
-                    curl.exe -fsSL -o "$out" $asset.browser_download_url 2>&1 | Out-Null
+                    $base = "https://github.com/restic/restic/releases/download/v$v"
+                    curl.exe -fsSL -o "$out" "$base/restic_${v}_windows_amd64.exe" 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        # 新版只有 zip
+                        curl.exe -fsSL -o "$env:TEMP\restic.zip" "$base/restic_${v}_windows_amd64.zip" 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) {
+                            Expand-Archive "$env:TEMP\restic.zip" -DestinationPath "$binDir" -Force
+                            $exe = Get-ChildItem "$binDir" -Recurse -Filter restic.exe | Select-Object -First 1
+                            Move-Item $exe.FullName "$out" -Force
+                        }
+                    }
                 } catch {
                     Write-Warning "下载失败，请手动安装 restic: https://restic.net"
                 }
