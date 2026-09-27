@@ -4,25 +4,21 @@
 
 # ---------- 依赖安装 ----------
 install_deps_linux() {
-    local pkgs=(borgbackup rclone fuse)
-    local missing=()
-    for pkg in "${pkgs[@]}"; do
-        command -v "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+    # 优先检查非标准路径（二进制直接放在 ~/bin 或项目内），其次 apt/dnf
+    # 二进制在 PATH 中即可用，不需要 apt-get 重复装
+    for bin in borg rclone; do
+        if command -v "$bin" >/dev/null 2>&1; then
+            continue
+        fi
+        for extra in "$HOME/bin" "$HOME/bin/$bin"* "$HOME/.local/bin"; do
+            [[ -x "$extra" ]] && continue 2
+        done
+        # 确实缺失，尝试 apt 安装
+        echo "[Linux] 安装缺失依赖: $bin"
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y "$bin" 2>/dev/null || true
+        fi
     done
-    [[ ${#missing[@]} -eq 0 ]] && return 0
-
-    echo "[Linux] 安装缺失依赖: ${missing[*]}"
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update -qq
-        sudo apt-get install -y "${missing[@]}"
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y "${missing[@]}"
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm "${missing[@]}"
-    else
-        echo "FATAL: 不支持的包管理器，请手动安装: ${missing[*]}"
-        return 1
-    fi
 }
 
 # ---------- 调度设置 ----------

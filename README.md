@@ -18,7 +18,7 @@ irm https://raw.githubusercontent.com/Partiverse/backguard/main/init.ps1 | iex
 
 或手动克隆：
 ```bash
-git clone git@github.com:Partiverse/backguard.git.git ~/partiverse-backup
+git clone git@github.com:Partiverse/backguard.git ~/partiverse-backup
 cd ~/partiverse-backup
 ./init.sh        # Linux / macOS
 # 或
@@ -67,6 +67,19 @@ DESKTOP-WIN11-Windows11    # Windows
     files/
     system/
 ```
+
+---
+
+## 保留策略（两层差异化）
+
+| 层 | 策略 | 原理 |
+|----|------|------|
+| **本地**（备份盘） | borg/restic prune：保留最近 **7 天每日 + 4 周每周 + 6 个月每月** | 本地空间有限，只留周期性快照，超出自动清理 |
+| **云端**（WebDAV/123Pan） | **永不删除**，只增不减 | 云端空间充裕（20TB+），保留全部历史作为最终防线 |
+
+实现方式：本地每次备份后执行 `borg prune`（或 restic forget）；云端用 `rclone copy` 而非 `sync`——`sync` 会把本地 prune 掉的归档同步删除到云端，`copy` 则只增不删，云端历史完整保留。
+
+> 若云端空间将来吃紧，可对云端仓库单独执行低频 prune（如 `--keep-monthly=24`），但脚本默认不做。
 
 ---
 
