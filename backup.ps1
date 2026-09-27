@@ -26,7 +26,7 @@ function Install-Deps-Windows {
                         if ($LASTEXITCODE -eq 0) {
                             Expand-Archive "$env:TEMP\restic.zip" -DestinationPath "$binDir" -Force
                             $exe = Get-ChildItem "$binDir" -Recurse -Filter restic.exe | Select-Object -First 1
-                            Move-Item $exe.FullName "$out" -Force
+                            if ($exe.FullName -ne $out) { Move-Item $exe.FullName $out -Force }
                         }
                     }
                 } catch {
