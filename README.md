@@ -8,12 +8,12 @@
 
 **Linux / macOS**
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Partiverse/backup/main/init.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Partiverse/backguard/main/init.sh)"
 ```
 
 **Windows** (PowerShell)
 ```powershell
-irm https://raw.githubusercontent.com/Partiverse/backup/main/init.ps1 | iex
+irm https://raw.githubusercontent.com/Partiverse/backguard/main/init.ps1 | iex
 ```
 
 或手动克隆：
