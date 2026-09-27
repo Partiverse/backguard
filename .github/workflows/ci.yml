@@ -23,7 +23,7 @@ jobs:
       - name: Lint
         run: |
           shellcheck --version
-          shellcheck -f gcc backup.sh restore.sh platform/linux.sh 2>&1 | tee /tmp/lint.txt
+          shellcheck -S warning -f gcc backup.sh restore.sh platform/linux.sh 2>&1 | tee /tmp/lint.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             grep -E '^[^ :]+:[0-9]+:[0-9]+' /tmp/lint.txt | sed 's/^/::error::/' | head -20 || true

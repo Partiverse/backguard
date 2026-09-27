@@ -139,7 +139,9 @@ function Start-PartiverseBackup {
                 if ($LASTEXITCODE -ne 0) { Write-Warning "[WebDAV] 同步失败" }
             }
         } catch {
-            Write-Warning $_
+            # ::error:: 注解 CI 匿名可读；附上 backup.log 尾部定位真实原因
+            $logTail = try { (Get-Content $env:BACKUP_LOG -Tail 4 -ErrorAction SilentlyContinue) -join ' | ' } catch { '' }
+            Write-Output ("::error::[$cls] " + $_.Exception.Message + " | log: " + $logTail)
             $failed++
         }
     }

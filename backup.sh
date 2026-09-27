@@ -94,7 +94,9 @@ backup_borg_class() {
     set -e
 
     if [[ $create_rc -ne 0 && $create_rc -ne 1 ]]; then
-        error "[$cls] borg create 失败 (exit $create_rc)"; return 1
+        error "[$cls] borg create 失败 (exit $create_rc)"
+        echo "::error::[$cls] borg create exit $create_rc ($PLATFORM, line $LINENO)"
+        return 1
     fi
     [[ $create_rc -eq 1 ]] && warn "[$cls] 部分路径不存在（已归档）"
 
@@ -218,11 +220,11 @@ main() {
 
         if [[ "$PLATFORM" == windows ]]; then
             local repo_path="$BACKUP_BASE/restic-$cls"
-            backup_restic_class "$cls" "$repo_path" "$archive_name" || { ((failed++)); continue; }
+            backup_restic_class "$cls" "$repo_path" "$archive_name" || { failed=$((failed+1)); continue; }
             [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo_path" "$remote"
         else
             local repo="$BACKUP_BASE/borg-$cls"
-            backup_borg_class "$cls" "$repo" "$archive_name" || { ((failed++)); continue; }
+            backup_borg_class "$cls" "$repo" "$archive_name" || { failed=$((failed+1)); continue; }
             [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo" "$remote"
         fi
     done
