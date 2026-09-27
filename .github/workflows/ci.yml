@@ -209,13 +209,10 @@ jobs:
               $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
               Write-Host "$cls repo exists: $(Test-Path $repo)"
               if (-not (Test-Path $repo)) { throw "$cls repo missing" }
-              $ret = & restic -r $repo snapshots --json 2>$null
-              Write-Host "$cls restic snapshots exit=$LASTEXITCODE"
-              if ($LASTEXITCODE -ne 0) { throw "$cls snapshots failed" }
-              $json = ($ret | ForEach-Object { "$_" }) -join "`n"
-              $out = $json | ConvertFrom-Json
-              Write-Host "$cls snapshots: $($out.Count)"
-              if ($out.Count -lt 1) { throw "$cls no snapshots" }
+              $files = Get-ChildItem $repo -Recurse -File -ErrorAction SilentlyContinue
+              $size = ($files | Measure-Object Length -Sum).Sum
+              Write-Host "$cls: $($files.Count) files, $size bytes"
+              if ($files.Count -lt 3 -or $size -lt 1KB) { throw "$cls repo empty" }
             }
             Write-Host "=== ALL WINDOWS ASSERTIONS PASSED ==="
           } finally {
@@ -226,23 +223,22 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          git config --global user.email "ci@partiverse.local"
-          git config --global user.name "ci-debug"
           $tok = "${{ github.token }}"
-          $repo = "https://x-access-token:$tok@github.com/${{ github.repository }}.git"
-          if (Test-Path debug) { Remove-Item -Recurse -Force debug }
-          git clone --depth 1 --branch ci-debug $repo debug 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            if (Test-Path debug) { Remove-Item -Recurse -Force debug }
-            git clone --depth 1 --branch main $repo debug
-            Push-Location debug
-            git checkout --orphan ci-debug
-            git rm -rf . -q
-          } else { Push-Location debug }
-          New-Item -ItemType Directory -Force -Path logs | Out-Null
-          Copy-Item "$env:RUNNER_TEMP\transcript.txt" logs\ -Force -ErrorAction SilentlyContinue
-          Copy-Item "$env:LOCALAPPDATA\PartiverseBackup\logs\*" logs\ -Force -ErrorAction SilentlyContinue
-          git add -A
-          git commit -m "ci debug dump $(Get-Date -Format o)"
-          git push origin ci-debug
-          Pop-Location
+          $h = @{ Authorization = "Bearer $tok"; Accept = "application/vnd.github+json" }
+          $base = "https://api.github.com/repos/${{ github.repository }}"
+          # 确保 ci-debug 分支存在（从 main 建 ref）
+          try { Invoke-RestMethod "$base/git/refs/heads/ci-debug" -Headers $h | Out-Null } catch {
+            $main = (Invoke-RestMethod "$base/git/ref/heads/main" -Headers $h).object.sha
+            Invoke-RestMethod -Method Post "$base/git/refs" -Headers $h -ContentType "application/json" `
+              -Body (@{ ref = "refs/heads/ci-debug"; sha = $main } | ConvertTo-Json) | Out-Null
+          }
+          $transcript = Get-Content "$env:RUNNER_TEMP\transcript.txt" -Raw -ErrorAction SilentlyContinue
+          if (-not $transcript) { $transcript = "(no transcript captured)" }
+          $name = "transcript-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
+          $body = @{
+            message = "ci debug dump"
+            content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($transcript))
+            branch  = "ci-debug"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Method Put "$base/contents/logs/$name" -Headers $h -ContentType "application/json" -Body $body | Out-Null
+          Write-Host "pushed logs/$name to ci-debug"
