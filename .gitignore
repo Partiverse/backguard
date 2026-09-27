@@ -1,0 +1,20 @@
+# 凭证与本地数据（永不上传）
+secrets.env
+*.log
+rclone.conf
+
+# 本地缓存
+.cache/
+.local/share/partiverse-backup/
+tmp/
+
+# macOS
+.DS_Store
+Library/LaunchAgents/com.partiverse.backup.plist
+
+# Windows
+AppData/Roaming/PartiverseBackup/
+AppData/Local/PartiverseBackup/
+
+# 恢复测试输出
+restore-test/
