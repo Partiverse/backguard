@@ -1,4 +1,4 @@
-# Partiverse Backup System
+# Backup scripts across all platforms
 
 三平台统一备份系统：Linux · macOS · Windows，自动检测安装依赖、交互初始化、三档案语义化加密备份到 WebDAV。
 
