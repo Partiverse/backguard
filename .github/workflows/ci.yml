@@ -193,28 +193,23 @@ jobs:
           SKIP_WEBDAV: "1"
         run: |
           $diag = "$env:RUNNER_TEMP\diag.txt"
-          $out  = "$env:RUNNER_TEMP\output.txt"
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
           "=== start $(Get-Date -Format u) ===" | Out-File $diag -Encoding utf8
 
-          # Start-Process -Wait 直接暴露 ExitCode，不会被 try/catch 吞掉
-          $p = Start-Process -FilePath "pwsh" `
-            -ArgumentList "-NoProfile -File `"$PWD\backup.ps1`" -Task Backup" `
-            -NoNewWindow -Wait -PassThru `
-            -RedirectStandardOutput $out `
-            -RedirectStandardError "$env:RUNNER_TEMP\err.txt"
-          $code = $p.ExitCode
+          # 直接 & 调用：exit 1 会抛 ExitException，被本层 catch 捕获，$LASTEXITCODE 即为真实退出码
+          # 全部输出同时 Tee 到 diag（Write-Host 也走这个流）
+          $code = 0
+          try {
+            & "$PWD\backup.ps1" -Task Backup 2>&1 | Tee-Object -FilePath $diag -Append | ForEach-Object { $_ }
+            $code = $LASTEXITCODE
+          } catch [System.Management.Automation.ExitException] {
+            $code = $_.Exception.ExitCode
+          } catch {
+            $code = 1
+          }
           "exit=$code" | Out-File $diag -Append -Encoding utf8
           Write-Host "backup.ps1 exited code=$code"
-
-          # 尾部写入 diag（供 release 上传）
-          Get-Content $out -ErrorAction SilentlyContinue | Select-Object -Last 15 |
-            ForEach-Object { $_ | Out-File $diag -Append -Encoding utf8; Write-Host $_ }
-
-          if ($code -ne 0) {
-            Write-Error "backup.ps1 failed with exit=$code"
-            throw "backup.ps1 failed (exit $code)"
-          }
+          if ($code -ne 0) { throw "backup.ps1 failed (exit $code)" }
 
           # 快照断言
           Write-Host "=== backup done, asserting snapshots ==="
