@@ -217,7 +217,9 @@ jobs:
           $lines += "exit=$code"
 
           if ($code -ne 0) {
-            Write-Output "::error::backup.ps1 failed with exit=$code"
+            # Write-Host 写 host stream，可被 GitHub Actions 捕获为注解，且不会提前终止 step
+            Write-Host "::error::backup.ps1 failed with exit=$code"
+            $lines += "ERROR backup failed code=$code"
             $lines | Out-File $logFile -Encoding utf8
             throw "backup.ps1 failed (exit $code)"
           }
@@ -226,17 +228,15 @@ jobs:
           $secretsPath = "$env:APPDATA\PartiverseBackup\secrets.env"
           $lines += "ASSERT reading secrets from $secretsPath"
           if (-not (Test-Path $secretsPath)) {
-            Write-Output "::error::secrets.env not found at $secretsPath"
-            $lines | Out-File $logFile -Encoding utf8
-            throw "secrets.env missing"
+            Write-Host "::error::secrets.env not found"
+            $lines += "ERROR secrets missing"; $lines | Out-File $logFile -Encoding utf8; throw "secrets.env missing"
           }
           $secrets = Get-Content $secretsPath -Raw
           $lines += "ASSERT secrets length=$($secrets.Length)"
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
           if (-not $pass) {
-            Write-Output "::error::password regex failed on: $secrets"
-            $lines | Out-File $logFile -Encoding utf8
-            throw "password parse failed"
+            Write-Host "::error::password regex failed"
+            $lines += "ERROR password parse failed"; $lines | Out-File $logFile -Encoding utf8; throw "password parse failed"
           }
           $lines += "ASSERT pass len=$($pass.Length)"
           $env:RESTIC_PASSWORD = $pass
@@ -245,21 +245,20 @@ jobs:
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
             $lines += "ASSERT $cls checking repo=$repo"
             if (-not (Test-Path $repo)) {
-              Write-Output "::error::ASSERT $cls repo missing"
-              $lines | Out-File $logFile -Encoding utf8
-              throw "$cls repo missing"
+              Write-Host "::error::ASSERT $cls repo missing"
+              $lines += "ERROR $cls repo missing"; $lines | Out-File $logFile -Encoding utf8; throw "$cls repo missing"
             }
             $files = @(Get-ChildItem $repo -Recurse -File -ErrorAction SilentlyContinue)
             $size  = if ($files.Count -gt 0) { ($files | Measure-Object Length -Sum).Sum } else { 0 }
             $lines += "ASSERT $cls : $($files.Count) files, $size bytes"
             if ($files.Count -lt 1 -or $size -lt 1) {
-              Write-Output "::error::ASSERT $cls repo empty"
-              $lines | Out-File $logFile -Encoding utf8
-              throw "$cls repo empty"
+              Write-Host "::error::ASSERT $cls repo empty (files=$($files.Count) size=$size)"
+              $lines += "ERROR $cls repo empty"; $lines | Out-File $logFile -Encoding utf8; throw "$cls repo empty"
             }
           }
           $lines += "=== ALL WINDOWS ASSERTIONS PASSED ==="
           $lines | Out-File $logFile -Encoding utf8
+          Write-Host "=== ALL WINDOWS ASSERTIONS PASSED ==="
 
       - name: Push debug logs
         if: failure()
