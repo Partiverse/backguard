@@ -194,42 +194,42 @@ jobs:
         run: |
           $diag = "$env:RUNNER_TEMP\diag.txt"
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
-          "=== start $(Get-Date -Format u) ===" | Out-File $diag -Encoding utf8
+          # UTF-8 NoBOM：Out-File 默认 UTF-8 with BOM，改用 ascii 避免 BOM 追加破坏
+          "=== start $(Get-Date -Format u) ===" | Out-File $diag -Encoding ascii
 
           # 调用 backup.ps1：exit 1 抛 ExitException 被本层 catch 捕获
           $code = 0
           try {
-            & "$PWD\backup.ps1" -Task Backup 2>&1 | Tee-Object -FilePath $diag -Append | ForEach-Object { $_ }
+            & "$PWD\backup.ps1" -Task Backup 2>&1 | Tee-Object -FilePath $diag -Append -Encoding ascii | ForEach-Object { $_ }
             $code = $LASTEXITCODE
           } catch [System.Management.Automation.ExitException] {
             $code = $_.Exception.ExitCode
           } catch {
             $code = 1
           }
-          "exit=$code" | Out-File $diag -Append -Encoding utf8
-          # Write-Output 写 stdout，可被 2>&1 管道捕获；Write-Host 写 host stream 捕获不到
-          "CHECKPOINT backup done code=$code" | Out-File $diag -Append -Encoding utf8
+          "exit=$code" | Out-File $diag -Append -Encoding ascii
+          "CHECKPOINT backup done code=$code" | Out-File $diag -Append -Encoding ascii
 
           if ($code -ne 0) { throw "backup.ps1 failed (exit $code)" }
 
-          # 快照断言（全部用 Write-Output 而非 Write-Host，确保 diag 可捕获）
-          "ASSERT checking secrets..." | Out-File $diag -Append -Encoding utf8
+          # 快照断言
+          "ASSERT checking secrets..." | Out-File $diag -Append -Encoding ascii
           $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw -ErrorAction Stop
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
           if (-not $pass) { throw "no password parsed from secrets.env" }
-          "ASSERT pass len=$($pass.Length)" | Out-File $diag -Append -Encoding utf8
+          "ASSERT pass len=$($pass.Length)" | Out-File $diag -Append -Encoding ascii
           $env:RESTIC_PASSWORD = $pass
 
           foreach ($cls in @("config", "files", "system")) {
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
-            "ASSERT checking $cls repo=$repo" | Out-File $diag -Append -Encoding utf8
+            "ASSERT checking $cls repo=$repo" | Out-File $diag -Append -Encoding ascii
             if (-not (Test-Path $repo)) { throw "$cls repo missing at $repo" }
             $files = Get-ChildItem $repo -Recurse -File -ErrorAction SilentlyContinue
             $size  = ($files | Measure-Object Length -Sum).Sum
-            "ASSERT $cls : $($files.Count) files, $size bytes" | Out-File $diag -Append -Encoding utf8
+            "ASSERT $cls : $($files.Count) files, $size bytes" | Out-File $diag -Append -Encoding ascii
             if ($files.Count -lt 3 -or $size -lt 1KB) { throw "$cls repo empty (files=$($files.Count) size=$size)" }
           }
-          "=== ALL WINDOWS ASSERTIONS PASSED ===" | Out-File $diag -Append -Encoding utf8
+          "=== ALL WINDOWS ASSERTIONS PASSED ===" | Out-File $diag -Append -Encoding ascii
 
       - name: Push debug logs
         if: failure()
