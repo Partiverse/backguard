@@ -193,6 +193,9 @@ jobs:
           SKIP_WEBDAV: "1"
         run: |
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          # 必须与 config.ps1 里的 $env:BACKUP_BASE 一致（config.ps1 用了 $env:RUNNER_TEMP\repos）
+          # backup.ps1 会读取 $env:BACKUP_BASE 来决定 repo 路径
+          $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
           $logFile = "$env:RUNNER_TEMP\diag.txt"
 
           # 收集所有输出，最后一次性写入文件（避免追加管道破坏文件）
