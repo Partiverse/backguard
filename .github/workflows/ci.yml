@@ -197,24 +197,19 @@ jobs:
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
           "=== start $(Get-Date -Format u) ===" | Out-File $diag -Encoding utf8
 
-          # 子进程调用：exit 1 不会杀死本进程，Stop-Transcript 能正常落地
-          $job = Start-Job -ScriptBlock {
-            $env:PATH = "$using:env:PATH"
-            $env:RESTIC_PASSWORD = "$using:env:RESTIC_PASSWORD"
-            $env:SKIP_WEBDAV = "$using:env:SKIP_WEBDAV"
-            $env:BACKUP_BASE = "$using:env:BACKUP_BASE"
-            $script = "$using:PWD\backup.ps1"
-            & pwsh -NoProfile -File $script -Task Backup 2>&1
-          }
-          $stream = Receive-Job $job -Wait
-          $code   = $job.ChildJobs[0].ExitCode
-          Remove-Job $job -Force
-
-          $stream | Tee-Object -FilePath $out -Encoding utf8 | Select-Object -Last 10 | ForEach-Object {
-            $_ | Out-File $diag -Append -Encoding utf8
-            Write-Host $_
-          }
+          # Start-Process -Wait 直接暴露 ExitCode，不会被 try/catch 吞掉
+          $p = Start-Process -FilePath "pwsh" `
+            -ArgumentList "-NoProfile -File `"$PWD\backup.ps1`" -Task Backup" `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $out `
+            -RedirectStandardError "$env:RUNNER_TEMP\err.txt"
+          $code = $p.ExitCode
           "exit=$code" | Out-File $diag -Append -Encoding utf8
+          Write-Host "backup.ps1 exited code=$code"
+
+          # 尾部写入 diag（供 release 上传）
+          Get-Content $out -ErrorAction SilentlyContinue | Select-Object -Last 15 |
+            ForEach-Object { $_ | Out-File $diag -Append -Encoding utf8; Write-Host $_ }
 
           if ($code -ne 0) {
             Write-Error "backup.ps1 failed with exit=$code"
