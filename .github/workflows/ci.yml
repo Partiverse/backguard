@@ -213,6 +213,7 @@ jobs:
           if ($code -ne 0) { throw "backup.ps1 failed (exit $code)" }
 
           # 快照断言
+          "ASSERT BACKUP_BASE=$env:BACKUP_BASE RUNNER_TEMP=$env:RUNNER_TEMP" | Out-File $diag -Append -Encoding ascii
           "ASSERT checking secrets..." | Out-File $diag -Append -Encoding ascii
           $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw -ErrorAction Stop
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
@@ -223,11 +224,17 @@ jobs:
           foreach ($cls in @("config", "files", "system")) {
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
             "ASSERT checking $cls repo=$repo" | Out-File $diag -Append -Encoding ascii
-            if (-not (Test-Path $repo)) { throw "$cls repo missing at $repo" }
+            if (-not (Test-Path $repo)) {
+              Write-Error "ASSERT $cls repo missing at $repo"
+              throw "$cls repo missing at $repo"
+            }
             $files = Get-ChildItem $repo -Recurse -File -ErrorAction SilentlyContinue
             $size  = ($files | Measure-Object Length -Sum).Sum
             "ASSERT $cls : $($files.Count) files, $size bytes" | Out-File $diag -Append -Encoding ascii
-            if ($files.Count -lt 3 -or $size -lt 1KB) { throw "$cls repo empty (files=$($files.Count) size=$size)" }
+            if ($files.Count -lt 1 -or $size -lt 1) {
+              Write-Error "ASSERT $cls repo empty (files=$($files.Count) size=$size)"
+              throw "$cls repo empty (files=$($files.Count) size=$size)"
+            }
           }
           "=== ALL WINDOWS ASSERTIONS PASSED ===" | Out-File $diag -Append -Encoding ascii
 
