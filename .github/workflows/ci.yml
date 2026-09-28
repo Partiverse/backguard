@@ -192,51 +192,64 @@ jobs:
         env:
           SKIP_WEBDAV: "1"
         run: |
-          $diag = "$env:RUNNER_TEMP\diag.txt"
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
-          # UTF-8 NoBOM：Out-File 默认 UTF-8 with BOM，改用 ascii 避免 BOM 追加破坏
-          "=== start $(Get-Date -Format u) ===" | Out-File $diag -Encoding ascii
+          $logFile = "$env:RUNNER_TEMP\diag.txt"
 
-          # 调用 backup.ps1：exit 1 抛 ExitException 被本层 catch 捕获
+          # 收集所有输出，最后一次性写入文件（避免追加管道破坏文件）
+          $lines = @()
+          $errLog = @()
+
+          $lines += "=== start $(Get-Date -Format u) ==="
+
+          # 调用 backup.ps1
           $code = 0
           try {
-            & "$PWD\backup.ps1" -Task Backup 2>&1 | Tee-Object -FilePath $diag -Append -Encoding ascii | ForEach-Object { $_ }
+            $out = & "$PWD\backup.ps1" -Task Backup 2>&1
             $code = $LASTEXITCODE
+            $out | ForEach-Object { $lines += $_ }
           } catch [System.Management.Automation.ExitException] {
             $code = $_.Exception.ExitCode
+            $lines += "ExitException caught code=$code"
           } catch {
+            $lines += "catch: $($_.Exception.Message)"
             $code = 1
           }
-          "exit=$code" | Out-File $diag -Append -Encoding ascii
-          "CHECKPOINT backup done code=$code" | Out-File $diag -Append -Encoding ascii
+          $lines += "exit=$code"
 
-          if ($code -ne 0) { throw "backup.ps1 failed (exit $code)" }
+          if ($code -ne 0) {
+            Write-Output "::error::backup.ps1 failed with exit=$code"
+            $lines | Out-File $logFile -Encoding utf8
+            throw "backup.ps1 failed (exit $code)"
+          }
 
           # 快照断言
-          "ASSERT BACKUP_BASE=$env:BACKUP_BASE RUNNER_TEMP=$env:RUNNER_TEMP" | Out-File $diag -Append -Encoding ascii
-          "ASSERT checking secrets..." | Out-File $diag -Append -Encoding ascii
           $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw -ErrorAction Stop
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
-          if (-not $pass) { throw "no password parsed from secrets.env" }
-          "ASSERT pass len=$($pass.Length)" | Out-File $diag -Append -Encoding ascii
+          if (-not $pass) {
+            Write-Output "::error::password parse failed"
+            $lines | Out-File $logFile -Encoding utf8
+            throw "no password"
+          }
           $env:RESTIC_PASSWORD = $pass
 
           foreach ($cls in @("config", "files", "system")) {
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
-            "ASSERT checking $cls repo=$repo" | Out-File $diag -Append -Encoding ascii
             if (-not (Test-Path $repo)) {
-              Write-Error "ASSERT $cls repo missing at $repo"
-              throw "$cls repo missing at $repo"
+              Write-Output "::error::ASSERT $cls repo missing at $repo"
+              $lines | Out-File $logFile -Encoding utf8
+              throw "$cls repo missing"
             }
-            $files = Get-ChildItem $repo -Recurse -File -ErrorAction SilentlyContinue
-            $size  = ($files | Measure-Object Length -Sum).Sum
-            "ASSERT $cls : $($files.Count) files, $size bytes" | Out-File $diag -Append -Encoding ascii
+            $files = @(Get-ChildItem $repo -Recurse -File -ErrorAction SilentlyContinue)
+            $size  = if ($files.Count -gt 0) { ($files | Measure-Object Length -Sum).Sum } else { 0 }
+            $lines += "ASSERT $cls : $($files.Count) files, $size bytes"
             if ($files.Count -lt 1 -or $size -lt 1) {
-              Write-Error "ASSERT $cls repo empty (files=$($files.Count) size=$size)"
-              throw "$cls repo empty (files=$($files.Count) size=$size)"
+              Write-Output "::error::ASSERT $cls repo empty (files=$($files.Count) size=$size)"
+              $lines | Out-File $logFile -Encoding utf8
+              throw "$cls repo empty"
             }
           }
-          "=== ALL WINDOWS ASSERTIONS PASSED ===" | Out-File $diag -Append -Encoding ascii
+          $lines += "=== ALL WINDOWS ASSERTIONS PASSED ==="
+          $lines | Out-File $logFile -Encoding utf8
 
       - name: Push debug logs
         if: failure()
