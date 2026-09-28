@@ -223,19 +223,29 @@ jobs:
           }
 
           # 快照断言
-          $secrets = Get-Content "$env:APPDATA\PartiverseBackup\secrets.env" -Raw -ErrorAction Stop
+          $secretsPath = "$env:APPDATA\PartiverseBackup\secrets.env"
+          $lines += "ASSERT reading secrets from $secretsPath"
+          if (-not (Test-Path $secretsPath)) {
+            Write-Output "::error::secrets.env not found at $secretsPath"
+            $lines | Out-File $logFile -Encoding utf8
+            throw "secrets.env missing"
+          }
+          $secrets = Get-Content $secretsPath -Raw
+          $lines += "ASSERT secrets length=$($secrets.Length)"
           $pass = [regex]::Match($secrets, "RESTIC_PASSWORD='(.+)'").Groups[1].Value
           if (-not $pass) {
-            Write-Output "::error::password parse failed"
+            Write-Output "::error::password regex failed on: $secrets"
             $lines | Out-File $logFile -Encoding utf8
-            throw "no password"
+            throw "password parse failed"
           }
+          $lines += "ASSERT pass len=$($pass.Length)"
           $env:RESTIC_PASSWORD = $pass
 
           foreach ($cls in @("config", "files", "system")) {
             $repo = "$env:RUNNER_TEMP\repos\restic-$cls"
+            $lines += "ASSERT $cls checking repo=$repo"
             if (-not (Test-Path $repo)) {
-              Write-Output "::error::ASSERT $cls repo missing at $repo"
+              Write-Output "::error::ASSERT $cls repo missing"
               $lines | Out-File $logFile -Encoding utf8
               throw "$cls repo missing"
             }
@@ -243,7 +253,7 @@ jobs:
             $size  = if ($files.Count -gt 0) { ($files | Measure-Object Length -Sum).Sum } else { 0 }
             $lines += "ASSERT $cls : $($files.Count) files, $size bytes"
             if ($files.Count -lt 1 -or $size -lt 1) {
-              Write-Output "::error::ASSERT $cls repo empty (files=$($files.Count) size=$size)"
+              Write-Output "::error::ASSERT $cls repo empty"
               $lines | Out-File $logFile -Encoding utf8
               throw "$cls repo empty"
             }
