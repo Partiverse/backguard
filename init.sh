@@ -150,7 +150,10 @@ mkdir -p "$BACKUP_BASE"
 echo ""
 echo -e "${YELLOW}━━━ 生成配置 ━━━${NC}"
 
-# 设备 ID = <短名>-<系统标识>，统一小写（WebDAV 大小写不敏感安全，与 timeline 目录一致）
+# 设备 ID = <短名>-<系统标识>，统一小写
+# 小写是硬性要求：实测 123Pan WebDAV 大小写不敏感（同名不同大小写会合并），
+# 大写路径在不同厂商间行为不一致（S3 敏感 / WebDAV 多不敏感）——小写唯一安全。
+# 品牌原名（macOS/Windows/发行版）只作展示，落在 timeline 设备目录的 profile.json
 DEVICE_ID="$(tr '[:upper:]' '[:lower:]' <<< "${DEVICE_NAME}-${SYSTEM_TAG}")"
 SYSTEM_ID="$DEVICE_ID"
 
@@ -182,6 +185,20 @@ case "$PLATFORM" in
         SYS_INC=$(gen_arr /etc "$LOG_DIR/system-meta")
         ;;
 esac
+
+# 设备档案（明文，无敏感）：品牌原名供人读，路径名保持小写
+mkdir -p "$BACKUP_BASE/timeline/$DEVICE_ID"
+cat > "$BACKUP_BASE/timeline/$DEVICE_ID/profile.json" <<PROF
+{
+  "device_id": "$DEVICE_ID",
+  "display_name": "${DEVICE_NAME}-${SYSTEM_TAG}",
+  "platform": "$PLATFORM",
+  "os_name": "$OS_NAME",
+  "os_version": "$OS_VER",
+  "hostname": "$DEVICE_NAME",
+  "created": "$(date -Iseconds)"
+}
+PROF
 
 cat > "$CONF_DIR/config.sh" <<CONF
 #!/usr/bin/env bash
