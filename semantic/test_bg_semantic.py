@@ -293,6 +293,12 @@ class TestPreflight(unittest.TestCase):
         self.assertEqual(out["errors"], 1)
         self.assertIn("不存在", out["findings"][0]["message"])
 
+    def test_preflight_legacy_string_format(self):
+        # 旧版模板 bug：整串空格路径当单个 include——明确指向重新生成
+        code, out = self._run_pf("--include", "/Users/x/.config/ /Users/x/.ssh/")
+        self.assertEqual(code, 2)
+        self.assertIn("旧版单字符串格式", out["findings"][0]["message"])
+
     def test_preflight_clean_dir_exit_0(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

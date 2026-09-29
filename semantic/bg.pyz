@@ -751,6 +751,12 @@ def cmd_preflight(args: argparse.Namespace) -> None:
 
     # 1. include 路径与云同步占位文件
     for inc in args.include or []:
+        if " " in inc.strip():
+            findings.append((
+                "error", "include 路径",
+                f"「{inc.strip()[:60]}…」含空格——疑似旧版单字符串格式（旧模板 bug），"
+                "请重跑 init.sh 重新生成 config.sh（新版为每路径一个元素的数组）"))
+            continue
         p = Path(inc).expanduser()
         if not p.exists():
             findings.append(("error", "include 路径", f"{p} 不存在——将备份不到任何内容"))
