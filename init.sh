@@ -34,6 +34,18 @@ DEVICE_NAME=$(hostname -s 2>/dev/null || hostname)
 DEVICE_NAME="${DEVICE_NAME%.local}"
 SYSTEM_NAME="${OS_NAME}${OS_VER}"
 
+# 系统标识（用户定案：<设备名>-<系统>，如 particloud-macos / partiverse-kubuntu）：
+# macOS→macOS、Windows→Windows、Linux→发行版 ID 首字母大写（发行版/桌面环境众多，需精准）
+SYSTEM_TAG="$PLATFORM"
+if [[ "$PLATFORM" == linux ]]; then
+    SYSTEM_TAG=$(. /etc/os-release && echo "${ID}")
+    SYSTEM_TAG="$(tr '[:lower:]' '[:upper:]' <<< "${SYSTEM_TAG:0:1}")${SYSTEM_TAG:1}"
+elif [[ "$PLATFORM" == macos ]]; then
+    SYSTEM_TAG="macOS"
+elif [[ "$PLATFORM" == windows ]]; then
+    SYSTEM_TAG="Windows"
+fi
+
 echo -e "${BLUE}[1/6]${NC} 检测平台: ${BOLD}$PLATFORM${NC} ($SYSTEM_NAME)"
 echo -e "${BLUE}[2/6]${NC} 设备名:   ${BOLD}$DEVICE_NAME${NC}"
 
@@ -138,8 +150,8 @@ mkdir -p "$BACKUP_BASE"
 echo ""
 echo -e "${YELLOW}━━━ 生成配置 ━━━${NC}"
 
-# 设备 ID = 稳定标识（不含 OS 版本）；OS 版本只在 system-meta 里留档
-DEVICE_ID="${DEVICE_NAME// /}"
+# 设备 ID = <短名>-<系统标识>，统一小写（WebDAV 大小写不敏感安全，与 timeline 目录一致）
+DEVICE_ID="$(tr '[:upper:]' '[:lower:]' <<< "${DEVICE_NAME}-${SYSTEM_TAG}")"
 SYSTEM_ID="$DEVICE_ID"
 
 # Windows restic 段引用 $USERNAME；非 Windows 平台无此变量（set -u 会炸），兜底
@@ -160,7 +172,7 @@ gen_arr() {
 case "$PLATFORM" in
     macos)
         CFG_INC=$(gen_arr ~/.config ~/Library/Preferences ~/Library/Keychains ~/.ssh ~/.gnupg)
-        FILES_INC=$(gen_arr ~/Documents ~/Desktop ~/Pictures ~/Movies ~/Music)
+        FILES_INC=$(gen_arr ~/Documents ~/Desktop ~/Pictures ~/Movies ~/Music ~/Downloads)
         SYS_INC=$(gen_arr "$LOG_DIR/system-meta")
         ;;
     linux)
