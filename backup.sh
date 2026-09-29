@@ -232,10 +232,11 @@ main() {
         local -a pf_args=(--check-disk "${BACKUP_BASE:-$HOME}" --min-free-gb 5)
         local pf_cls pf_inc
         for pf_cls in config files system; do
-            # shellcheck disable=SC2154  # exc_ref 经 eval 动态绑定
             eval "local -n pf_inc_ref=\"BORG_INCLUDES_$pf_cls\""
             eval "local -n pf_exc_ref=\"BORG_EXCLUDES_$pf_cls\""
+            # shellcheck disable=SC2154  # nameref 经上方 eval 动态绑定
             for pf_inc in "${pf_inc_ref[@]}"; do pf_args+=(--include "$pf_inc"); done
+            # shellcheck disable=SC2154  # 同上
             pf_args+=(--excludes "${pf_exc_ref[@]}")
         done
         local pf_rc=0
