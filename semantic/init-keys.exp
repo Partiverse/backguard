@@ -1,0 +1,68 @@
+#!/usr/bin/expect -f
+# init-keys.exp —— backguard 密钥初始化（research/03 §6 双恢复路径）
+# 由 semantic.sh 的 init_sem_keys 调用；expect 驱动 age -p 的 /dev/tty 交互，
+# 恢复码由 expect 侧生成并作为唯一事实源（注入 bash 包裹、显示、再闭环验证）。
+# 用法: init-keys.exp <age 绝对路径> <keys-dir 绝对路径>
+
+set age_bin [lindex $argv 0]
+set keys_dir [lindex $argv 1]
+set timeout 60
+log_user 1
+
+# 恢复码：128-bit，8 组 4 hex（expect 侧生成 = 包裹/显示/验证同源）
+set hexstr [exec openssl rand -hex 16]
+set code ""
+for {set i 0} {$i < 32} {incr i 4} {
+    append code [string range $hexstr $i [expr {$i+3}]]
+    if {$i < 28} { append code "-" }
+}
+
+spawn env BG_AGE=$age_bin BG_KEYS=$keys_dir BG_CODE=$code bash --noprofile --norc -c {
+    set -e
+    keygen="$BG_AGE-keygen"
+    mkdir -p "$BG_KEYS"
+    "$keygen" -o "$BG_KEYS/identity.txt"
+    chmod 600 "$BG_KEYS/identity.txt"
+    "$keygen" -y "$BG_KEYS/identity.txt" > "$BG_KEYS/recipients.txt"
+    "$keygen" -o "$BG_KEYS/.recovery-identity.tmp"
+    "$BG_AGE" -p -o "$BG_KEYS/recovery-identity.enc" "$BG_KEYS/.recovery-identity.tmp"
+    "$keygen" -y "$BG_KEYS/.recovery-identity.tmp" >> "$BG_KEYS/recipients.txt"
+    rm -f "$BG_KEYS/.recovery-identity.tmp"
+    chmod 600 "$BG_KEYS/recovery-identity.enc"
+    printf '%s\n' "$BG_CODE" > "$BG_KEYS/recovery-code.txt"
+    chmod 600 "$BG_KEYS/recovery-code.txt"
+    echo "BASH-DONE rc=0"
+}
+
+# age -p 两轮输入（输入+确认）
+expect {
+    -re "Enter passphrase" { send "$code\r"; exp_continue }
+    -re "Confirm passphrase" { send "$code\r"; exp_continue }
+    "BASH-DONE" {}
+    timeout { puts "\nEXPECT-TIMEOUT(wrap)"; exit 2 }
+    eof { puts "\nEXPECT-EOF(wrap)"; exit 3 }
+}
+expect "BASH-DONE"
+
+# 闭环验证：恢复码必须能解开刚生成的救援身份
+spawn env BG_AGE=$age_bin BG_KEYS=$keys_dir BG_CODE=$code bash --noprofile --norc -c {
+    set -e
+    "$BG_AGE" -d -o "$BG_KEYS/.verify-rec-id" "$BG_KEYS/recovery-identity.enc"
+    "$BG_AGE-keygen" -y "$BG_KEYS/.verify-rec-id" > "$BG_KEYS/.verify-pub.txt"
+    rm -f "$BG_KEYS/.verify-rec-id"
+    grep -qf "$BG_KEYS/.verify-pub.txt" "$BG_KEYS/recipients.txt" && echo "VERIFY-OK"
+    rm -f "$BG_KEYS/.verify-pub.txt"
+}
+
+expect {
+    -re "Enter passphrase" { send "$code\r"; exp_continue }
+    "VERIFY-OK" { puts "\nKEYS-READY" }
+    timeout { puts "\nEXPECT-TIMEOUT(verify)"; exit 4 }
+    eof { puts "\nEXPECT-EOF(verify)"; exit 5 }
+}
+expect "KEYS-READY"
+
+puts "\n★ 恢复码（唯一显示，请立即抄写到纸上并妥善保存）:"
+puts "    $code"
+puts "  救援路径: age -d -o recovery-identity.txt $keys_dir/recovery-identity.enc"
+puts "  （恢复码副本已存 $keys_dir/recovery-code.txt，核对抄写后请删除）"

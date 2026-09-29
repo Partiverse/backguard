@@ -224,6 +224,30 @@ class TestStreakAndId(unittest.TestCase):
         self.assertEqual(bg.derive_snapshot_id(classes), bg.derive_snapshot_id(classes))
 
 
+class TestManifest(unittest.TestCase):
+    """manifest 子命令的纯计算部分（密封由编排层 age 完成）。"""
+
+    def test_manifest_json_structure_and_redline(self):
+        run = bg.make_demo_run()
+        doc = json.loads(bg.build_manifest_json(run))
+        self.assertEqual(doc["format"], "backguard/manifest/1")
+        self.assertEqual(doc["device"]["id"], "MacBook-Pro-macOS15")
+        files = doc["classes"]["files"]
+        self.assertEqual(files["stats"]["count"], len(files["entries"]))
+        self.assertGreater(files["stats"]["added"], 0)
+        # 全量清单的条目是完整路径（这正是必须加密的原因）
+        self.assertTrue(any("日本旅行" in e["path"] for e in files["entries"]))
+        # parent 链在
+        self.assertEqual(doc["snapshot"]["parent"], "snap_71b0ee")
+
+    def test_manifest_diff_stats(self):
+        run = bg.make_demo_run()
+        doc = json.loads(bg.build_manifest_json(run))
+        s = doc["classes"]["files"]["stats"]
+        self.assertEqual(s["added"] + s["modified"] + s["removed"],
+                         s["added"] + s["modified"] + 1)
+
+
 class TestE2E(unittest.TestCase):
     def test_demo_writes_files(self):
         with tempfile.TemporaryDirectory() as tmp:

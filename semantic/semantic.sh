@@ -3,6 +3,46 @@
 # 设计红线：语义层任何失败都不得影响备份本身（调用点全部非致命）。
 # M0 范围：borg 引擎（Linux/macOS）；Windows restic 路径见 semantic.ps1。
 
+# 密钥体系（research/03 §6 / 08 T1.1）：
+#   age 规范要求 passphrase stanza 独占，故「口令 + 恢复码」双路径用双 X25519 recipient：
+#   keys/identity.txt          主身份（600）——日常解密
+#   keys/recovery-identity.enc 恢复身份，以恢复码为 passphrase 包裹——救援路径
+#   keys/recipients.txt        两个公钥——日常密封 manifest.json.enc
+# 初始化由 init-keys.exp 驱动（age 从 /dev/tty 读 passphrase，管道喂不进；
+# expect 提供伪终端并作为恢复码的唯一事实源，包裹后立即闭环验证）。
+
+sem_keys_dir() { echo "${SEM_KEYS_DIR:-$CONF_DIR/age}"; }
+
+init_sem_keys() {
+    local age_bin; age_bin="$(command -v age || command -v rage || true)"
+    [[ -n "$age_bin" ]] || { warn "[semantic] 未安装 age（brew install age），跳过密钥初始化"; return 1; }
+    local dir; dir="$(sem_keys_dir)"
+    if [[ -f "$dir/recipients.txt" ]]; then
+        info "[semantic] 密钥已存在: $dir（重建需手动删除并确认仍有恢复路径）"
+        return 0
+    fi
+    if [[ ! -t 0 ]]; then
+        info "[semantic] 非交互环境，跳过密钥初始化（请在终端运行: expect $SCRIPT_DIR/semantic/init-keys.exp \"$age_bin\" \"$dir\"）"
+        return 1
+    fi
+    command -v expect >/dev/null || { warn "[semantic] 未找到 expect，无法安全初始化密钥"; return 1; }
+    expect "$SCRIPT_DIR/semantic/init-keys.exp" "$(command -v "$age_bin")" "$dir"
+}
+
+# 密封：$1 = run.json 路径，$2 = 快照目录（产物写入其中）
+seal_manifest() {
+    local run_file="$1" snapshot_dir="$2"
+    local age_bin; age_bin="$(command -v age || command -v rage || true)"
+    [[ -n "$age_bin" ]] || { info "[semantic] 未安装 age，跳过 manifest.json.enc"; return 0; }
+    local rec; rec="$(sem_keys_dir)/recipients.txt"
+    [[ -f "$rec" ]] || { info "[semantic] 无 recipients.txt（先 init_sem_keys），跳过密封"; return 0; }
+    if semantic_bg manifest --run "$run_file" 2>>"$LOG" | \
+        "$age_bin" -R "$rec" -o "$snapshot_dir/manifest.json.enc"; then
+        info "[semantic] manifest.json.enc 已密封（双恢复路径）"
+    else
+        warn "[semantic] manifest 密封失败（不影响其余产物）"
+    fi
+}
 # 解析并运行 bg 入口：$BG 显式指定 > 仓库内 bg.pyz / bg_semantic.py。
 # 不做 PATH 查找：macOS 自带 /usr/bin/bg（job control），裸名 bg 必然撞车。
 semantic_bg() {
@@ -93,11 +133,18 @@ generate_semantic() {
         return 0
     fi
 
-    if ! semantic_bg generate --run "$tmp/run.json" --out "$stage" >>"$LOG" 2>&1; then
+    local sdir
+    semantic_bg generate --run "$tmp/run.json" --out "$stage" 2>>"$LOG" \
+        | sed -n 's/^已生成快照目录: //p' > "$tmp/.sdir"
+    if [[ ${PIPESTATUS[0]} -ne 0 || ! -s "$tmp/.sdir" ]]; then
         warn "[semantic] generate 失败（详见 $LOG），跳过"
         rm -rf "$tmp"
         return 0
     fi
+    sdir="$(cat "$tmp/.sdir")"
+
+    # 全量清单密封（age 双恢复路径；无 age/无密钥时非致命跳过）
+    seal_manifest "$tmp/run.json" "$sdir"
 
     # run JSON 留档（最近 60 份，research/08 T0.3）
     mkdir -p "$runs_dir"

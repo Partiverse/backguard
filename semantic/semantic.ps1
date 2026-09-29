@@ -12,9 +12,9 @@ function Invoke-SemanticLayer {
         [Parameter(Mandatory)] [string]$TimeIso
     )
 
-    # 解析 bg 入口：$env:BG > 仓库内 bg.pyz / bg_semantic.py（python 由 python/py 提供）
-    $semanticDir = Join-Path $PSScriptRoot "semantic"
-    $bgScript = @("$semanticDir\bg.pyz", "$semanticDir\bg_semantic.py") |
+    # 解析 bg 入口：$env:BG > 与本脚本同目录的 bg.pyz / bg_semantic.py。
+    # 注意 dot-source 时 $PSScriptRoot 已是 semantic 目录本身（CI 实测教训）。
+    $bgScript = @("$PSScriptRoot\bg.pyz", "$PSScriptRoot\bg_semantic.py") |
         Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $bgScript) { Write-Warning "[semantic] 缺少 bg.pyz/bg_semantic.py，跳过语义层"; return }
     $python = (Get-Command python -ErrorAction SilentlyContinue).Source
@@ -93,11 +93,24 @@ function Invoke-SemanticLayer {
         return
     }
 
-    Invoke-Bg generate --run $runJson --out $stage *>> $env:BACKUP_LOG
-    if ($LASTEXITCODE -ne 0) {
+    $genOut = Invoke-Bg generate --run $runJson --out $stage 2>> $env:BACKUP_LOG
+    if ($LASTEXITCODE -ne 0 -or -not $genOut) {
         Write-Warning "[semantic] generate 失败（见 backup.log），跳过"
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
         return
+    }
+    $snapshotDir = ($genOut | Where-Object { $_ -match '^已生成快照目录: ' }) -replace '^已生成快照目录: ', ''
+
+    # 全量清单密封（manifest.json.enc）：age -R 非交互；Windows 密钥初始化
+    # （init-keys.exp 的对称实现）留待 M1 后续——无 recipients 时静默跳过
+    $ageBin = (Get-Command age -ErrorAction SilentlyContinue).Source
+    $rec = Join-Path $env:APPDATA "PartiverseBackup\age\recipients.txt"
+    if ($ageBin -and (Test-Path $rec)) {
+        $manifestJson = Join-Path $tmp "manifest.json"
+        Invoke-Bg manifest --run $runJson | Out-File -FilePath $manifestJson -Encoding utf8
+        & $ageBin -R $rec -o (Join-Path $snapshotDir "manifest.json.enc") $manifestJson 2>> $env:BACKUP_LOG
+        if ($LASTEXITCODE -eq 0) { Write-Host "[ OK ] [semantic] manifest.json.enc 已密封" -ForegroundColor Green }
+        else { Write-Warning "[semantic] manifest 密封失败（不影响其余产物）" }
     }
 
     # run JSON 留档（最近 60 份）

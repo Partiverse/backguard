@@ -33,8 +33,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 RUN_FORMAT = "backguard/semantic-run/1"
+MANIFEST_FORMAT = "backguard/manifest/1"
 WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 CLASS_CAPTIONS = {
     "config": "丢了很痛的配置与密钥",
@@ -613,12 +614,63 @@ def build_restore(run: dict) -> str:
 
 1. 阅读仓库根目录的 `README.md`（明文）——它解释目录结构与仓库格式；
 2. `MANIFEST.txt` 是明文摘要；完整文件清单在 `manifest.json.enc`
-   （age/XChaCha20-Poly1305 加密，可用恢复码或口令解开，格式 schema 版本化）；
+   （age X25519 加密，双恢复路径任选其一，格式 schema 版本化）；
 3. 内容块按内容寻址存放于类别内容池（config/files/system），按清单逐文件重建路径。
+
+### manifest.json.enc 的两条解密路径
+
+```bash
+# 路径 A（日常）：本机主身份
+age -d -i identity.txt -o manifest.json manifest.json.enc
+
+# 路径 B（救援）：只有恢复码时，先解开救援身份（终端会提示输入恢复码）
+age -d -o recovery-identity.txt recovery-identity.enc
+age -d -i recovery-identity.txt -o manifest.json manifest.json.enc
+rm recovery-identity.txt   # 用完即删
+```
 
 > 本段为原型占位文本。正式版由仓库根 `README.md` 与单文件救援器
 > （research/06 §6「逃生恢复」）接替，并每年自动演练一次。
 """
+
+
+# ---------------------------------------------------------------- 全量清单（research/06 §3.2 / 03 §6）
+#
+# manifest.json.enc 的加密由编排层（semantic.sh/ps1 调 age）完成——
+# bg 只负责产出明文清单 JSON（完整文件名只存在这份密文账本里，永不进明文层文件）。
+# 密钥体系（双 X25519 recipient：主身份 + 恢复码包裹的救援身份）见 semantic.sh 注释。
+
+
+def build_manifest_json(run: dict) -> bytes:
+    """加密全量清单（明文形态由调用方密封）：完整文件名/路径只存在这里。"""
+    classes = {}
+    for cls, spec in run["classes"].items():
+        cur = list(spec.get("entries", []))
+        prev = spec.get("prev_entries", [])
+        d = diff_entries([Entry(**e) for e in cur], [Entry(**e) for e in prev])
+        classes[cls] = {
+            "entries": cur,
+            "stats": {
+                "count": len(cur), "bytes": sum(e["size"] for e in cur),
+                "added": len(d.added), "modified": len(d.modified),
+                "removed": len(d.removed),
+            },
+        }
+    doc = {
+        "format": MANIFEST_FORMAT,
+        "snapshot": {"id": run.get("snapshot_id"), "parent": run.get("parent_id"),
+                     "time": run.get("time"), "parent_time": run.get("parent_time"),
+                     "label": run.get("label")},
+        "device": {"id": run.get("device"), "os": run.get("os")},
+        "engine": run.get("engine"),
+        "classes": classes,
+    }
+    return json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8")
+
+
+def cmd_manifest(args: argparse.Namespace) -> None:
+    run = _load_run(Path(args.run))
+    sys.stdout.buffer.write(build_manifest_json(run))
 
 
 # ---------------------------------------------------------------- 汇总流程
@@ -867,6 +919,10 @@ def make_demo_run() -> dict:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # Windows 控制台默认 cp1252，中文输出会 UnicodeEncodeError（CI 实测教训）
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"bg_semantic {__version__}")
@@ -902,6 +958,10 @@ def main(argv: list[str] | None = None) -> None:
     p_conv.add_argument("--label")
     p_conv.add_argument("--out", default="run.json")
     p_conv.set_defaults(func=cmd_convert)
+
+    p_man = sub.add_parser("manifest", help="输出明文全量清单 JSON（供 age 密封为 manifest.json.enc）")
+    p_man.add_argument("--run", required=True)
+    p_man.set_defaults(func=cmd_manifest)
 
     args = ap.parse_args(argv)
     try:
