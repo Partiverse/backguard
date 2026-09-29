@@ -225,6 +225,47 @@ main() {
         info "磁盘剩余: ${avail_gb}GB"
     fi
 
+    # ---------- 预检（research/08 T2.2）：对位「什么不会被有效备份」 ----------
+    # bg 做文件系统检查（占位文件/.git 排除/磁盘）；编排层补引擎版本与凭据链。
+    # error(2) 中止备份；warning(1) 继续并留在日志。SEM_PREFLIGHT=0 可关闭。
+    if [[ "${SEM_PREFLIGHT:-1}" == "1" ]] && [[ "$PLATFORM" != windows ]]; then
+        local -a pf_args=(--check-disk "${BACKUP_BASE:-$HOME}" --min-free-gb 5)
+        local pf_cls pf_inc
+        for pf_cls in config files system; do
+            # shellcheck disable=SC2154  # exc_ref 经 eval 动态绑定
+            eval "local -n pf_inc_ref=\"BORG_INCLUDES_$pf_cls\""
+            eval "local -n pf_exc_ref=\"BORG_EXCLUDES_$pf_cls\""
+            for pf_inc in "${pf_inc_ref[@]}"; do pf_args+=(--include "$pf_inc"); done
+            pf_args+=(--excludes "${pf_exc_ref[@]}")
+        done
+        local pf_rc=0
+        semantic_bg preflight "${pf_args[@]}" | tee -a "$LOG" || pf_rc=$?
+        if [[ $pf_rc -eq 2 ]]; then
+            error "preflight 发现致命问题，备份中止（修复后重跑；或 SEM_PREFLIGHT=0 跳过预检）"
+            exit 1
+        fi
+
+        # 引擎版本下限（python 比较，避开 macOS sort 无 -V）
+        if [[ -n "$BORG" ]]; then
+            local bv
+            bv="$("$BORG" --version 2>/dev/null | awk '{print $2}')"
+            if ! python3 -c "import sys;sys.exit(0 if tuple(map(int,'${bv:-0}.0'.split('.')[:2]))>=(1,2) else 1)" 2>/dev/null; then
+                warn "borg ${bv:-?} 低于最低支持版 1.2，建议升级"
+            fi
+        fi
+        # 凭据外部化静默失效检测（research/05 §7）
+        if [[ -n "${BORG_PASSCOMMAND:-}" ]]; then
+            local pc="${BORG_PASSCOMMAND%% *}"
+            if ! command -v "$pc" >/dev/null 2>&1; then
+                error "BORG_PASSCOMMAND 引用的 $pc 不在 PATH——备份将失败，中止"
+                exit 1
+            fi
+            if [[ "$pc" == "rbw" ]] && ! rbw unlocked >/dev/null 2>&1; then
+                warn "rbw-agent 未解锁——备份时将挂起等待，可先执行 rbw unlock"
+            fi
+        fi
+    fi
+
     log "=== Backup STARTED ($PLATFORM) ==="
     log "Device: $DEVICE_ID | System: $SYSTEM_ID"
 

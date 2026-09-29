@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
 import unicodedata
 from dataclasses import dataclass, field
@@ -692,6 +693,111 @@ def cmd_manifest(args: argparse.Namespace) -> None:
     sys.stdout.buffer.write(build_manifest_json(run))
 
 
+# ---------------------------------------------------------------- 预检（research/08 T2.2 / 02 §八.1）
+#
+# 对位 Backblaze 2026 信任危机：备份前把「什么不会被有效备份」说清楚。
+# bg 只做纯文件系统检查（占位文件 / .git 排除 / 磁盘空间）；
+# 引擎版本与凭据链（rbw 等 PASSCOMMAND）检查在编排层（semantic.sh/ps1 的 preflight 引擎检查）。
+# 级别：error（数据必然缺失）→ exit 2；warning（值得知道）→ exit 1。
+
+ICLOUD_PLACEHOLDER_SUFFIX = ".icloud"       # macOS iCloud Drive 未下载占位
+WIN_RECALL_FLAG = 0x400000                  # FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+PLACEHOLDER_LIMIT = 50                      # 报告上限（计数另报）
+
+
+def _scan_placeholders(root: Path, max_depth: int = 3,
+                       max_files: int = 20000) -> tuple[int, list[str]]:
+    """浅扫云同步占位文件（iCloud .icloud / Windows OneDrive recall 位）。"""
+    found: list[str] = []
+    seen = 0
+    base_depth = len(root.parts)
+
+    def _walk(d: Path) -> None:
+        nonlocal seen
+        if len(found) >= PLACEHOLDER_LIMIT or seen > max_files:
+            return
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            return
+        for e in entries:
+            seen += 1
+            if seen > max_files or len(found) >= PLACEHOLDER_LIMIT:
+                return
+            try:
+                if e.is_symlink():
+                    continue
+                if e.is_dir():
+                    if len(e.parts) - base_depth < max_depth:
+                        _walk(e)
+                    continue
+                if e.name.endswith(ICLOUD_PLACEHOLDER_SUFFIX):
+                    found.append(str(e))
+                    continue
+                st = e.stat()
+                if hasattr(st, "st_file_attributes") and (
+                        st.st_file_attributes & WIN_RECALL_FLAG):
+                    found.append(str(e))
+            except OSError:
+                continue
+
+    if root.is_dir():
+        _walk(root)
+    return seen, found
+
+
+def cmd_preflight(args: argparse.Namespace) -> None:
+    findings: list[tuple[str, str, str]] = []  # (级别, 检查项, 消息)
+
+    # 1. include 路径与云同步占位文件
+    for inc in args.include or []:
+        p = Path(inc).expanduser()
+        if not p.exists():
+            findings.append(("error", "include 路径", f"{p} 不存在——将备份不到任何内容"))
+            continue
+        scanned, ph = _scan_placeholders(p)
+        if ph:
+            findings.append((
+                "warning", "云同步占位文件",
+                f"{p} 扫描 {scanned} 项，其中 {len(ph)}+ 个是未真正落盘的占位文件"
+                f"（如 {Path(ph[0]).name}）——只会备份到空壳，请先在云同步客户端下载原图"))
+
+    # 2. .git 静默排除检测（Backblaze 信任危机对位）
+    if args.excludes and any(".git" in e for e in args.excludes):
+        hits = [i for i in (args.include or [])
+                if (Path(i).expanduser() / ".git").exists()]
+        if hits:
+            findings.append((
+                "warning", ".git 被排除",
+                f"排除规则含 .git，且 {hits[0]} 下存在 git 仓库——版本历史将不在备份内"
+                "（如属有意，可忽略本条）"))
+
+    # 3. 磁盘空间
+    for t in args.check_disk or []:
+        tp = Path(t).expanduser()
+        if not tp.exists():
+            continue
+        free_gb = shutil.disk_usage(tp).free / 2**30
+        if free_gb < args.min_free_gb:
+            findings.append(("warning", "磁盘空间",
+                             f"{t} 仅剩 {free_gb:.0f} GB（< {args.min_free_gb} GB）"))
+
+    n_err = sum(1 for f in findings if f[0] == "error")
+    n_warn = len(findings) - n_err
+    if args.json:
+        print(json.dumps({"errors": n_err, "warnings": n_warn,
+                          "findings": [{"level": lv, "check": ck, "message": msg}
+                                       for lv, ck, msg in findings]}, ensure_ascii=False))
+    else:
+        if not findings:
+            print("preflight: 全部检查通过（无占位文件 / 磁盘充足 / include 有效）")
+        for lv, ck, msg in findings:
+            mark = "✗" if lv == "error" else "⚠"
+            print(f"{mark} [{ck}] {msg}")
+        print(f"preflight: {n_err} 个错误, {n_warn} 个警告")
+    raise SystemExit(2 if n_err else (1 if n_warn else 0))
+
+
 # ---------------------------------------------------------------- 汇总流程
 
 
@@ -983,6 +1089,15 @@ def main(argv: list[str] | None = None) -> None:
     p_man = sub.add_parser("manifest", help="输出明文全量清单 JSON（供 age 密封为 manifest.json.enc）")
     p_man.add_argument("--run", required=True)
     p_man.set_defaults(func=cmd_manifest)
+
+    p_pf = sub.add_parser("preflight", help="备份前预检：占位文件 / .git 排除 / 磁盘 / 引擎 / 凭据链")
+    p_pf.add_argument("--include", action="append", help="备份 include 路径（可多次）")
+    p_pf.add_argument("--excludes", nargs="*", default=[], help="排除模式列表")
+    p_pf.add_argument("--check-disk", action="append", help="检查剩余空间的路径（可多次）")
+    p_pf.add_argument("--min-free-gb", type=int, default=5)
+    p_pf.add_argument("--engine", choices=["borg", "restic"], help="引擎版本检查（不传则跳过）")
+    p_pf.add_argument("--json", action="store_true", help="机器可读输出")
+    p_pf.set_defaults(func=cmd_preflight)
 
     args = ap.parse_args(argv)
     try:

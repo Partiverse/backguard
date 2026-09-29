@@ -259,6 +259,64 @@ class TestManifest(unittest.TestCase):
                          s["added"] + s["modified"] + 1)
 
 
+class TestPreflight(unittest.TestCase):
+    """预检（research/08 T2.2）：纯文件系统检查项。"""
+
+    def _run_pf(self, *argv: str):
+        """跑 preflight 并捕获退出码（SystemExit 携带级别）。"""
+        import io
+        import contextlib
+        code = 0
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                bg.main(["preflight", "--json", *argv])
+            except SystemExit as e:
+                code = e.code or 0
+        return code, json.loads(buf.getvalue())
+
+    def test_placeholder_scan_icloud(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir()
+            (root / "docs" / "real.txt").write_text("x")
+            (root / "docs" / "photo.jpg.icloud").write_text("placeholder")
+            seen, found = bg._scan_placeholders(root)
+            self.assertEqual(len(found), 1)
+            self.assertTrue(found[0].endswith("photo.jpg.icloud"))
+            self.assertEqual(seen, 3)  # docs 目录 + 2 个文件
+
+    def test_preflight_missing_include_is_error(self):
+        code, out = self._run_pf("--include", "/nonexistent-bg-path-xyz")
+        self.assertEqual(code, 2)
+        self.assertEqual(out["errors"], 1)
+        self.assertIn("不存在", out["findings"][0]["message"])
+
+    def test_preflight_clean_dir_exit_0(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self._run_pf("--include", tmp)
+            self.assertEqual(code, 0)
+            self.assertEqual(out["errors"] + out["warnings"], 0)
+
+    def test_preflight_git_excluded_warning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            code, out = self._run_pf("--include", tmp, "--excludes", "**/.git/", "x")
+            self.assertEqual(code, 1)
+            self.assertEqual(out["warnings"], 1)
+            self.assertIn(".git", out["findings"][0]["message"])
+
+    def test_preflight_low_disk_warning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self._run_pf("--check-disk", tmp, "--min-free-gb", "99999999")
+            self.assertEqual(code, 1)
+            self.assertIn("磁盘", out["findings"][0]["check"])
+
+
 class TestE2E(unittest.TestCase):
     def test_demo_writes_files(self):
         with tempfile.TemporaryDirectory() as tmp:

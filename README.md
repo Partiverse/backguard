@@ -145,6 +145,11 @@ backup/
 | `SEM_NTFY_URL` | STORY 摘要推送（如自托管 `https://ntfy.example.com/backguard-设备名`）；推荐自托管，公共服务 topic 请用高熵随机串 |
 | `SEM_LABEL` | 覆盖自动时段标签（morning/noon/afternoon/evening/night） |
 | `SEM_KEYS_DIR` | 密钥目录（默认 `~/.config/partiverse-backup/age` / `%APPDATA%\PartiverseBackup\age`） |
+| `SEM_PREFLIGHT` | 设 `0` 关闭备份前预检（默认开；预检 error 中止备份，warning 继续并留日志） |
+
+备份前预检（`bg preflight`）会检查：include 路径有效性、iCloud/OneDrive 占位文件
+（未真正落盘的"半真文件"）、.git 被静默排除、磁盘空间、引擎版本下限、
+凭据外部化状态（`BORG_PASSCOMMAND` 引用的 CLI 在位、rbw-agent 解锁）。
 
 密钥初始化（交互终端运行一次，恢复码抄写到纸上）：
 
