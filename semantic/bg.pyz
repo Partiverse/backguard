@@ -30,7 +30,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 __version__ = "0.2.0"
@@ -861,10 +861,12 @@ def cmd_demo(args: argparse.Namespace) -> None:
 
 
 def make_demo_run() -> dict:
-    """合成「日本旅行回来那晚」的两代快照（research/06 §4.2 的示例场景）。"""
-    tz = timezone(timedelta(hours=8))
-    cur_t = datetime(2026, 9, 28, 21, 0, tzinfo=tz)
-    prev_t = datetime(2026, 9, 27, 22, 10, tzinfo=tz)
+    """合成「日本旅行回来那晚」的两代快照（research/06 §4.2 的示例场景）。
+
+    时间用 naive 本地时间：渲染口径是「用户时钟」，跨时区确定性输出。
+    """
+    cur_t = datetime(2026, 9, 28, 21, 0)
+    prev_t = datetime(2026, 9, 27, 22, 10)
 
     def old_photos() -> list[Entry]:
         return [Entry(f"Pictures/日本旅行-0926/IMG_00{i:02d}.jpg", 3_000_000 + i,
