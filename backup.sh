@@ -166,8 +166,8 @@ sync_target() {
 # 解析备份目标：兼容旧 WEBDAV_REMOTE；无任何目标时仅本地备份。
 # 调用后 BACKUP_TARGETS 恒为已定义数组（可能为空）——set -u 下安全。
 resolve_targets() {
-    # [ ] 而非 [[ ]]：shellcheck SC2199 对 [[ ]] 内的数组展开一律报隐式拼接
-    if [ -z "${BACKUP_TARGETS[@]+x}" ]; then
+    # [*]+x：shellcheck 认可的「数组已定义？」测试（[@] 在 [ ]/[[ ]] 里触发 SC2198/2199）
+    if [ -z "${BACKUP_TARGETS[*]+x}" ]; then
         BACKUP_TARGETS=()
     fi
     if [[ ${#BACKUP_TARGETS[@]} -eq 0 && -n "${WEBDAV_REMOTE:-}" ]]; then
