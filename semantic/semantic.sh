@@ -172,6 +172,33 @@ generate_semantic() {
     # STORY 手机推送（ntfy 可选 sidecar，research/08 T1.4）
     notify_story "$sdir/STORY.md"
 
+    # 排除清单导出（research/08 T2.1）→ 覆盖报告数据源
+    export_exclusions "$tmp"
+
+    # 上一代快照的 exclusions.json（按 mtime 最近者，不含本代）→ 变更检测
+    local prev_ex
+    prev_ex="$(find "$stage" -name exclusions.json 2>/dev/null | head -50 \
+        | while read -r f; do stat -f '%m %N' "$f" 2>/dev/null; done \
+        | sort -rn | head -1 | cut -d' ' -f2-)"
+    [[ -n "$prev_ex" ]] && cp "$prev_ex" "$tmp/prev-exclusions.json" 2>/dev/null || true
+
+    semantic_bg generate --run "$tmp/run.json" --out "$stage" \
+        --exclusions "$tmp/exclusions.json" \
+        --prev-exclusions "$tmp/prev-exclusions.json" >>"$LOG" 2>&1
+    if [[ $? -ne 0 || ! -s "$tmp/.sdir" ]]; then
+        warn "[semantic] generate 失败（详见 $LOG），跳过"
+        rm -rf "$tmp"
+        return 0
+    fi
+    sdir="$(cat "$tmp/.sdir")"
+    cp "$tmp/exclusions.json" "$sdir/exclusions.json" 2>/dev/null || true
+
+    # 全量清单密封（age 双恢复路径；无 age/无密钥时非致命跳过）
+    seal_manifest "$tmp/run.json" "$sdir"
+
+    # STORY 手机推送（ntfy 可选 sidecar，research/08 T1.4）
+    notify_story "$sdir/STORY.md"
+
     # run JSON 留档（最近 60 份，research/08 T0.3）
     mkdir -p "$runs_dir"
     cp "$tmp/run.json" "$runs_dir/run-$(date +%Y%m%d-%H%M%S).json" 2>/dev/null || true
@@ -179,4 +206,24 @@ generate_semantic() {
     rm -rf "$tmp"
 
     success "[semantic] 时间轴已生成: $stage"
+}
+
+# 把三档案的 exclude 模式导出为 exclusions.json（机器可读）
+export_exclusions() {
+    local tmp="$1" out="$tmp/exclusions.json" cls i p
+    {
+        printf '{"generated":"%s","exclusions":[' "$(date -Iseconds)"
+        local first=1
+        for cls in config files system; do
+            eval "local -n e_ref=\"BORG_EXCLUDES_$cls\""
+            for ((i = 0; i < ${#e_ref[@]}; i += 2)); do
+                p="${e_ref[i+1]:-}"
+                [[ "$p" == --exclude || -z "$p" ]] && continue
+                [[ $first -eq 1 ]] || printf ','
+                first=0
+                printf '"%s|%s"' "$cls" "$p"
+            done
+        done
+        printf ']}\n'
+    } > "$out" 2>/dev/null || echo '{"exclusions":[]}' > "$out"
 }

@@ -688,6 +688,65 @@ def build_manifest_json(run: dict) -> bytes:
     return json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8")
 
 
+def load_exclusions(path: str | Path) -> list[dict]:
+    """读取 exclusions.json（编排层导出，扁平格式 "class|pattern" 字符串数组）。"""
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(_read_text(p))
+    except (ValueError, OSError):
+        return []
+    items = data.get("exclusions", []) if isinstance(data, dict) else data
+    out = []
+    for e in items:
+        if isinstance(e, str) and "|" in e:
+            cls, _, pat = e.partition("|")
+            out.append({"class": cls, "pattern": pat})
+        elif isinstance(e, dict):
+            out.append(e)
+    return out
+
+
+def build_coverage(run: dict, exclusions: list[dict],
+                   prev_exclusions: list[dict]) -> str:
+    """覆盖报告（research/08 T2.3）：每次备份必产——「什么没被备份」。
+
+    对位 Backblaze 2026 信任危机的核心产物：排除清单明示 + 规则变更
+    主动告知（research/02 §八.1 / PRD FR-C2/FR-C3）。
+    """
+    t = local_naive(parse_iso(run["time"]))
+    out: list[str] = []
+    out.append("╔══════════════════════════════════════════════════════════╗")
+    out.append(f"║ 覆盖报告 · {t.strftime('%Y-%m-%d %H:%M')} · {run.get('device', '?')}")
+    out.append("╠══════════════════════════════════════════════════════════╣")
+    if not exclusions:
+        out.append("║ 本次备份未配置排除规则（备份范围内无主动排除）")
+    else:
+        out.append(f"║ 以下内容不在备份内（{len(exclusions)} 条规则）：")
+        out.append("╠══════════════════════════════════════════════════════════╣")
+        for e in exclusions[:8]:
+            tail = f"  ← {e['reason']}" if e.get("reason") else ""
+            out.append(f"║ [{e.get('class', '?')}] {truncate_width(str(e.get('pattern', '?')), 42)}{tail}")
+        if len(exclusions) > 8:
+            out.append(f"║ …另有 {len(exclusions) - 8} 条（见 exclusions.json）")
+
+    # 规则变更主动告知（research/08 T2.4）
+    if prev_exclusions:
+        cur_set = {(e.get("class"), e.get("pattern")) for e in exclusions}
+        prev_set = {(e.get("class"), e.get("pattern")) for e in prev_exclusions}
+        added, removed = cur_set - prev_set, prev_set - cur_set
+        if added or removed:
+            out.append("╠══════════════════════════════════════════════════════════╣")
+            out.append("║ ⚠ 本次备份的排除规则发生变化：")
+            for c, p in sorted(added)[:5]:
+                out.append(f"║   + 新增排除 [{c}] {truncate_width(str(p), 38)}")
+            for c, p in sorted(removed)[:5]:
+                out.append(f"║   - 恢复备份 [{c}] {truncate_width(str(p), 38)}")
+    out.append("╚══════════════════════════════════════════════════════════╝")
+    return "\n".join(out) + "\n"
+
+
 def cmd_manifest(args: argparse.Namespace) -> None:
     run = _load_run(Path(args.run))
     sys.stdout.buffer.write(build_manifest_json(run))
@@ -840,16 +899,21 @@ def compute_run(run: dict) -> dict:
     }
 
 
-def render_snapshot(run: dict) -> dict[str, str]:
+def render_snapshot(run: dict, snapshot_dir: Path | None = None) -> dict[str, str]:
     computed = compute_run(run)
     per_class = computed["per_class"]
     per_class_diff = {k: d for k, (_, d) in per_class.items()}
-    return {
+    files = {
         "MANIFEST.txt": build_manifest(run, per_class),
         "STORY.md": build_story(run, per_class_diff,
                                 computed["clusters"], computed["streak"]),
         "restore.md": build_restore(run),
     }
+    # 覆盖报告（research/08 T2.3/T2.4）：本代 exclusions vs 上一代（变更检测）
+    cur = load_exclusions(run.get("exclusions_path", "")) if run.get("exclusions_path") else []
+    prev = load_exclusions(run["prev_exclusions_path"]) if run.get("prev_exclusions_path") else []
+    files["COVERAGE.txt"] = build_coverage(run, cur, prev)
+    return files
 
 
 def snapshot_dirname(run: dict) -> Path:
@@ -890,7 +954,14 @@ def cmd_generate(args: argparse.Namespace) -> None:
     if not run.get("snapshot_id"):
         run["snapshot_id"] = derive_snapshot_id(
             {k: [Entry(**e) for e in v.get("entries", [])] for k, v in run["classes"].items()})
-    files = render_snapshot(run)
+    # 覆盖报告读本代/上代 exclusions.json（编排层导出，research/08 T2.1）
+    if args.exclusions:
+        run["exclusions_path"] = args.exclusions
+    if args.prev_exclusions:
+        run["prev_exclusions_path"] = args.prev_exclusions
+    target_dir = (Path(args.out) / sanitize_component(run.get("device", "unknown"))
+                 / snapshot_dirname(run))
+    files = render_snapshot(run, target_dir)
     target = write_outputs(run, Path(args.out), files)
     print(f"已生成快照目录: {target}")
     for name in files:
@@ -1073,6 +1144,8 @@ def main(argv: list[str] | None = None) -> None:
     p_gen.add_argument("--out", default="timeline")
     p_gen.add_argument("--privacy", choices=["standard", "strict"], default="standard")
     p_gen.add_argument("--label", help="覆盖 run 中的语义标签")
+    p_gen.add_argument("--exclusions", help="本代 exclusions.json 路径（覆盖报告数据源）")
+    p_gen.add_argument("--prev-exclusions", help="上一代 exclusions.json 路径（变更检测）")
     p_gen.set_defaults(func=cmd_generate)
 
     p_conv = sub.add_parser("convert", help="把 borg/restic 导出清单转换为 run JSON")

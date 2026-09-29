@@ -259,6 +259,49 @@ class TestManifest(unittest.TestCase):
                          s["added"] + s["modified"] + 1)
 
 
+class TestCoverage(unittest.TestCase):
+    """覆盖报告（research/08 T2.3/T2.4）：排除清单明示 + 变更告知。"""
+
+    def test_coverage_lists_exclusions(self):
+        run = bg.make_demo_run()
+        run["time"] = "2026-09-29T21:00:00"
+        ex = [{"class": "files", "pattern": "**/node_modules/", "reason": "依赖可重装"},
+              {"class": "files", "pattern": "**/*.log"}]
+        cov = bg.build_coverage(run, ex, [])
+        self.assertIn("不在备份内", cov)
+        self.assertIn("**/node_modules/", cov)
+        self.assertIn("依赖可重装", cov)
+        self.assertIn("files", cov)
+
+    def test_coverage_empty_exclusions(self):
+        run = bg.make_demo_run()
+        run["time"] = "2026-09-29T21:00:00"
+        self.assertIn("未配置排除规则", bg.build_coverage(run, [], []))
+
+    def test_coverage_rule_change_alert(self):
+        run = bg.make_demo_run()
+        run["time"] = "2026-09-29T21:00:00"
+        cur = [{"class": "files", "pattern": "**/new-dir/"}]
+        prev = [{"class": "files", "pattern": "**/old-dir/"}]
+        cov = bg.build_coverage(run, cur, prev)
+        self.assertIn("排除规则发生变化", cov)
+        self.assertIn("新增排除", cov)
+        self.assertIn("恢复备份", cov)
+
+    def test_load_exclusions(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "exclusions.json"
+            p.write_text(json.dumps([{"class": "files", "pattern": "**/x"}]), encoding="utf-8")
+            self.assertEqual(bg.load_exclusions(p)[0]["pattern"], "**/x")
+            self.assertEqual(bg.load_exclusions(Path(tmp) / "none.json"), [])
+
+    def test_render_includes_coverage(self):
+        files = bg.render_snapshot(bg.make_demo_run())
+        self.assertIn("COVERAGE.txt", files)
+        self.assertIn("覆盖报告", files["COVERAGE.txt"])
+
+
 class TestPreflight(unittest.TestCase):
     """预检（research/08 T2.2）：纯文件系统检查项。"""
 
