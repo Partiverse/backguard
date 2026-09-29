@@ -18,6 +18,21 @@
 3. 每人一个 ntfy topic（可选但强烈建议）：自托管优先；用 ntfy.sh 则 topic 必须高熵随机串
    （`openssl rand -hex 8` 拼进 topic 名），topic 即订阅密码。
 
+### 从旧机器迁移 rclone 配置（WebDAV 已在别处配置时）
+
+向导默认新建名为 `Universal Backups` 的 remote；若 WebDAV 凭证只在旧机器上，直接迁移配置文件免重输：
+
+```bash
+mkdir -p ~/.config/rclone
+scp 旧机:~/.config/rclone/rclone.conf ~/.config/rclone/
+rclone listremotes        # 记下已有 remote 名
+rclone lsd "已有remote名": # 验证可连
+```
+
+两种接法任选：①把已有 remote 改名为 `Universal Backups`（rclone.conf 里段名改一行）；
+②保留原名，跑完 init.sh 后把 `~/.config/partiverse-backup/config.sh` 里的
+`WEBDAV_REMOTE="Universal Backups"` 改成已有 remote 名。
+
 ## 1. macOS / Linux 接入（borg 路径）
 
 ```bash

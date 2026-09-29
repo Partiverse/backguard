@@ -6,6 +6,11 @@
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+log()    { echo "[$(date '+%H:%M:%S')] $*"; }
+info()   { echo -e "${BLUE}[INFO]${NC} $*"; }
+success(){ echo -e "${GREEN}[ OK ]${NC} $*"; }
+warn()   { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error()  { echo -e "${RED}[ERR]${NC} $*" >&2; }
 echo -e "${BOLD}${CYAN}"
 echo "  ╔═══════════════════════════════════════════╗"
 echo "  ║   Partiverse Backup System 初始化向导   ║"
@@ -68,6 +73,15 @@ RCLONE_CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone"
 RCLONE_CONF="$RCLONE_CONF_DIR/rclone.conf"
 mkdir -p "$RCLONE_CONF_DIR"
 
+# rclone 二进制解析（修复：此前 RCLONE_BIN 未赋值，remote 创建静默失败）
+RCLONE_BIN="${RCLONE_BIN:-$(command -v rclone 2>/dev/null || true)}"
+if [[ -z "$RCLONE_BIN" ]]; then
+    error "未找到 rclone。安装后重跑：brew install rclone（或 apt install rclone）"
+    info "若 WebDAV 凭证在旧机器的 rclone 配置里，也可直接迁移配置文件后跳过创建："
+    info "  mkdir -p '$RCLONE_CONF_DIR' && scp 旧机:~/.config/rclone/rclone.conf '$RCLONE_CONF/'"
+    exit 1
+fi
+
 # 检查是否已有 remote
 if grep -q "^\[Universal Backups\]" "$RCLONE_CONF" 2>/dev/null; then
     echo "  发现已有 rclone remote '${GREEN}Universal Backups${NC}'，跳过创建"
@@ -78,6 +92,9 @@ else
         vendor other \
         user "$WEBDAV_USER" \
         pass "$WEBDAV_PASS" 2>&1 | grep -v "NOTICE" || true
+    # 创建失败（如凭证未填）不阻断初始化，但必须明示
+    grep -q "^\[Universal Backups\]" "$RCLONE_CONF" 2>/dev/null \
+        || warn "remote 'Universal Backups' 未创建成功——可重跑本向导，或从旧机器迁移 rclone.conf 后手动改名"
 fi
 
 # ---------- 档案路径配置 ----------
@@ -111,6 +128,9 @@ echo -e "${YELLOW}━━━ 生成配置 ━━━${NC}"
 DEVICE_ID="${DEVICE_NAME}-${SYSTEM_NAME// /}"
 SYSTEM_ID="$DEVICE_ID"
 WEBDAV_ROOT=""
+
+# Windows restic 段引用 $USERNAME；非 Windows 平台无此变量（set -u 会炸），兜底
+USERNAME="${USERNAME:-$DEVICE_NAME}"
 
 cat > "$CONF_DIR/config.sh" <<CONF
 #!/usr/bin/env bash
@@ -211,7 +231,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=$HOME/.local/share $CONF_DIR $BACKUP_BASE
-TIMER
+SVC
 
     systemctl --user daemon-reload
     systemctl --user enable --now partiverse-backup.timer
@@ -221,14 +241,21 @@ elif [[ "$PLATFORM" == macos ]]; then
     echo "  创建 macOS launchd agent (每天 ${SCHED_H}:${SCHED_M})"
     PLIST_DIR="$HOME/Library/LaunchAgents"
     mkdir -p "$PLIST_DIR"
+    # backup.sh 需要 bash 5（nameref）；launchd 的 PATH 里是系统 bash 3.2，必须写死路径
+    if [[ -x /opt/homebrew/bin/bash ]]; then LAUNCH_BASH=/opt/homebrew/bin/bash
+    elif [[ -x /usr/local/bin/bash ]]; then LAUNCH_BASH=/usr/local/bin/bash
+    else
+        warn "未找到 bash 5（backup.sh 需要）——请先 brew install bash 再重跑本向导"
+        LAUNCH_BASH="/bin/bash"
+    fi
     cat > "$PLIST_DIR/com.partiverse.backup.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key><string>com.partiverse.backup</string>
     <key>ProgramArguments</key>
-    <array><string>$SCRIPT_DIR/backup.sh</string></array>
+    <array><string>$LAUNCH_BASH</string><string>$SCRIPT_DIR/backup.sh</string></array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>BORG_PASSPHRASE</key><string>$BORG_PASSPHRASE</string>

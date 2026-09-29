@@ -7,6 +7,10 @@ install_deps_macos() {
     local missing=()
     command -v borg >/dev/null 2>&1 || missing+=(borg)
     command -v rclone >/dev/null 2>&1 || missing+=(rclone)
+    # backup.sh 用 nameref（declare -n），系统 /bin/bash 3.2 跑不了，需要 bash 5
+    [[ -x /opt/homebrew/bin/bash ]] || missing+=(bash)
+    # 语义层清单密封（manifest.json.enc）依赖 age；缺失时只跳过密封，但建议一并装
+    command -v age >/dev/null 2>&1 || missing+=(age)
 
     [[ ${#missing[@]} -eq 0 ]] && return 0
 
