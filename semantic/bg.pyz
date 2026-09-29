@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random  # 仅用于演练抽样（可复现性需求，非加密用途；加密随机一律用 secrets）
 import re
 import shutil
 import sys
@@ -102,9 +103,10 @@ def derive_snapshot_id(classes: dict[str, list["Entry"]]) -> str:
 
 @dataclass(frozen=True)
 class Entry:
-    path: str  # posix 相对路径（已去除挂载根/家目录前缀）
+    path: str          # 显示/明文层用路径（auto-strip 后）
     size: int
     mtime: float
+    raw: str | None = None  # 归档内原始路径（strip 前）——drill 取回用；明文层不消费
 
 
 @dataclass
@@ -863,6 +865,36 @@ def cmd_preflight(args: argparse.Namespace) -> None:
     raise SystemExit(2 if n_err else (1 if n_warn else 0))
 
 
+# ---------------------------------------------------------------- 恢复演练抽样（research/08 T3.4）
+#
+# drill 的进程调用（age 解封 / borg 取回）在编排层（semantic.sh run_drill）——
+# bg 只做纯计算：从密封清单的明文形态抽「跨类别确定性样本」并给出期望值。
+
+
+def cmd_sample(args: argparse.Namespace) -> None:
+    manifest = json.loads(_read_text(Path(args.manifest)))
+    by_cls: dict[str, list[dict]] = {}
+    for cls, spec in manifest.get("classes", {}).items():
+        by_cls[cls] = [e for e in spec.get("entries", []) if e.get("size", 0) > 0]
+
+    # seed=当天日期：同一天演练抽同一组（可复现），跨天自然轮换防盲区
+    seed = args.seed or datetime.now().date().isoformat()
+    rng = random.Random(f"bg-drill/{seed}")
+    n = max(args.count, len(by_cls) or 1)
+    picked: list[dict] = []
+    total = sum(len(v) for v in by_cls.values()) or 1
+    for cls in sorted(by_cls):
+        pool = sorted(by_cls[cls], key=lambda e: e["path"])  # 排序保证确定性
+        k = max(1, round(n * len(pool) / total))
+        for e in rng.sample(pool, min(k, len(pool))):
+            # path 用归档内原始路径（raw）——drill 要拿它向 borg 取回
+            picked.append({"class": cls, "path": e.get("raw") or e["path"],
+                           "size": e["size"], "mtime": e.get("mtime", 0)})
+    picked.sort(key=lambda e: (e["class"], e["path"]))
+    print(json.dumps({"date": seed, "samples": picked,
+                      "total_files": total}, ensure_ascii=False))
+
+
 # ---------------------------------------------------------------- 汇总流程
 
 
@@ -953,7 +985,9 @@ def cmd_generate(args: argparse.Namespace) -> None:
         run["label"] = args.label
     if not run.get("snapshot_id"):
         run["snapshot_id"] = derive_snapshot_id(
-            {k: [Entry(**e) for e in v.get("entries", [])] for k, v in run["classes"].items()})
+            {k: [Entry(**{kk: e[kk] for kk in ("path", "size", "mtime") if kk in e})
+                 for e in v.get("entries", [])]
+             for k, v in run["classes"].items()})
     # 覆盖报告读本代/上代 exclusions.json（编排层导出，research/08 T2.1）
     if args.exclusions:
         run["exclusions_path"] = args.exclusions
@@ -987,8 +1021,15 @@ def cmd_convert(args: argparse.Namespace) -> None:
     def load(spec: dict) -> tuple[list[dict], int]:
         es = parser(spec.read_text(encoding="utf-8-sig"), args.strip, known_dirs)
         n = max(0, common_prefix_depth([e.path for e in es]) - 1) if args.auto_strip else 0
-        es = strip_entries(es, n)
-        return [{"path": e.path, "size": e.size, "mtime": e.mtime} for e in es], n
+        stripped = strip_entries(es, n)
+        out = []
+        for orig, e in zip(es, stripped):
+            d = {"path": e.path, "size": e.size, "mtime": e.mtime}
+            if n > 0:
+                # 密封清单专用：归档内原始路径（drill 取回用）——明文层不消费此字段
+                d["raw"] = orig.path
+            out.append(d)
+        return out, n
 
     known_dirs: set[str] = set()
     strip_depths: list[int] = []
@@ -1179,6 +1220,12 @@ def main(argv: list[str] | None = None) -> None:
     p_pf.add_argument("--engine", choices=["borg", "restic"], help="引擎版本检查（不传则跳过）")
     p_pf.add_argument("--json", action="store_true", help="机器可读输出")
     p_pf.set_defaults(func=cmd_preflight)
+
+    p_smp = sub.add_parser("sample", help="恢复演练抽样：从密封清单明文跨类别确定性抽样")
+    p_smp.add_argument("--manifest", required=True, help="解封后的 manifest.json")
+    p_smp.add_argument("--count", type=int, default=5, help="抽样总数（跨类别按占比分配）")
+    p_smp.add_argument("--seed", help="抽样种子（默认当天日期，可复现）")
+    p_smp.set_defaults(func=cmd_sample)
 
     args = ap.parse_args(argv)
     try:

@@ -302,6 +302,53 @@ class TestCoverage(unittest.TestCase):
         self.assertIn("覆盖报告", files["COVERAGE.txt"])
 
 
+class TestDrillSample(unittest.TestCase):
+    """恢复演练抽样（research/08 T3.4）：跨类别、确定性、非加密用途。"""
+
+    def _manifest(self):
+        import tempfile
+        p = Path(tempfile.mkdtemp()) / "manifest.json"
+        p.write_text(json.dumps({"classes": {
+            "files": {"entries": [{"path": f"Users/x/Docs/f{i}.txt", "size": 100 + i,
+                                   "mtime": 1700000000} for i in range(20)]},
+            "config": {"entries": [{"path": "Users/x/.ssh/id", "size": 5,
+                                    "mtime": 1700000000},
+                                   {"path": "Users/x/.zero", "size": 0,
+                                    "mtime": 1700000000}]},
+        }}, ensure_ascii=False), encoding="utf-8")
+        return p
+
+    def test_sample_deterministic_and_cross_class(self):
+        import io
+        import contextlib
+        m = self._manifest()
+        outs = []
+        for _ in range(2):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                bg.main(["sample", "--manifest", str(m), "--count", "5", "--seed", "2026-09-29"])
+            outs.append(buf.getvalue())
+        self.assertEqual(outs[0], outs[1])  # 同种子可复现
+        plan = json.loads(outs[0])
+        classes = {s["class"] for s in plan["samples"]}
+        self.assertIn("config", classes)  # 小类别也被抽到（至少 1）
+        for s in plan["samples"]:
+            self.assertIn("path", s)
+            self.assertGreater(s["size"], 0)  # 零字节文件不入样
+
+    def test_sample_different_seed_rotates(self):
+        import io
+        import contextlib
+        m = self._manifest()
+        seen = set()
+        for seed in ("2026-09-29", "2026-10-01"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                bg.main(["sample", "--manifest", str(m), "--count", "5", "--seed", seed])
+            seen.add(buf.getvalue())
+        self.assertEqual(len(seen), 2)  # 跨天轮换
+
+
 class TestPreflight(unittest.TestCase):
     """预检（research/08 T2.2）：纯文件系统检查项。"""
 

@@ -156,22 +156,6 @@ generate_semantic() {
         return 0
     fi
 
-    local sdir
-    semantic_bg generate --run "$tmp/run.json" --out "$stage" 2>>"$LOG" \
-        | sed -n 's/^已生成快照目录: //p' > "$tmp/.sdir"
-    if [[ ${PIPESTATUS[0]} -ne 0 || ! -s "$tmp/.sdir" ]]; then
-        warn "[semantic] generate 失败（详见 $LOG），跳过"
-        rm -rf "$tmp"
-        return 0
-    fi
-    sdir="$(cat "$tmp/.sdir")"
-
-    # 全量清单密封（age 双恢复路径；无 age/无密钥时非致命跳过）
-    seal_manifest "$tmp/run.json" "$sdir"
-
-    # STORY 手机推送（ntfy 可选 sidecar，research/08 T1.4）
-    notify_story "$sdir/STORY.md"
-
     # 排除清单导出（research/08 T2.1）→ 覆盖报告数据源
     export_exclusions "$tmp"
 
@@ -182,10 +166,12 @@ generate_semantic() {
         | sort -rn | head -1 | cut -d' ' -f2-)"
     [[ -n "$prev_ex" ]] && cp "$prev_ex" "$tmp/prev-exclusions.json" 2>/dev/null || true
 
+    local sdir
     semantic_bg generate --run "$tmp/run.json" --out "$stage" \
         --exclusions "$tmp/exclusions.json" \
-        --prev-exclusions "$tmp/prev-exclusions.json" >>"$LOG" 2>&1
-    if [[ $? -ne 0 || ! -s "$tmp/.sdir" ]]; then
+        --prev-exclusions "$tmp/prev-exclusions.json" 2>>"$LOG" \
+        | sed -n 's/^已生成快照目录: //p' > "$tmp/.sdir"
+    if [[ ${PIPESTATUS[0]} -ne 0 || ! -s "$tmp/.sdir" ]]; then
         warn "[semantic] generate 失败（详见 $LOG），跳过"
         rm -rf "$tmp"
         return 0
@@ -199,6 +185,15 @@ generate_semantic() {
     # STORY 手机推送（ntfy 可选 sidecar，research/08 T1.4）
     notify_story "$sdir/STORY.md"
 
+    # 恢复演练（30 天节流；从 files 仓库实取抽样文件并校验，research/08 T3.4）
+    local d_item d_repo d_arc
+    for d_item in "$@"; do
+        [[ "$d_item" == files:* ]] || continue
+        d_repo="${d_item#*:}"; d_repo="${d_repo%%:*}"
+        d_arc="${d_item##*:}"
+        run_drill "$sdir" "$d_repo" "$d_arc"
+    done
+
     # run JSON 留档（最近 60 份，research/08 T0.3）
     mkdir -p "$runs_dir"
     cp "$tmp/run.json" "$runs_dir/run-$(date +%Y%m%d-%H%M%S).json" 2>/dev/null || true
@@ -206,6 +201,63 @@ generate_semantic() {
     rm -rf "$tmp"
 
     success "[semantic] 时间轴已生成: $stage"
+}
+
+# 恢复演练（research/08 T3.4）：解封 → 抽样 → 从仓库实际取回 → 校验 → rescue-test.txt。
+# 主身份路径解封（救援路径需交互，留给人工季度演练）；30 天节流；非致命。
+# 用法: run_drill <快照目录> <files仓库路径> <files归档名>
+run_drill() {
+    local sdir="$1" repo="$2" arc="$3"
+    [[ "${SEM_DRILL:-1}" == "1" ]] || return 0
+    # 设备级文件：sdir（…/<dev>/YYYY/MM/DD/HHMM-标签）上 4 层到 <dev>
+    local rt="$sdir/../../../../rescue-test.txt"
+    # 30 天节流
+    if [[ -f "$rt" ]]; then
+        local last now
+        last="$(stat -f %m "$rt" 2>/dev/null || stat -c %Y "$rt" 2>/dev/null || echo 0)"
+        now="$(date +%s)"
+        (( now - last < 30 * 86400 )) && { info "[drill] 上次演练不足 30 天，跳过"; return 0; }
+    fi
+    local age_bin; age_bin="$(command -v age || command -v rage || true)"
+    local ident; ident="$(sem_keys_dir)/identity.txt"
+    [[ -n "$age_bin" && -f "$ident" && -f "$sdir/manifest.json.enc" ]] || {
+        info "[drill] 缺 age/主身份/密封清单，跳过"; return 0; }
+
+    local tmp; tmp="$(mktemp -d "${TMPDIR:-/tmp}/bg-drill.XXXXXX")"
+    local pass=0 failn=0
+    {
+        echo "# 恢复演练 rescue-test — $(date -Iseconds)"
+        echo "# 方式: 主身份解封 + 仓库实取 + 大小校验（救援路径季度人工演练）"
+        if ! "$age_bin" -d -i "$ident" -o "$tmp/manifest.json" "$sdir/manifest.json.enc" 2>/dev/null; then
+            echo "RESULT: FAIL（manifest 解封失败）"
+        else
+            semantic_bg sample --manifest "$tmp/manifest.json" --count 5 > "$tmp/plan.json" 2>/dev/null
+            local n; n="$(python3 -c "import json,sys;print(len(json.load(open('$tmp/plan.json'))['samples']))" 2>/dev/null || echo 0)"
+            local i=0
+            while (( i < n )); do
+                local path size got cls
+                path="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['path'])")"
+                size="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['size'])")"
+                cls="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['class'])")"
+                # 实取：borg extract（归档内路径为剥掉前导 / 的绝对路径形态）
+                # 必须在 tmp/out 内解包——cwd 解包会污染仓库所在目录
+                mkdir -p "$tmp/out"
+                if (cd "$tmp/out" && "$BORG" extract "$repo::$arc" "$path" 2>>"$LOG"); then
+                    got="$(find "$tmp/out" -type f -path "*$path" 2>/dev/null | head -1)"
+                fi
+                if [[ -n "${got:-}" && "$(stat -f %z "$got" 2>/dev/null || stat -c %s "$got" 2>/dev/null || echo -1)" == "$size" ]]; then
+                    echo "PASS [$cls] $path ($size B)"; pass=$((pass+1))
+                else
+                    echo "FAIL [$cls] $path（取回或大小不符）"; failn=$((failn+1))
+                fi
+                i=$((i+1))
+            done
+            echo "RESULT: $pass PASS / $failn FAIL（抽样 $n）"
+        fi
+    } > "$rt" 2>/dev/null
+    rm -rf "$tmp"
+    grep -q "RESULT: .*FAIL" "$rt" && warn "[drill] 恢复演练有失败项：$rt" \
+        || success "[drill] 恢复演练通过：$rt"
 }
 
 # 把三档案的 exclude 模式导出为 exclusions.json（机器可读）
