@@ -216,6 +216,7 @@ export_exclusions() {
         local first=1
         for cls in config files system; do
             eval "local -n e_ref=\"BORG_EXCLUDES_$cls\""
+            # shellcheck disable=SC2154  # e_ref 经上方 eval 动态绑定
             for ((i = 0; i < ${#e_ref[@]}; i += 2)); do
                 p="${e_ref[i+1]:-}"
                 [[ "$p" == --exclude || -z "$p" ]] && continue
