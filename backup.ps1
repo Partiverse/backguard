@@ -136,10 +136,16 @@ function Start-PartiverseBackup {
         }
     }
 
+    # 加载语义层（非致命：任何失败只告警，不影响备份结论）
+    if (Test-Path "$PSScriptRoot\semantic\semantic.ps1") {
+        . "$PSScriptRoot\semantic\semantic.ps1"
+    }
+
     Write-Host "=== Partiverse Backup STARTED (Windows) ==="
     Write-Host "Device: $env:DEVICE_ID"
 
     $failed = 0
+    $semDone = @()
     $classes = @("config", "files", "system")
     foreach ($cls in $classes) {
         $repo = "$BACKUP_BASE\restic-$cls"
@@ -148,6 +154,7 @@ function Start-PartiverseBackup {
 
         try {
             Backup-ResticClass -Class $cls -RepoPath $repo -ArcName $arcName
+            $semDone += @{ cls = $cls; repo = $repo }
 
             # 云端用 copy 只增不删（本地已 prune，云端保留全部历史）
             if ($env:SKIP_WEBDAV -ne "1") {
@@ -160,6 +167,21 @@ function Start-PartiverseBackup {
             $logTail = try { (Get-Content $env:BACKUP_LOG -Tail 4 -ErrorAction SilentlyContinue) -join ' | ' } catch { '' }
             Write-Error ("[$cls] " + $_.Exception.Message + " | log: " + $logTail)
             $failed++
+        }
+    }
+
+    # 语义层（research/06）：MANIFEST.txt / STORY.md / restore.md → timeline/
+    if ($semDone.Count -gt 0) {
+        try {
+            Invoke-SemanticLayer -Done $semDone -BackupBase $BACKUP_BASE `
+                -DeviceId $env:DEVICE_ID -TimeIso (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
+            if ($env:SKIP_WEBDAV -ne "1") {
+                & rclone copy "$BACKUP_BASE\timeline/" `
+                    "${env:WEBDAV_REMOTE}:${env:WEBDAV_ROOT}${env:SYSTEM_ID}/timeline/" `
+                    --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
+            }
+        } catch {
+            Write-Warning "[semantic] 生成失败（不影响备份）: $($_.Exception.Message)"
         }
     }
 

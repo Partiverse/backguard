@@ -10,6 +10,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  semantic:
+    # 语义层（research/06）单元测试 + demo E2E + zipapp 构建，三平台轻量矩阵
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: python -m unittest discover -s semantic -p "test_*.py" -v
+      - name: Demo E2E
+        shell: bash
+        run: |
+          python semantic/bg_semantic.py demo --out demo_output
+          base=demo_output/macbook-pro-macos15/timeline/2026/09/28/2100-evening
+          test -f "$base/MANIFEST.txt" || { echo "::error::MANIFEST.txt 缺失"; exit 1; }
+          test -f "$base/STORY.md"    || { echo "::error::STORY.md 缺失"; exit 1; }
+          test -f "$base/restore.md"  || { echo "::error::restore.md 缺失"; exit 1; }
+      - name: Build zipapp
+        run: python -m zipapp semantic/bg_semantic.py -o semantic/bg.pyz -p "/usr/bin/env python3"
+
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -23,7 +48,7 @@ jobs:
       - name: Lint
         run: |
           shellcheck --version
-          shellcheck -S warning -f gcc backup.sh restore.sh platform/linux.sh 2>&1 | tee /tmp/lint.txt
+          shellcheck -S warning -f gcc backup.sh restore.sh platform/linux.sh semantic/semantic.sh 2>&1 | tee /tmp/lint.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             grep -E '^[^ :]+:[0-9]+:[0-9]+' /tmp/lint.txt | sed 's/^/::error::/' | head -20 || true
@@ -69,6 +94,14 @@ jobs:
             echo "$cls: $count archive(s)"
             [ "$count" -ge 1 ] || { echo "::error::$cls 无归档"; exit 1; }
           done
+
+      - name: Assert semantic timeline
+        run: |
+          set -euo pipefail
+          manifest=$(find "$HOME/ci-repos/timeline" -name MANIFEST.txt | head -1)
+          [ -n "$manifest" ] || { echo "::error::timeline 无 MANIFEST.txt"; exit 1; }
+          echo "--- $manifest ---"
+          cat "$manifest"
 
   macos:
     runs-on: macos-latest
@@ -123,6 +156,14 @@ jobs:
             echo "$cls: $count archive(s)"
             [ "$count" -ge 1 ] || { echo "::error::$cls 无归档"; exit 1; }
           done
+
+      - name: Assert semantic timeline
+        run: |
+          set -euo pipefail
+          manifest=$(find "$HOME/ci-repos/timeline" -name MANIFEST.txt | head -1)
+          [ -n "$manifest" ] || { echo "::error::timeline 无 MANIFEST.txt"; exit 1; }
+          echo "--- $manifest ---"
+          cat "$manifest"
 
   windows:
     runs-on: windows-latest
@@ -262,6 +303,16 @@ jobs:
           $lines += "=== ALL WINDOWS ASSERTIONS PASSED ==="
           $lines | Out-File $logFile -Encoding utf8
           Write-Host "=== ALL WINDOWS ASSERTIONS PASSED ==="
+
+      - name: Assert semantic timeline
+        shell: pwsh
+        run: |
+          # semantic.ps1 在 backup 内已执行；此处断言产物存在（windows runner 预装 python）
+          $manifest = Get-ChildItem "$env:RUNNER_TEMP\repos\timeline" -Recurse -Filter "MANIFEST.txt" |
+              Select-Object -First 1
+          if (-not $manifest) { Write-Host "::error::timeline 无 MANIFEST.txt"; throw "no MANIFEST.txt" }
+          Write-Host "--- $($manifest.FullName) ---"
+          Get-Content $manifest.FullName
 
       - name: Push debug logs
         if: failure()

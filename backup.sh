@@ -122,12 +122,12 @@ backup_restic_class() {
 
     info "[$cls] 归档: $arc_name"
 
-    RESTIC_PASSWORD="$RESTIC_PASSWORD" "$RESTIC" -r "$repo_path" init 2>&1 | \
+    "$RESTIC" -r "$repo_path" init 2>&1 | \
         grep -v "repository already exists" || true
 
     set +e
     # shellcheck disable=SC2154  # exc_ref 由上方 eval 动态绑定
-    RESTIC_PASSWORD="$RESTIC_PASSWORD" "$RESTIC" backup \
+    "$RESTIC" backup \
         --host "$DEVICE_ID" \
         "${exc_ref[@]}" \
         "${inc_ref[@]}" \
@@ -140,7 +140,7 @@ backup_restic_class() {
     fi
 
     info "[$cls] 清理旧归档..."
-    RESTIC_PASSWORD="$RESTIC_PASSWORD" "$RESTIC" forget \
+    "$RESTIC" forget \
         --keep-daily=7 --keep-weekly=4 --keep-monthly=6 \
         -r "$repo_path" 2>&1 | tee -a "$LOG"
 }
@@ -159,6 +159,14 @@ sync_webdav() {
     set -e
     [[ $rc -eq 0 ]] && success "[WebDAV] 同步完成" || warn "[WebDAV] 同步失败 (rc=$rc)"
 }
+
+# ---------- 语义层（research/06：MANIFEST.txt/STORY.md/restore.md） ----------
+# 非致命：语义层任何失败只告警，不影响备份结论
+if [[ -f "$SCRIPT_DIR/semantic/semantic.sh" ]]; then
+    source "$SCRIPT_DIR/semantic/semantic.sh"
+else
+    generate_semantic() { warn "semantic/semantic.sh 缺失，跳过语义层"; }
+fi
 
 # ---------- 系统元数据收集 ----------
 collect_meta() {
@@ -196,6 +204,8 @@ main() {
         info "运行 ./init.sh 或在 $CONF_DIR/secrets.env 中设置"
         exit 1
     fi
+    # 子进程（borg/restic/语义层）经环境继承取用；不在命令行前缀传递凭据变量
+    export BORG_PASSPHRASE RESTIC_PASSWORD
 
     if [[ "$PLATFORM" == windows ]]; then
         check_deps "$RCLONE" "$RESTIC" || exit 1
@@ -219,6 +229,8 @@ main() {
     log "Device: $DEVICE_ID | System: $SYSTEM_ID"
 
     local failed=0
+    local -a sem_archives=()
+    SEM_TIME="$(date +"%Y-%m-%dT%H:%M:%S")"  # 本地时间（叙事按用户时钟显示）
 
     for cls in config files system; do
         local archive_name
@@ -226,15 +238,22 @@ main() {
         local remote="${WEBDAV_REMOTE}:${WEBDAV_ROOT}${SYSTEM_ID}/${cls}/"
 
         if [[ "$PLATFORM" == windows ]]; then
+            # restic-under-MSYS 路径：语义层由 backup.ps1（semantic.ps1）提供，M0 不在此覆盖
             local repo_path="$BACKUP_BASE/restic-$cls"
             backup_restic_class "$cls" "$repo_path" "$archive_name" || { failed=$((failed+1)); continue; }
             [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo_path" "$remote"
         else
             local repo="$BACKUP_BASE/borg-$cls"
             backup_borg_class "$cls" "$repo" "$archive_name" || { failed=$((failed+1)); continue; }
+            sem_archives+=("$cls:$repo:$archive_name")
             [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo" "$remote"
         fi
     done
+
+    generate_semantic "${sem_archives[@]}"
+    if [[ ${#sem_archives[@]} -gt 0 && "${SKIP_WEBDAV:-0}" != "1" ]]; then
+        sync_webdav "$BACKUP_BASE/timeline" "${WEBDAV_REMOTE}:${WEBDAV_ROOT}${SYSTEM_ID}/timeline"
+    fi
 
     if [[ $failed -eq 0 ]]; then
         success "=== Backup FULLY COMPLETE ($(date '+%Y-%m-%d %H:%M:%S')) ==="
