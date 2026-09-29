@@ -170,7 +170,8 @@ generate_semantic() {
     local sdir
     semantic_bg generate --run "$tmp/run.json" --out "$stage" \
         --exclusions "$tmp/exclusions.json" \
-        --prev-exclusions "$tmp/prev-exclusions.json" 2>>"$LOG" \
+        --prev-exclusions "$tmp/prev-exclusions.json" \
+        ${LOG_DIR:+--preflight "$LOG_DIR/preflight-latest.json"} 2>>"$LOG" \
         | sed -n 's/^已生成快照目录: //p' > "$tmp/.sdir"
     if [[ ${PIPESTATUS[0]} -ne 0 || ! -s "$tmp/.sdir" ]]; then
         warn "[semantic] generate 失败（详见 $LOG），跳过"

@@ -301,6 +301,28 @@ class TestCoverage(unittest.TestCase):
         self.assertIn("COVERAGE.txt", files)
         self.assertIn("覆盖报告", files["COVERAGE.txt"])
 
+    def test_coverage_preflight_findings_t25(self):
+        # 预检发现（半真文件等）进覆盖报告（research/08 T2.5）
+        import tempfile
+        run = bg.make_demo_run()
+        run["time"] = "2026-09-29T21:00:00"
+        with tempfile.TemporaryDirectory() as tmp:
+            pf = Path(tmp) / "preflight-latest.json"
+            pf.write_text(json.dumps({"errors": 0, "warnings": 1, "findings": [
+                {"level": "warning", "check": "云同步占位文件",
+                 "message": "/Users/x/Pictures 扫描 100 项，其中 3+ 个是占位文件"}]}, ensure_ascii=False),
+                encoding="utf-8")
+            run["preflight_path"] = str(pf)
+            files = bg.render_snapshot(run)
+        cov = files["COVERAGE.txt"]
+        self.assertIn("云同步占位文件", cov)
+        self.assertIn("3+ 个", cov)
+        # 无预检文件时干净降级
+        run["preflight_path"] = "/nonexistent-pf.json"
+        cov2 = bg.render_snapshot(run)["COVERAGE.txt"]
+        self.assertNotIn("✗", cov2)
+        self.assertNotIn("云同步占位文件", cov2)
+
 
 class TestDrillSample(unittest.TestCase):
     """恢复演练抽样（research/08 T3.4）：跨类别、确定性、非加密用途。"""

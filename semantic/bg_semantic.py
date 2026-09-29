@@ -745,8 +745,29 @@ def build_coverage(run: dict, exclusions: list[dict],
                 out.append(f"║   + 新增排除 [{c}] {truncate_width(str(p), 38)}")
             for c, p in sorted(removed)[:5]:
                 out.append(f"║   - 恢复备份 [{c}] {truncate_width(str(p), 38)}")
+
+    # 预检发现（research/08 T2.5）：半真文件（占位）与静默排除专项——
+    # preflight 与备份同跑，结果落 preflight-latest.json，报告引用当次值
+    if run.get("preflight_path"):
+        pf = load_exclusions_json_file(run["preflight_path"])
+        for f in pf:
+            if f.get("check") in ("云同步占位文件", ".git 被排除", "include 路径"):
+                mark = "✗" if f.get("level") == "error" else "⚠"
+                out.append(f"║ {mark} [{f['check']}] {truncate_width(str(f['message']), 44)}")
     out.append("╚══════════════════════════════════════════════════════════╝")
     return "\n".join(out) + "\n"
+
+
+def load_exclusions_json_file(path: str) -> list[dict]:
+    """读取 preflight --json-out 产出的 findings JSON；缺失/损坏返回空。"""
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        d = json.loads(_read_text(p))
+        return d.get("findings", []) if isinstance(d, dict) else []
+    except (ValueError, OSError):
+        return []
 
 
 def cmd_manifest(args: argparse.Namespace) -> None:
@@ -851,6 +872,12 @@ def cmd_preflight(args: argparse.Namespace) -> None:
 
     n_err = sum(1 for f in findings if f[0] == "error")
     n_warn = len(findings) - n_err
+    if args.json_out:
+        Path(args.json_out).write_text(
+            json.dumps({"errors": n_err, "warnings": n_warn,
+                        "findings": [{"level": lv, "check": ck, "message": msg}
+                                     for lv, ck, msg in findings]}, ensure_ascii=False),
+            encoding="utf-8")
     if args.json:
         print(json.dumps({"errors": n_err, "warnings": n_warn,
                           "findings": [{"level": lv, "check": ck, "message": msg}
@@ -993,6 +1020,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
         run["exclusions_path"] = args.exclusions
     if args.prev_exclusions:
         run["prev_exclusions_path"] = args.prev_exclusions
+    if args.preflight:
+        run["preflight_path"] = args.preflight
     target_dir = (Path(args.out) / sanitize_component(run.get("device", "unknown"))
                  / snapshot_dirname(run))
     files = render_snapshot(run, target_dir)
@@ -1187,6 +1216,7 @@ def main(argv: list[str] | None = None) -> None:
     p_gen.add_argument("--label", help="覆盖 run 中的语义标签")
     p_gen.add_argument("--exclusions", help="本代 exclusions.json 路径（覆盖报告数据源）")
     p_gen.add_argument("--prev-exclusions", help="上一代 exclusions.json 路径（变更检测）")
+    p_gen.add_argument("--preflight", help="本次备份的 preflight-latest.json（覆盖报告引用预检发现）")
     p_gen.set_defaults(func=cmd_generate)
 
     p_conv = sub.add_parser("convert", help="把 borg/restic 导出清单转换为 run JSON")
@@ -1219,6 +1249,7 @@ def main(argv: list[str] | None = None) -> None:
     p_pf.add_argument("--min-free-gb", type=int, default=5)
     p_pf.add_argument("--engine", choices=["borg", "restic"], help="引擎版本检查（不传则跳过）")
     p_pf.add_argument("--json", action="store_true", help="机器可读输出")
+    p_pf.add_argument("--json-out", help="同时把 JSON 写到该路径（覆盖报告数据源）")
     p_pf.set_defaults(func=cmd_preflight)
 
     p_smp = sub.add_parser("sample", help="恢复演练抽样：从密封清单明文跨类别确定性抽样")
