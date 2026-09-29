@@ -210,8 +210,9 @@ generate_semantic() {
 
 # 把三档案的 exclude 模式导出为 exclusions.json（机器可读）
 export_exclusions() {
-    local tmp="$1" out="$tmp/exclusions.json" cls i p first
-    first=1   # local 与赋值拆开：同语句内 local 先声明，赋值才生效（SC2318）
+    local tmp="$1" out cls i p first
+    out="$tmp/exclusions.json"   # 同语句内引用刚声明的变量会取不到值（SC2318）
+    first=1
     {
         printf '{"generated":"%s","exclusions":[' "$(date -Iseconds)"
         for cls in config files system; do
