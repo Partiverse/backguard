@@ -163,12 +163,14 @@ sync_target() {
     [[ $rc -eq 0 ]] && success "[rclone] $dest 同步完成" || warn "[rclone] $dest 同步失败 (rc=$rc)"
 }
 
-# 解析备份目标：兼容旧 WEBDAV_REMOTE；无任何目标时仅本地备份
+# 解析备份目标：兼容旧 WEBDAV_REMOTE；无任何目标时仅本地备份。
+# 调用后 BACKUP_TARGETS 恒为已定义数组（可能为空）——set -u 下安全。
 resolve_targets() {
-    if [[ ! ${BACKUP_TARGETS[@]+x} ]]; then
+    if [[ -z "${BACKUP_TARGETS[@]+x}" ]]; then
         BACKUP_TARGETS=()
-        [[ -n "${WEBDAV_REMOTE:-}" ]] && \
-            BACKUP_TARGETS=("${WEBDAV_REMOTE}:${WEBDAV_ROOT:-}${SYSTEM_ID}")
+    fi
+    if [[ ${#BACKUP_TARGETS[@]} -eq 0 && -n "${WEBDAV_REMOTE:-}" ]]; then
+        BACKUP_TARGETS=("${WEBDAV_REMOTE}:${WEBDAV_ROOT:-}${SYSTEM_ID}")
     fi
 }
 
