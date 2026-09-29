@@ -28,7 +28,7 @@ jobs:
         shell: bash
         run: |
           python semantic/bg_semantic.py demo --out demo_output
-          base=demo_output/macbook-pro-macos15/timeline/2026/09/28/2100-evening
+          base=demo_output/macbook-pro-macos15/2026/09/28/2100-evening
           test -f "$base/MANIFEST.txt" || { echo "::error::MANIFEST.txt 缺失"; exit 1; }
           test -f "$base/STORY.md"    || { echo "::error::STORY.md 缺失"; exit 1; }
           test -f "$base/restore.md"  || { echo "::error::restore.md 缺失"; exit 1; }
