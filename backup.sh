@@ -108,9 +108,19 @@ backup_borg_class() {
     [[ $create_rc -eq 1 ]] && warn "[$cls] 部分路径不存在（已归档）"
 
     info "[$cls] 清理旧归档 (7d/4w/6m)..."
-    BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" prune \
+    # prune rc=1 = warning 级（tam 提示等），pipefail 下裸管道会炸整个备份——与 create 同等容忍
+    set +e
+    "$BORG" prune \
         --stats --keep-daily=7 --keep-weekly=4 --keep-monthly=6 \
         "$repo" 2>&1 | tee -a "$LOG"
+    prune_rc=${PIPESTATUS[0]}
+    set -e
+    if [[ $prune_rc -ne 0 && $prune_rc -ne 1 ]]; then
+        error "[$cls] borg prune 失败 (exit $prune_rc)"
+        return 1
+    fi
+    [[ $prune_rc -eq 1 ]] && warn "[$cls] prune 带 warning (rc=1，已容忍)"
+    return 0
 }
 
 # ---------- Restic 备份单档案 (Windows) ----------

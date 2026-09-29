@@ -160,8 +160,9 @@ generate_semantic() {
     export_exclusions "$tmp"
 
     # 上一代快照的 exclusions.json（按 mtime 最近者，不含本代）→ 变更检测
+    # （首备时 stage 可能不存在——find 的 rc 经 (…; true) 中和，防 pipefail 退出）
     local prev_ex
-    prev_ex="$(find "$stage" -name exclusions.json 2>/dev/null | head -50 \
+    prev_ex="$( { find "$stage" -name exclusions.json 2>/dev/null || true; } | head -50 \
         | while read -r f; do stat -f '%m %N' "$f" 2>/dev/null; done \
         | sort -rn | head -1 | cut -d' ' -f2-)"
     [[ -n "$prev_ex" ]] && cp "$prev_ex" "$tmp/prev-exclusions.json" 2>/dev/null || true

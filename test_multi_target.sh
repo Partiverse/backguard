@@ -36,8 +36,9 @@ chmod 600 "$T/conf/partiverse-backup/secrets.env"
 mkdir -p "$T/dest"
 (
     cd "$T/dest"
+    # BG_DEBUG=1 时透传 bash -x（定位 E2E 失败用）
     SKIP_WEBDAV=0 XDG_CONFIG_HOME="$T/conf" RCLONE_CONFIG="$T/rclone.conf" HOME="$T/home" \
-        bash "$V0_DIR/backup.sh" > "$T/out.log" 2>&1
+        bash ${BG_DEBUG:+-x} "$V0_DIR/backup.sh" > "$T/out.log" 2>&1
 ) || { echo "E2E-FAIL: backup.sh 退出非零"; tail -20 "$T/out.log"; exit 1; }
 
 # 断言：目标收到三类仓库 + timeline 四件套
