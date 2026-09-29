@@ -329,7 +329,7 @@ class TestE2E(unittest.TestCase):
             out = Path(tmp) / "demo_output"
             rc = bg.main(["demo", "--out", str(out)])
             self.assertIsNone(rc)
-            target = out / "macbook-pro-macos15" / "timeline" / "2026" / "09" / "28" / "2100-evening"
+            target = out / "macbook-pro-macos15" / "2026" / "09" / "28" / "2100-evening"
             for name in ("MANIFEST.txt", "STORY.md", "restore.md"):
                 self.assertTrue((target / name).exists(), f"缺少 {name}")
 

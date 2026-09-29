@@ -81,11 +81,11 @@ def parse_iso(s: str | None) -> datetime | None:
 
 
 def sanitize_component(s: str) -> str:
-    """路径段安全化：[a-z0-9-]（research/06 §2.1 跨平台规则）。"""
+    """路径段安全化：[a-z0-9-]（research/06 §2.1 跨平台规则）。点转连字符保留可读性。"""
     s = s.strip().lower()
-    s = re.sub(r"[\s_]+", "-", s)
+    s = re.sub(r"[\s_.]+", "-", s)
     s = re.sub(r"[^a-z0-9-]", "", s)
-    return s.strip("-") or "unknown"
+    return re.sub(r"-+", "-", s).strip("-") or "unknown"
 
 
 def derive_snapshot_id(classes: dict[str, list["Entry"]]) -> str:
@@ -861,7 +861,9 @@ def snapshot_dirname(run: dict) -> Path:
 
 def write_outputs(run: dict, out_root: Path, files: dict[str, str]) -> Path:
     device = sanitize_component(run.get("device", "unknown"))
-    target = out_root / device / "timeline" / snapshot_dirname(run)
+    # 设备目录下直接是时间树（2026/09/29/...）——早期版本的额外 timeline 层已去除，
+    # 避免与外层收集目录名（timeline/）叠成「timeline/<设备>/timeline/」
+    target = out_root / device / snapshot_dirname(run)
     target.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
         (target / name).write_text(text, encoding="utf-8")

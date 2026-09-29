@@ -28,7 +28,10 @@ case "$(uname -s)" in
     *)          echo "FATAL: 未知平台"; exit 1;;
 esac
 
-DEVICE_NAME=$(hostname)
+# 设备名 = 稳定标识：短主机名去 .local 后缀（Bonjour 名），不含 OS 版本——
+# 系统升级不应分裂备份历史（OS 版本记入 system-meta/manifest.txt）
+DEVICE_NAME=$(hostname -s 2>/dev/null || hostname)
+DEVICE_NAME="${DEVICE_NAME%.local}"
 SYSTEM_NAME="${OS_NAME}${OS_VER}"
 
 echo -e "${BLUE}[1/6]${NC} 检测平台: ${BOLD}$PLATFORM${NC} ($SYSTEM_NAME)"
@@ -135,7 +138,8 @@ mkdir -p "$BACKUP_BASE"
 echo ""
 echo -e "${YELLOW}━━━ 生成配置 ━━━${NC}"
 
-DEVICE_ID="${DEVICE_NAME}-${SYSTEM_NAME// /}"
+# 设备 ID = 稳定标识（不含 OS 版本）；OS 版本只在 system-meta 里留档
+DEVICE_ID="${DEVICE_NAME// /}"
 SYSTEM_ID="$DEVICE_ID"
 
 # Windows restic 段引用 $USERNAME；非 Windows 平台无此变量（set -u 会炸），兜底
