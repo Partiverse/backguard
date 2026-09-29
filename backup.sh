@@ -145,19 +145,31 @@ backup_restic_class() {
         -r "$repo_path" 2>&1 | tee -a "$LOG"
 }
 
-# ---------- WebDAV 同步 ----------
+# ---------- 云端同步（rclone 统一管理） ----------
+# 存储目标 = rclone remote，由用户自行 rclone config 增删（WebDAV/B2/S3/SFTP/NAS…）。
+# BACKUP_TARGETS=("remote:子路径" ...)，设备段 <SYSTEM_ID> 自动追加避免多设备互覆；
+# 兼容旧单目标写法 WEBDAV_REMOTE(+WEBDAV_ROOT)。
 # 用 copy 而非 sync：本地 prune 后旧归档不应从云端删除，云端保留全部历史
-sync_webdav() {
-    local local_path="$1"; local remote="$2"
-    info "WebDAV -> $remote"
-    "$RCLONE" mkdir "$remote" 2>>"$LOG" || true
+sync_target() {
+    local local_path="$1"; local dest="$2"
+    info "rclone copy -> $dest"
+    "$RCLONE" mkdir "$dest" 2>>"$LOG" || true
     set +e
-    "$RCLONE" copy "$local_path/" "$remote/" \
+    "$RCLONE" copy "$local_path/" "$dest/" \
         --bwlimit 10M --transfers 2 --checkers 4 \
         --log-file "$RCLONE_LOG" 2>&1 | tee -a "$LOG"
     local rc=${PIPESTATUS[0]}
     set -e
-    [[ $rc -eq 0 ]] && success "[WebDAV] 同步完成" || warn "[WebDAV] 同步失败 (rc=$rc)"
+    [[ $rc -eq 0 ]] && success "[rclone] $dest 同步完成" || warn "[rclone] $dest 同步失败 (rc=$rc)"
+}
+
+# 解析备份目标：兼容旧 WEBDAV_REMOTE；无任何目标时仅本地备份
+resolve_targets() {
+    if [[ ! ${BACKUP_TARGETS[@]+x} ]]; then
+        BACKUP_TARGETS=()
+        [[ -n "${WEBDAV_REMOTE:-}" ]] && \
+            BACKUP_TARGETS=("${WEBDAV_REMOTE}:${WEBDAV_ROOT:-}${SYSTEM_ID}")
+    fi
 }
 
 # ---------- 语义层（research/06：MANIFEST.txt/STORY.md/restore.md） ----------
@@ -265,10 +277,29 @@ main() {
                 warn "rbw-agent 未解锁——备份时将挂起等待，可先执行 rbw unlock"
             fi
         fi
+
+        # 备份目标 remote 存在性（rclone 统一管理，research/05 §7）
+        resolve_targets
+        if [[ ${#BACKUP_TARGETS[@]} -gt 0 && -n "${RCLONE:-}" ]]; then
+            local tgt rname
+            local -a targets_rc=()
+            for tgt in "${BACKUP_TARGETS[@]}"; do
+                rname="${tgt%%:*}"
+                if ! "$RCLONE" listremotes 2>/dev/null | grep -qx "${rname}:"; then
+                    error "备份目标 remote '$rname' 不在 rclone 配置中（rclone listremotes 查看）——中止"
+                    targets_rc+=(bad)
+                fi
+            done
+            [[ ${#targets_rc[@]} -eq 0 ]] || exit 1
+        fi
     fi
 
     log "=== Backup STARTED ($PLATFORM) ==="
     log "Device: $DEVICE_ID | System: $SYSTEM_ID"
+    resolve_targets
+    if [[ ${#BACKUP_TARGETS[@]} -eq 0 ]]; then
+        warn "未配置备份目标（BACKUP_TARGETS/WEBDAV_REMOTE 均空）——本次仅本地备份"
+    fi
 
     local failed=0
     local -a sem_archives=()
@@ -277,24 +308,30 @@ main() {
     for cls in config files system; do
         local archive_name
         archive_name="${DEVICE_ID}-${cls}-$(date +%Y%m%d-%H%M%S)"
-        local remote="${WEBDAV_REMOTE}:${WEBDAV_ROOT}${SYSTEM_ID}/${cls}/"
 
         if [[ "$PLATFORM" == windows ]]; then
             # restic-under-MSYS 路径：语义层由 backup.ps1（semantic.ps1）提供，M0 不在此覆盖
             local repo_path="$BACKUP_BASE/restic-$cls"
             backup_restic_class "$cls" "$repo_path" "$archive_name" || { failed=$((failed+1)); continue; }
-            [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo_path" "$remote"
+            if [[ "${SKIP_WEBDAV:-0}" != "1" ]]; then
+                local tgt
+                for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$repo_path" "${tgt}/${SYSTEM_ID}/${cls}"; done
+            fi
         else
             local repo="$BACKUP_BASE/borg-$cls"
             backup_borg_class "$cls" "$repo" "$archive_name" || { failed=$((failed+1)); continue; }
             sem_archives+=("$cls:$repo:$archive_name")
-            [[ "${SKIP_WEBDAV:-0}" == "1" ]] || sync_webdav "$repo" "$remote"
+            if [[ "${SKIP_WEBDAV:-0}" != "1" ]]; then
+                local tgt
+                for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$repo" "${tgt}/${SYSTEM_ID}/${cls}"; done
+            fi
         fi
     done
 
     generate_semantic "${sem_archives[@]}"
     if [[ ${#sem_archives[@]} -gt 0 && "${SKIP_WEBDAV:-0}" != "1" ]]; then
-        sync_webdav "$BACKUP_BASE/timeline" "${WEBDAV_REMOTE}:${WEBDAV_ROOT}${SYSTEM_ID}/timeline"
+        local tgt
+        for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$BACKUP_BASE/timeline" "${tgt}/${SYSTEM_ID}/timeline"; done
     fi
 
     if [[ $failed -eq 0 ]]; then

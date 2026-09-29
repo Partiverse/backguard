@@ -144,13 +144,22 @@ function Start-PartiverseBackup {
     Write-Host "=== Partiverse Backup STARTED (Windows) ==="
     Write-Host "Device: $env:DEVICE_ID"
 
+    # 备份目标（rclone 统一管理）：BACKUP_TARGETS 分号分隔多目标 "remote:子路径"，
+    # 设备目录自动追加；兼容旧 WEBDAV_REMOTE(+WEBDAV_ROOT) 单目标
+    $targets = @()
+    if ($env:BACKUP_TARGETS) {
+        $targets = @($env:BACKUP_TARGETS -split ';' | Where-Object { $_ })
+    } elseif ($env:WEBDAV_REMOTE) {
+        $targets = @("${env:WEBDAV_REMOTE}:${env:WEBDAV_ROOT}${env:SYSTEM_ID}")
+    }
+    if ($targets.Count -eq 0) { Write-Warning "未配置备份目标（BACKUP_TARGETS/WEBDAV_REMOTE 均空）——本次仅本地备份" }
+
     $failed = 0
     $semDone = @()
     $classes = @("config", "files", "system")
     foreach ($cls in $classes) {
         $repo = "$BACKUP_BASE\restic-$cls"
         $arcName = "$env:DEVICE_ID-$cls-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        $remote = "${env:WEBDAV_REMOTE}:${env:WEBDAV_ROOT}${env:SYSTEM_ID}/$cls/"
 
         try {
             Backup-ResticClass -Class $cls -RepoPath $repo -ArcName $arcName
@@ -158,9 +167,12 @@ function Start-PartiverseBackup {
 
             # 云端用 copy 只增不删（本地已 prune，云端保留全部历史）
             if ($env:SKIP_WEBDAV -ne "1") {
-                & rclone mkdir $remote 2>$null
-                & rclone copy "$repo/" $remote --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
-                if ($LASTEXITCODE -ne 0) { Write-Warning "[WebDAV] 同步失败" }
+                foreach ($t in $targets) {
+                    $dest = "$t/$($env:SYSTEM_ID)/$cls"
+                    & rclone mkdir $dest 2>$null
+                    & rclone copy "$repo/" $dest --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
+                    if ($LASTEXITCODE -ne 0) { Write-Warning "[rclone] $dest 同步失败" }
+                }
             }
         } catch {
             # ::error:: 注解 CI 匿名可读；附上 backup.log 尾部定位真实原因
@@ -176,9 +188,10 @@ function Start-PartiverseBackup {
             Invoke-SemanticLayer -Done $semDone -BackupBase $BACKUP_BASE `
                 -DeviceId $env:DEVICE_ID -TimeIso (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
             if ($env:SKIP_WEBDAV -ne "1") {
-                & rclone copy "$BACKUP_BASE\timeline/" `
-                    "${env:WEBDAV_REMOTE}:${env:WEBDAV_ROOT}${env:SYSTEM_ID}/timeline/" `
-                    --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
+                foreach ($t in $targets) {
+                    & rclone copy "$BACKUP_BASE\timeline/" "$t/$($env:SYSTEM_ID)/timeline/" `
+                        --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
+                }
             }
         } catch {
             Write-Warning "[semantic] 生成失败（不影响备份）: $($_.Exception.Message)"
@@ -235,8 +248,9 @@ function Initialize-PartiverseBackup {
 `$env:DEVICE_ID = "$deviceId"
 `$env:SYSTEM_ID = "$systemId"
 `$env:BACKUP_BASE = "$BACKUP_BASE"
-`$env:WEBDAV_REMOTE = "Universal Backups"
-`$env:WEBDAV_ROOT = ""
+# 备份目标（rclone 统一管理）：分号分隔，格式 "remote:子路径"，设备目录自动追加；
+# 可随时 rclone config 增删 remote（B2/S3/WebDAV/NAS…）
+`$env:BACKUP_TARGETS = "Universal Backups:"
 
 # config: 敏感凭证与应用配置
 `$RESTIC_INCLUDES_config = "$env:USERPROFILE\.ssh;$env:APPDATA"

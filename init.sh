@@ -47,9 +47,6 @@ echo -e "${BLUE}[4/6]${NC} 日志目录: $LOG_DIR"
 echo ""
 echo -e "${YELLOW}━━━ 凭证设置 ━━━${NC}"
 echo "  备份加密密码用于加密本地仓库（不会上传明文）"
-echo "  WebDAV 密码用于连接 123Pan 等网盘"
-echo ""
-
 read -p "  输入备份加密密码 (Borg/restic): " -rs BORG_PASSPHRASE
 echo ""
 read -p "  确认密码: " -rs BORG_PASS2
@@ -59,43 +56,56 @@ if [[ "$BORG_PASSPHRASE" != "$BORG_PASS2" ]]; then
 fi
 [[ ${#BORG_PASSPHRASE} -lt 8 ]] && echo -e "${YELLOW}警告: 密码建议 ≥8 字符${NC}"
 
+# ---------- 存储目标（rclone 统一管理） ----------
 echo ""
-read -p "  输入 WebDAV URL [https://webdav.123pan.cn/webdav]: " WEBDAV_URL
-WEBDAV_URL="${WEBDAV_URL:-https://webdav.123pan.cn/webdav}"
-read -p "  输入 WebDAV 用户名: " WEBDAV_USER
-read -p "  输入 WebDAV 密码: " -rs WEBDAV_PASS
-echo ""
+echo -e "${YELLOW}━━━ 存储目标 ━━━${NC}"
+echo "  备份目标由 rclone 统一管理（WebDAV/B2/S3/SFTP/NAS… 可随时 rclone config 增删）"
 
-# ---------- rclone remote 配置 ----------
-echo ""
-echo -e "${YELLOW}━━━ rclone 配置 ━━━${NC}"
 RCLONE_CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rclone"
 RCLONE_CONF="$RCLONE_CONF_DIR/rclone.conf"
 mkdir -p "$RCLONE_CONF_DIR"
 
-# rclone 二进制解析（修复：此前 RCLONE_BIN 未赋值，remote 创建静默失败）
-RCLONE_BIN="${RCLONE_BIN:-$(command -v rclone 2>/dev/null || true)}"
-if [[ -z "$RCLONE_BIN" ]]; then
+# rclone 二进制解析（与 backup.sh 的 $RCLONE 同名；此前 RCLONE_BIN 未赋值导致 remote 创建静默失败）
+RCLONE="${RCLONE:-$(command -v rclone 2>/dev/null || true)}"
+if [[ -z "$RCLONE" ]]; then
     error "未找到 rclone。安装后重跑：brew install rclone（或 apt install rclone）"
-    info "若 WebDAV 凭证在旧机器的 rclone 配置里，也可直接迁移配置文件后跳过创建："
+    info "若 WebDAV 凭证在旧机器的 rclone 配置里，也可直接迁移配置文件："
     info "  mkdir -p '$RCLONE_CONF_DIR' && scp 旧机:~/.config/rclone/rclone.conf '$RCLONE_CONF/'"
     exit 1
 fi
 
-# 检查是否已有 remote
-if grep -q "^\[Universal Backups\]" "$RCLONE_CONF" 2>/dev/null; then
-    echo "  发现已有 rclone remote '${GREEN}Universal Backups${NC}'，跳过创建"
+TARGET_REMOTE=""
+TARGET_SUBPATH=""
+mapfile -t EXISTING_REMOTES < <("$RCLONE" listremotes 2>/dev/null | sed 's/:$//')
+
+if [[ ${#EXISTING_REMOTES[@]} -gt 0 ]]; then
+    echo "  检测到已有 rclone remote: ${EXISTING_REMOTES[*]}"
+    read -p "  选择备份目标 remote（回车=新建 Universal Backups）: " TARGET_REMOTE
+    TARGET_REMOTE="${TARGET_REMOTE%:}"
+fi
+
+if [[ -n "$TARGET_REMOTE" ]]; then
+    if ! printf '%s\n' "${EXISTING_REMOTES[@]}" | grep -qx "$TARGET_REMOTE"; then
+        warn "remote '$TARGET_REMOTE' 不在已有列表中，将按其名引用（请确认已 rclone config 配置）"
+    fi
 else
     echo "  创建 rclone WebDAV remote: Universal Backups"
-    "$RCLONE_BIN" config create Universal\ Backups webdav \
+    read -p "  输入 WebDAV URL [https://webdav.123pan.cn/webdav]: " WEBDAV_URL
+    WEBDAV_URL="${WEBDAV_URL:-https://webdav.123pan.cn/webdav}"
+    read -p "  输入 WebDAV 用户名: " WEBDAV_USER
+    read -p "  输入 WebDAV 密码: " -rs WEBDAV_PASS
+    echo ""
+    "$RCLONE" config create Universal\ Backups webdav \
         url "$WEBDAV_URL" \
         vendor other \
         user "$WEBDAV_USER" \
         pass "$WEBDAV_PASS" 2>&1 | grep -v "NOTICE" || true
-    # 创建失败（如凭证未填）不阻断初始化，但必须明示
     grep -q "^\[Universal Backups\]" "$RCLONE_CONF" 2>/dev/null \
-        || warn "remote 'Universal Backups' 未创建成功——可重跑本向导，或从旧机器迁移 rclone.conf 后手动改名"
+        || warn "remote 'Universal Backups' 未创建成功——可重跑本向导，或从旧机器迁移 rclone.conf"
+    TARGET_REMOTE="Universal Backups"
 fi
+read -p "  云端子路径（回车=remote 根，设备目录自动追加）: " TARGET_SUBPATH
+TARGET_SUBPATH="${TARGET_SUBPATH#/}"   # 去首斜杠
 
 # ---------- 档案路径配置 ----------
 echo ""
@@ -127,7 +137,6 @@ echo -e "${YELLOW}━━━ 生成配置 ━━━${NC}"
 
 DEVICE_ID="${DEVICE_NAME}-${SYSTEM_NAME// /}"
 SYSTEM_ID="$DEVICE_ID"
-WEBDAV_ROOT=""
 
 # Windows restic 段引用 $USERNAME；非 Windows 平台无此变量（set -u 会炸），兜底
 USERNAME="${USERNAME:-$DEVICE_NAME}"
@@ -144,13 +153,12 @@ export DEVICE_ID="$DEVICE_ID"
 
 # 路径
 export BACKUP_BASE="$BACKUP_BASE"
-export RCLONE_BIN="${RCLONE_BIN:-$(command -v rclone 2>/dev/null || echo "$HOME/bin/rclone-v1.75.1-linux-amd64/rclone")}"
+export RCLONE="${RCLONE:-$(command -v rclone 2>/dev/null || echo "$HOME/bin/rclone-v1.75.1-linux-amd64/rclone")}"
 export BORG="${BORG:-$(command -v borg 2>/dev/null || echo "$HOME/bin/borg")}"
 export RESTIC="${RESTIC:-$(command -v restic 2>/dev/null || echo "$HOME/bin/restic")}"
 
-# WebDAV
-export WEBDAV_REMOTE="Universal Backups"
-export WEBDAV_ROOT=""
+# 存储目标（rclone 统一管理；可追加多个，格式 "remote:子路径"，设备目录自动追加）
+export BACKUP_TARGETS=("$TARGET_REMOTE:${TARGET_SUBPATH}")
 
 # 档案定义 (Linux/macOS — borg)
 declare -A BORG_INCLUDES_config=(

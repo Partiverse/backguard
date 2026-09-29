@@ -14,7 +14,10 @@
 | Linux | `apt install borgbackup rclone` + age（[安装](https://github.com/FiloSottile/age#installation)） | rclone | Python 3.10+ |
 | Windows | restic + rclone（`backup.ps1 -Task Init` 自动装） | rclone | [Python](https://python.org) 勾选 Add to PATH + age.exe（可选，未装则跳过密封） |
 
-2. 存储目标：本地盘 / NAS / WebDAV 任一（BYO；B2 10GB 免费档亦可，成本见 research/05 §1）。
+2. 存储目标（rclone 统一管理）：每个 remote 由你自行 `rclone config` 增删（WebDAV/B2/S3/SFTP/NAS…均可并存），
+   `config.sh` 的 `BACKUP_TARGETS` 只引用 remote 名——加第二个云端 = 加一个 remote + targets 里加一项。
+   设备目录（`<SYSTEM_ID>`）自动追加到每个目标的子路径下，多设备同 remote 互不覆盖；
+   旧写法 `WEBDAV_REMOTE`(+`WEBDAV_ROOT`) 仍兼容（自动转单目标）。B2 10GB 免费档亦可，成本见 research/05 §1。
 3. 每人一个 ntfy topic（可选但强烈建议）：自托管优先；用 ntfy.sh 则 topic 必须高熵随机串
    （`openssl rand -hex 8` 拼进 topic 名），topic 即订阅密码。
 
@@ -31,7 +34,7 @@ rclone lsd "已有remote名": # 验证可连
 
 两种接法任选：①把已有 remote 改名为 `Universal Backups`（rclone.conf 里段名改一行）；
 ②保留原名，跑完 init.sh 后把 `~/.config/partiverse-backup/config.sh` 里的
-`WEBDAV_REMOTE="Universal Backups"` 改成已有 remote 名。
+`BACKUP_TARGETS` 里的 remote 名改成已有 remote（向导检测到已有 remote 时也会直接让你选）。
 
 ## 1. macOS / Linux 接入（borg 路径）
 

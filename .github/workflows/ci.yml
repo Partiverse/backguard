@@ -103,6 +103,12 @@ jobs:
           echo "--- $manifest ---"
           cat "$manifest"
 
+      - name: E2E multi-target (rclone local backend)
+        run: |
+          set -euo pipefail
+          # 脚本自带隔离的 rclone.conf（local 后端假 remote），不触网不碰真实配置
+          bash test_multi_target.sh "$PWD"
+
   macos:
     runs-on: macos-latest
     # macOS 自带 bash 3.2 不支持 declare -A / nameref，脚本需要 bash 5
