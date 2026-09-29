@@ -152,6 +152,9 @@ backup_restic_class() {
 # 用 copy 而非 sync：本地 prune 后旧归档不应从云端删除，云端保留全部历史
 sync_target() {
     local local_path="$1"; local dest="$2"
+    # ":/" 会被子类后端解析成文件系统绝对路径——
+    # 空子路径的目标（"remote:" + "/设备/..."）必须归一为 "remote:设备/..."
+    dest="$(sed 's|:/*|:|g' <<< "$dest")"  # BSD sed 兼容（不支持 \+）
     info "rclone copy -> $dest"
     "$RCLONE" mkdir "$dest" 2>>"$LOG" || true
     set +e

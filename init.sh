@@ -141,6 +141,32 @@ SYSTEM_ID="$DEVICE_ID"
 # Windows restic 段引用 $USERNAME；非 Windows 平台无此变量（set -u 会炸），兜底
 USERNAME="${USERNAME:-$DEVICE_NAME}"
 
+# ---------- 档案路径（按平台生成，过滤不存在的路径） ----------
+# includes/excludes 必须是 bash 索引数组（每路径/模式一个元素）——
+# 旧版模板曾生成「空格拼接单字符串」，borg 与 preflight 都会把整串当成一个路径
+mkdir -p "$LOG_DIR/system-meta"
+gen_arr() {
+    local p out=""
+    for p in "$@"; do
+        p="${p/#\~/$HOME}"
+        [[ -e "$p" ]] && out+="\"$p\" "
+    done
+    echo "${out% }"
+}
+case "$PLATFORM" in
+    macos)
+        CFG_INC=$(gen_arr ~/.config ~/Library/Preferences ~/Library/Keychains ~/.ssh ~/.gnupg)
+        FILES_INC=$(gen_arr ~/Documents ~/Desktop ~/Pictures ~/Movies ~/Music)
+        SYS_INC=$(gen_arr "$LOG_DIR/system-meta")
+        ;;
+    linux)
+        CFG_INC=$(gen_arr ~/.config ~/.ssh ~/.gnupg ~/.local/share/Bitwarden \
+                          ~/.local/share/kwalletd ~/.local/share/klipper ~/.local/share/konsole)
+        FILES_INC=$(gen_arr ~/Documents ~/Desktop ~/Pictures)
+        SYS_INC=$(gen_arr /etc "$LOG_DIR/system-meta")
+        ;;
+esac
+
 cat > "$CONF_DIR/config.sh" <<CONF
 #!/usr/bin/env bash
 # Partiverse Backup — 运行时配置（自动生成，勿手动修改）
@@ -160,24 +186,20 @@ export RESTIC="${RESTIC:-$(command -v restic 2>/dev/null || echo "$HOME/bin/rest
 # 存储目标（rclone 统一管理；可追加多个，格式 "remote:子路径"，设备目录自动追加）
 export BACKUP_TARGETS=("$TARGET_REMOTE:${TARGET_SUBPATH}")
 
-# 档案定义 (Linux/macOS — borg)
-declare -A BORG_INCLUDES_config=(
-    [config]="$HOME/.config/ $HOME/.ssh/ $HOME/.gnupg/ $HOME/.local/share/Bitwarden/ $HOME/.local/share/kwalletd/ $HOME/.local/share/klipper/ $HOME/.local/share/konsole/"
+# 档案定义 (Linux/macOS — borg)：索引数组，每路径/模式一个元素
+BORG_INCLUDES_config=($CFG_INC)
+BORG_INCLUDES_files=($FILES_INC)
+BORG_INCLUDES_system=($SYS_INC)
+BORG_EXCLUDES_config=(
+    --exclude "**/node_modules/" --exclude "**/__pycache__/" --exclude "**/.cache/"
+    --exclude "**/*.log" --exclude "**/chromium/Cache/" --exclude "**/Code/Cache/"
 )
-declare -A BORG_INCLUDES_files=(
-    [files]="$HOME/Documents/ $HOME/Desktop/ $HOME/Pictures/"
+BORG_EXCLUDES_files=(
+    --exclude "**/node_modules/" --exclude "**/__pycache__/" --exclude "**/.cache/"
+    --exclude "**/*.log" --exclude "**/.gradle/" --exclude "**/.cargo/"
 )
-declare -A BORG_INCLUDES_system=(
-    [system]="/etc/ $HOME/.local/share/partiverse-backup/system-meta/"
-)
-declare -A BORG_EXCLUDES_config=(
-    [config]="--exclude **/node_modules/ --exclude **/__pycache__/ --exclude **/.cache/ --exclude **/*.log --exclude **/chromium/Cache/ --exclude **/Code/Cache/"
-)
-declare -A BORG_EXCLUDES_files=(
-    [files]="--exclude **/node_modules/ --exclude **/__pycache__/ --exclude **/.cache/ --exclude **/*.log --exclude **/.gradle/ --exclude **/.cargo/"
-)
-declare -A BORG_EXCLUDES_system=(
-    [system]="--exclude **/node_modules/ --exclude **/__pycache__/ --exclude **/*.log"
+BORG_EXCLUDES_system=(
+    --exclude "**/node_modules/" --exclude "**/__pycache__/" --exclude "**/*.log"
 )
 
 # Windows (restic)
@@ -206,7 +228,11 @@ echo -e "${YELLOW}━━━ 调度设置 ━━━${NC}"
 
 SCHED_H="${SCHED_H:-02}"; SCHED_M="${SCHED_M:-34}"
 
-if [[ "$PLATFORM" == linux ]]; then
+# INIT_SKIP_SCHEDULER=1（E2E 用）：跳过调度注册，避免向真实 launchd/systemd/Task
+# Scheduler 注册指向隔离环境的任务；后续备份/验收流程照常
+if [[ "${INIT_SKIP_SCHEDULER:-0}" == "1" ]]; then
+    info "（INIT_SKIP_SCHEDULER=1：跳过调度注册）"
+elif [[ "$PLATFORM" == linux ]]; then
     echo "  创建 systemd user timer (每天 ${SCHED_H}:${SCHED_M})"
     mkdir -p "$HOME/.config/systemd/user"
     cat > "$HOME/.config/systemd/user/partiverse-backup.timer" <<TIMER
@@ -298,7 +324,12 @@ fi
 echo ""
 echo -e "${YELLOW}━━━ 首次备份 ━━━${NC}"
 echo "  首次备份会创建仓库并上传，请保持网络连接..."
-"$SCRIPT_DIR/backup.sh" && success "首次备份完成！" || { echo -e "${RED}首次备份失败，请检查日志${NC}"; cat "$LOG_DIR/backup.log" 2>/dev/null | tail -10; }
+if "$SCRIPT_DIR/backup.sh"; then
+    success "首次备份完成！"
+else
+    error "首次备份失败，请检查上方输出与 $LOG_DIR/backup.log；修复后手动重跑: $SCRIPT_DIR/backup.sh"
+    exit 1
+fi
 
 echo ""
 echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

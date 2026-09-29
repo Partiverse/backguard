@@ -168,7 +168,8 @@ function Start-PartiverseBackup {
             # 云端用 copy 只增不删（本地已 prune，云端保留全部历史）
             if ($env:SKIP_WEBDAV -ne "1") {
                 foreach ($t in $targets) {
-                    $dest = "$t/$($env:SYSTEM_ID)/$cls"
+                    # ":/" 会被解析成文件系统绝对路径——归一为 "remote:设备/类"
+                    $dest = ("$t/$($env:SYSTEM_ID)/$cls") -replace '://', ':'
                     & rclone mkdir $dest 2>$null
                     & rclone copy "$repo/" $dest --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
                     if ($LASTEXITCODE -ne 0) { Write-Warning "[rclone] $dest 同步失败" }
@@ -189,7 +190,8 @@ function Start-PartiverseBackup {
                 -DeviceId $env:DEVICE_ID -TimeIso (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
             if ($env:SKIP_WEBDAV -ne "1") {
                 foreach ($t in $targets) {
-                    & rclone copy "$BACKUP_BASE\timeline/" "$t/$($env:SYSTEM_ID)/timeline/" `
+                    $tdest = ($t + "/" + $env:SYSTEM_ID + "/timeline/") -replace '://', ':'
+                    & rclone copy "$BACKUP_BASE\timeline/" "$tdest" `
                         --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
                 }
             }
