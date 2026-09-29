@@ -189,7 +189,18 @@ class TestRendering(unittest.TestCase):
         out = bg.render_snapshot(run)
         self.assertIn("没有文件级变化", out["STORY.md"])
 
-    def test_first_snapshot_case(self):
+    def test_story_gap_warning_after_48h(self):
+        # 断档 >48h：STORY 置顶提醒（research/08 T1.5）
+        run = bg.make_demo_run()
+        run["time"] = "2026-10-02T21:00:00+08:00"  # 距 parent 5 天
+        out = bg.render_snapshot(run)
+        self.assertIn("断档", out["STORY.md"])
+        self.assertIn("5 天", out["STORY.md"])
+        # 正常间隔：无提醒
+        normal = bg.render_snapshot(bg.make_demo_run())["STORY.md"]
+        self.assertNotIn("断档", normal)
+
+    def test_story_first_snapshot_case(self):
         run = self.run
         run.pop("parent_time")
         for cls in run["classes"].values():

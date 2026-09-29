@@ -230,7 +230,7 @@ main() {
 
     local failed=0
     local -a sem_archives=()
-    SEM_TIME="$(date +"%Y-%m-%dT%H:%M:%S")"  # 本地时间（叙事按用户时钟显示）
+    SEM_TIME="$(date +"%Y-%m-%dT%H:%M:%S%z")"  # 带时区，与 --parent-time 口径一致（bg 统一转本地显示）
 
     for cls in config files system; do
         local archive_name

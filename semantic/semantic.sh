@@ -61,6 +61,28 @@ semantic_bg() {
     return 127
 }
 
+# STORY 手机推送（research/08 T1.4）：ntfy 可选 sidecar，SEM_NTFY_URL 未配置即静默跳过。
+# 推荐自托管 ntfy（无画像）；用公共服务时 topic 名请用高熵随机串（ntfy.sh 的 topic 即订阅密码）。
+# STORY 本身已受明文层红线约束（目录名+统计，无完整文件名），推送摘要安全。
+notify_story() {
+    local story_file="$1"
+    [[ -n "${SEM_NTFY_URL:-}" ]] || return 0
+    command -v curl >/dev/null 2>&1 || { info "[semantic] 无 curl，跳过 ntfy 推送"; return 0; }
+    case "$SEM_NTFY_URL" in
+        https://*|http://*) : ;;  # 自托管局域网 http 亦允许（用户自行权衡）
+        *) warn "[semantic] SEM_NTFY_URL 非法（需 http/https），跳过推送"; return 0 ;;
+    esac
+    local summary
+    summary="$( { sed -n '1p' "$story_file"; grep -m2 '^- ' "$story_file"; } \
+        | tr -d '\n' | cut -c1-400)"
+    if curl -sS -m 10 -H "Title: backguard 备份完成" -H "Tags: floppy_disk" \
+            --data-binary "$summary" "$SEM_NTFY_URL" >>"$LOG" 2>&1; then
+        success "[semantic] STORY 摘要已推送"
+    else
+        warn "[semantic] ntfy 推送失败（不影响备份）"
+    fi
+}
+
 # 主入口：$@ = "class:repo:archive"（本次成功备份的 borg 档案）
 generate_semantic() {
     [[ $# -eq 0 ]] && { info "[semantic] 无成功档案，跳过"; return 0; }
@@ -99,9 +121,10 @@ generate_semantic() {
                 # 上一代时间取自首个发现的 prev 归档（同次运行的各类相差仅数秒）
                 if [[ ${#parent_args[@]} -eq 0 ]]; then
                     local pt
-                    # borg 1.4 的 info --json 用 archives 数组（无 archive 键），两种形态都兼容
+                    # borg 的 start 是无后缀的 naive UTC（实测 1.4）；补 UTC 后缀转本地时区，
+                    # 与 --time 的本地时间口径对齐（bg 侧 local_naive 统一显示本地）
                     pt="$("$BORG" info --json "$repo::$prev_arc" 2>/dev/null \
-                        | python3 -c "import sys,json;d=json.load(sys.stdin);a=d.get('archive') or (d.get('archives') or [{}])[0];print(a.get('start',''))" 2>/dev/null || true)"
+                        | python3 -c "import sys,json,datetime;d=json.load(sys.stdin);a=d.get('archive') or (d.get('archives') or [{}])[0];s=a.get('start','');print(datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc).astimezone().isoformat() if s else '')" 2>/dev/null || true)"
                     [[ -n "$pt" ]] && parent_args+=("--parent-time" "$pt")
                 fi
             fi
@@ -126,7 +149,7 @@ generate_semantic() {
     label="${SEM_LABEL:-$label}"
 
     if ! semantic_bg convert --engine borg "${class_args[@]}" "${prev_args[@]}" "${parent_args[@]}" \
-            --device "$DEVICE_ID" --time "${SEM_TIME:-$(date +"%Y-%m-%dT%H:%M:%S")}" \
+            --device "$DEVICE_ID" --time "${SEM_TIME:-$(date +"%Y-%m-%dT%H:%M:%S%z")}" \
             --label "$label" --auto-strip --out "$tmp/run.json" >>"$LOG" 2>&1; then
         warn "[semantic] convert 失败（详见 $LOG），跳过"
         rm -rf "$tmp"
@@ -145,6 +168,9 @@ generate_semantic() {
 
     # 全量清单密封（age 双恢复路径；无 age/无密钥时非致命跳过）
     seal_manifest "$tmp/run.json" "$sdir"
+
+    # STORY 手机推送（ntfy 可选 sidecar，research/08 T1.4）
+    notify_story "$sdir/STORY.md"
 
     # run JSON 留档（最近 60 份，research/08 T0.3）
     mkdir -p "$runs_dir"

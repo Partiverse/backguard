@@ -116,8 +116,45 @@ backup/
 │   ├── linux.sh        Linux 平台配置（依赖安装、元数据、调度）
 │   ├── macos.sh        macOS 平台配置
 │   └── windows.ps1     Windows 平台配置
+├── semantic/           语义层（每次备份自动生成可读时间轴）
+│   ├── semantic.sh     编排：清单导出 → convert → generate → 密封 → 推送（borg）
+│   ├── semantic.ps1    同上（restic / Windows）
+│   ├── init-keys.exp   密钥初始化（expect 驱动 age，恢复码闭环验证）
+│   ├── bg_semantic.py  语义核心（MANIFEST.txt / STORY.md / restore.md / manifest）
+│   └── bg.pyz          上述单文件打包
 └── .gitignore          忽略 secrets.env 和本地缓存
 ```
+
+---
+
+## 语义层配置（可选，全部非致命：缺依赖只跳过不影响备份）
+
+备份成功后自动在 `<BACKUP_BASE>/timeline/<设备>/timeline/年/月/日/时分-标签/` 生成：
+
+| 文件 | 说明 |
+|---|---|
+| `MANIFEST.txt` | 明文摘要卡（文件数/体积/目录分布），裸文件管理器可读 |
+| `STORY.md` | 中文叙事：「新增 214 张照片，日本旅行-0926」；断档 >48h 置顶警示 |
+| `restore.md` | 本快照恢复指引（含 manifest.json.enc 双路径解密命令） |
+| `manifest.json.enc` | 完整文件清单（age 加密账本，完整文件名只存在这里） |
+
+配置项（写入 `config.sh` / `config.ps1`）：
+
+| 变量 | 作用 |
+|---|---|
+| `SEM_NTFY_URL` | STORY 摘要推送（如自托管 `https://ntfy.example.com/backguard-设备名`）；推荐自托管，公共服务 topic 请用高熵随机串 |
+| `SEM_LABEL` | 覆盖自动时段标签（morning/noon/afternoon/evening/night） |
+| `SEM_KEYS_DIR` | 密钥目录（默认 `~/.config/partiverse-backup/age` / `%APPDATA%\PartiverseBackup\age`） |
+
+密钥初始化（交互终端运行一次，恢复码抄写到纸上）：
+
+```bash
+expect semantic/init-keys.exp "$(command -v age)" ~/.config/partiverse-backup/age
+```
+
+依赖：Python 3（渲染）、age（清单密封）；二者缺失时对应产物自动跳过。
+隐私红线：明文层永不出现完整文件名（凭据目录只写数量）；`manifest.json.enc` 用
+主身份或恢复码任一路径解密，命令见每个快照的 `restore.md`。
 
 ---
 

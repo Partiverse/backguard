@@ -438,10 +438,19 @@ def _cluster_label(c: Cluster, privacy: str) -> str:
     return c.name
 
 
+def local_naive(dt: datetime | None) -> datetime | None:
+    """aware → 本地 naive 统一显示口径（borg info 返回 UTC ISO 字符串）。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
 def build_story(run: dict, per_class: dict[str, DiffResult], clusters: list[Cluster],
                 streak: int) -> str:
-    t = parse_iso(run["time"])
-    parent_t = parse_iso(run.get("parent_time"))
+    t = local_naive(parse_iso(run["time"]))
+    parent_t = local_naive(parse_iso(run.get("parent_time")))
     privacy = run.get("privacy", "standard")
     label = run.get("label", "")
     head = f"# {t.strftime('%Y-%m-%d %H:%M')} · {label}".rstrip(" ·") + "\n\n"
@@ -452,6 +461,14 @@ def build_story(run: dict, per_class: dict[str, DiffResult], clusters: list[Clus
         intro = "这次备份相比上一份快照：\n\n"
     else:
         intro = "这是这个仓库的第一份快照：\n\n"
+
+    # 断档提醒（research/08 T1.5）：距上次备份 >48h 时置顶提示，
+    # 对抗「默默停摆」——让异常空窗在恢复的第一时间被看见
+    if parent_t and t:
+        gap_h = (t - parent_t).total_seconds() / 3600
+        if gap_h > 48:
+            intro += (f"> ⚠️ 距上次备份已约 {gap_h / 24:.0f} 天——中间出现了断档，"
+                      f"请留意定时任务是否正常。\n\n")
 
     def tag_members(c: Cluster, tag: str) -> list[Entry]:
         return [m for m in c.members if classify(m.path) == tag]
@@ -497,6 +514,8 @@ def build_story(run: dict, per_class: dict[str, DiffResult], clusters: list[Clus
 
     if clusters:
         footer = f"\n总增量 {human_bytes(total_add)}（新增 {n_add} · 修改 {n_mod} · 删除 {n_del}）。\n"
+    elif parent_t and t and (t - parent_t).total_seconds() > 48 * 3600:
+        footer = "与上次相比没有文件级变化。备份已恢复运行。\n"
     else:
         footer = (f"与上次相比没有文件级变化（{n_mod} 个文件时间戳被触碰）——"
                   f"备份在按时运行，一切正常。\n")
@@ -536,7 +555,7 @@ def _class_stat_block(cls: str, entries: list[Entry], d: DiffResult, privacy: st
 
 
 def build_manifest(run: dict, per_class: dict[str, tuple[list[Entry], DiffResult]]) -> str:
-    t = parse_iso(run["time"])
+    t = local_naive(parse_iso(run["time"]))
     privacy = run.get("privacy", "standard")
     date_line = f"{t.strftime('%Y-%m-%d')}（{WEEKDAYS[t.weekday()]}）{t.strftime('%H:%M')}"
     classes_line = "+".join(per_class.keys())
@@ -550,7 +569,7 @@ def build_manifest(run: dict, per_class: dict[str, tuple[list[Entry], DiffResult
     sid = run.get("snapshot_id") or "(未指定)"
     line = f"快照 ID: {sid}"
     if run.get("parent_time"):
-        pt = parse_iso(run["parent_time"])
+        pt = local_naive(parse_iso(run["parent_time"]))
         line += f" · 上一次: {pt.strftime('%Y-%m-%d %H:%M')}"
     content.append(line)
     content.append(f"类别: {classes_line}" + (" · 隐私模式: 严格" if privacy == "strict" else ""))

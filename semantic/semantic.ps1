@@ -113,6 +113,22 @@ function Invoke-SemanticLayer {
         else { Write-Warning "[semantic] manifest 密封失败（不影响其余产物）" }
     }
 
+    # STORY 手机推送（research/08 T1.4）：ntfy 可选 sidecar，SEM_NTFY_URL 未配置即静默跳过。
+    # STORY 已受明文层红线约束（目录名+统计），推送摘要安全；公共服务 topic 请用高熵随机串。
+    if ($env:SEM_NTFY_URL -and $env:SEM_NTFY_URL -match '^https?://') {
+        try {
+            $storyPath = Join-Path $snapshotDir "STORY.md"
+            $summary = ((Get-Content $storyPath -TotalCount 8 | Where-Object { $_ -match '^(#|中|- )' } |
+                Select-Object -First 3) -join ' ')
+            if ($summary.Length -gt 400) { $summary = $summary.Substring(0, 400) }
+            Invoke-RestMethod -Method Post -Uri $env:SEM_NTFY_URL -Body $summary -TimeoutSec 10 `
+                -Headers @{ Title = "backguard 备份完成"; Tags = "floppy_disk" } | Out-Null
+            Write-Host "[ OK ] [semantic] STORY 摘要已推送" -ForegroundColor Green
+        } catch {
+            Write-Warning "[semantic] ntfy 推送失败（不影响备份）: $($_.Exception.Message)"
+        }
+    }
+
     # run JSON 留档（最近 60 份）
     New-Item -ItemType Directory -Force -Path $runsDir | Out-Null
     Copy-Item $runJson (Join-Path $runsDir "run-$(Get-Date -Format 'yyyyMMdd-HHmmss').json") `
