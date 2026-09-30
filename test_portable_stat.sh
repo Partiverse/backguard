@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# 跨平台 mtime/尺寸探测单测（Linux 集成环境曾静默失效的教训）：
-# GNU stat 的 -f 是「文件系统状态」而非格式串，非法指令只产垃圾不报错——
-# BSD 写法 `stat -f '%m %N'` 在 Linux 上会把上一代 exclusions.json 的选取悄悄变成乱序。
+# 跨平台 mtime/尺寸探测单测（Linux 集成环境曾整条崩掉的教训）：
+# GNU stat 的 -f 是「文件系统状态」而非格式串——coreutils 9.4 实测（ubuntu:24.04）：
+# `stat -f '%m %N' f` 把格式串当文件系统名，报 cannot read file system information
+# 并返回 rc=1，同时把真实文件的文件系统状态块打到 stdout。于是修复前的
+# latest_prev_exclusions（裸 `stat -f` 流水线）在 Linux 上被 pipefail 直接带崩，
+# 而 backup.sh 当时无兜底地调用 generate_semantic——非首备的 Linux 运行整条退出 1；
+# 带 `|| …` 的调用点则把状态块并着 epoch 收进多行垃圾值。
 # 本测试用「GNU 语义」的 stat shim 顶在 PATH 前面，强制暴露这类依赖；
 # 语义层因此一律走 POSIX（date -r 取 epoch、wc -c 取字节数）。
 # 用法: ./test_portable_stat.sh
@@ -13,7 +17,7 @@ trap 'rm -rf "$T"' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 
 # ---------- GNU 语义 stat shim ----------
-# -c/--format：支持 %Y(epoch mtime) %s(size) %N(name)；-f：文件系统状态，未知指令→"?"
+# -c/--format：支持 %Y(epoch mtime) %s(size) %N(name)；-f：文件系统状态，rc=1 + 状态块
 mkdir -p "$T/bin"
 cat > "$T/bin/stat" <<'SHIM'
 #!/usr/bin/env bash
@@ -21,7 +25,7 @@ fmt=""; mode="normal"; args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -c|--format|-f)
-            # GNU: -f 后跟文件系统格式串（%m 非法），-c 才是文件字段
+            # GNU: -f 后跟的「格式串」其实是文件系统名参数，-c 才是文件字段
             mode="$1"; fmt="$2"; shift 2 ;;
         -*) shift ;;
         *) args+=("$1"); shift ;;
@@ -31,10 +35,12 @@ done
 f="${args[0]}"
 [[ -e "$f" ]] || { echo "stat: cannot stat '$f': No such file or directory" >&2; exit 1; }
 if [[ "$mode" == "-f" ]]; then
-    # 模拟 coreutils：文件系统字段表里没有 %m/%N/%z/%s → 未知转换打印 "?"
-    out="$(sed -e 's/%m/?/g' -e 's/%N/?/g' -e 's/%z/?/g' -e 's/%s/?/g' <<< "$fmt")"
-    echo "$out"
-    exit 0
+    # 复刻 coreutils：把 fmt 当文件系统名读不到 → stderr 报错 + rc=1，stdout 仍是文件系统块
+    echo "stat: cannot read file system information for '$fmt': No such file or directory" >&2
+    printf '  File: "%s"\n' "$f"
+    printf '    ID: 4f4627a74c04bad5 Namelen: 255     Type: overlayfs\n'
+    printf 'Block size: 4096       Fundamental block size: 4096\n'
+    exit 1
 fi
 # -c 文件字段用 POSIX 手段求值（date -r / wc -c），本 shim 因此在 GNU/BSD 两侧都可跑
 epoch="$(date -r "$f" +%s)"
@@ -48,7 +54,10 @@ SHIM
 chmod +x "$T/bin/stat"
 export PATH="$T/bin:$PATH"
 echo -n "0123456789" > "$T/sample.txt"
-[[ "$("$T/bin/stat" -f '%m %N' "$T/sample.txt")" == "? ?" ]] || fail "shim 未按 GNU 语义产垃圾输出"
+# shim 自检：未按 GNU 语义失败 = 这个网兜不住回归
+if "$T/bin/stat" -f '%m %N' "$T/sample.txt" >/dev/null 2>&1; then
+    fail "shim 未按 GNU 语义报错（coreutils 的 stat -f 应 rc=1）"
+fi
 
 # ---------- stub 日志函数（semantic.sh 由 backup.sh source，依赖外部日志）----------
 log(){ :; }; info(){ :; }; warn(){ :; }; error(){ :; }; success(){ :; }
