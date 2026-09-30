@@ -13,6 +13,12 @@
 
 sem_keys_dir() { echo "${SEM_KEYS_DIR:-$CONF_DIR/age}"; }
 
+# 跨平台文件属性：GNU stat 的 -f 是「文件系统状态」（%m/%N/%z 对它是非法指令，
+# 只打垃圾且不报错），BSD stat 则没有 -c——任何一边写死都会让另一边静默拿到错值
+# （Linux 上排除规则变更检测长期失效就是这个原因）。一律走 POSIX：date -r / wc -c。
+file_mtime() { [[ -e "$1" ]] && date -r "$1" +%s 2>/dev/null || echo 0; }
+file_size()  { [[ -f "$1" ]] && wc -c < "$1" | tr -d '[:space:]' || echo -1; }
+
 # age 解析：launchd 环境 PATH 无 /opt/homebrew/bin，command -v 扑空 → 密封被静默跳过
 find_age() {
     local c
@@ -75,24 +81,36 @@ semantic_bg() {
 # STORY 手机推送（research/08 T1.4）：ntfy 可选 sidecar，SEM_NTFY_URL 未配置即静默跳过。
 # 推荐自托管 ntfy（无画像）；用公共服务时 topic 名请用高熵随机串（ntfy.sh 的 topic 即订阅密码）。
 # STORY 本身已受明文层红线约束（目录名+统计，无完整文件名），推送摘要安全。
-notify_story() {
-    local story_file="$1"
+# 底座一律非致命：任何失败只告警，不影响备份退出码。
+notify_push() {
+    local title="$1" tags="$2" body="$3"
     [[ -n "${SEM_NTFY_URL:-}" ]] || return 0
     command -v curl >/dev/null 2>&1 || { info "[semantic] 无 curl，跳过 ntfy 推送"; return 0; }
     case "$SEM_NTFY_URL" in
         https://*|http://*) : ;;  # 自托管局域网 http 亦允许（用户自行权衡）
         *) warn "[semantic] SEM_NTFY_URL 非法（需 http/https），跳过推送"; return 0 ;;
     esac
-    local summary
-    summary="$( { sed -n '1p' "$story_file"; grep -m2 '^- ' "$story_file"; } \
-        | tr -d '\n' | cut -c1-400)"
-    if curl -sS -m 10 -H "Title: backguard 备份完成" -H "Tags: floppy_disk" \
-            --data-binary "$summary" "$SEM_NTFY_URL" >>"$LOG" 2>&1; then
-        success "[semantic] STORY 摘要已推送"
+    if curl -sS -m 10 -H "Title: $title" -H "Tags: $tags" \
+            --data-binary "$body" "$SEM_NTFY_URL" >>"$LOG" 2>&1; then
+        success "[semantic] 已推送: $title"
     else
         warn "[semantic] ntfy 推送失败（不影响备份）"
     fi
+    return 0
 }
+
+notify_story() {
+    local story_file="$1" summary
+    [[ -n "${SEM_NTFY_URL:-}" ]] || return 0
+    # grep 无命中（「一切正常」型快照没有变更要点）rc=1，pipefail 下会让赋值语句
+    # 炸掉整个备份——推送是旁路，必须 (… || true) 中和
+    summary="$( { sed -n '1p' "$story_file"; grep -m2 '^- ' "$story_file" || true; } \
+        | tr -d '\n' | cut -c1-400)"
+    notify_push "backguard 备份完成" "floppy_disk" "$summary"
+}
+
+# 异常告警（云端推送失败等），backup.sh 编排层调用——同样是旁路，不得影响退出码
+notify_alert() { notify_push "backguard 告警" "warning_sign" "$1"; }
 
 # 本地 timeline 暂存保留（2026-09-30 云端删除事件教训：快照历史此前只在云端存一份，
 # 云端被删即永久丢失）。rclone copy 只增不删、云端是全量历史；本地保留最近 N 份
@@ -121,6 +139,15 @@ prune_local_timeline() {
         # 快照清走后腾出的空日期目录一并收掉（-delete 自 deepest-first，空壳级联消除）
         { find "$dev_dir" -mindepth 1 -maxdepth 3 -type d -empty -delete 2>/dev/null || true; }
     fi
+}
+
+# 上一代快照的 exclusions.json（按 mtime 最近者，不含本代）→ 变更检测数据源。
+# 首备时 stage 可能不存在——find 的 rc 经 (…; true) 中和，防 pipefail 退出。
+latest_prev_exclusions() {
+    local stage="$1" f
+    { find "$stage" -name exclusions.json 2>/dev/null || true; } | head -50 |
+        while read -r f; do printf '%s %s\n' "$(file_mtime "$f")" "$f"; done |
+        sort -rn | head -1 | cut -d' ' -f2-
 }
 
 # 主入口：$@ = "class:repo:archive"（本次成功备份的 borg 档案）
@@ -207,12 +234,8 @@ generate_semantic() {
     # 排除清单导出（research/08 T2.1）→ 覆盖报告数据源
     export_exclusions "$tmp"
 
-    # 上一代快照的 exclusions.json（按 mtime 最近者，不含本代）→ 变更检测
-    # （首备时 stage 可能不存在——find 的 rc 经 (…; true) 中和，防 pipefail 退出）
     local prev_ex
-    prev_ex="$( { find "$stage" -name exclusions.json 2>/dev/null || true; } | head -50 \
-        | while read -r f; do stat -f '%m %N' "$f" 2>/dev/null; done \
-        | sort -rn | head -1 | cut -d' ' -f2-)"
+    prev_ex="$(latest_prev_exclusions "$stage")"
     [[ -n "$prev_ex" ]] && cp "$prev_ex" "$tmp/prev-exclusions.json" 2>/dev/null || true
 
     local sdir gen_rc=0
@@ -267,7 +290,7 @@ run_drill() {
     # 30 天节流
     if [[ -f "$rt" ]]; then
         local last now
-        last="$(stat -f %m "$rt" 2>/dev/null || stat -c %Y "$rt" 2>/dev/null || echo 0)"
+        last="$(file_mtime "$rt")"
         now="$(date +%s)"
         (( now - last < 30 * 86400 )) && { info "[drill] 上次演练不足 30 天，跳过"; return 0; }
     fi
@@ -298,7 +321,7 @@ run_drill() {
                 if (cd "$tmp/out" && "$BORG" extract "$repo::$arc" "$path" 2>>"$LOG"); then
                     got="$(find "$tmp/out" -type f -path "*$path" 2>/dev/null | head -1)"
                 fi
-                if [[ -n "${got:-}" && "$(stat -f %z "$got" 2>/dev/null || stat -c %s "$got" 2>/dev/null || echo -1)" == "$size" ]]; then
+                if [[ -n "${got:-}" && "$(file_size "${got:-}")" == "$size" ]]; then
                     echo "PASS [$cls] $path ($size B)"; pass=$((pass+1))
                 else
                     echo "FAIL [$cls] $path（取回或大小不符）"; failn=$((failn+1))

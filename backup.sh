@@ -36,7 +36,7 @@ if [[ -f "$CONF_DIR/config.sh" ]]; then
     source "$CONF_DIR/config.sh"
 else
     error "配置文件不存在: $CONF_DIR/config.sh"
-    info "运行 ./init.sh 或参考 platform/ 目录手动配置"
+    info "运行 ./init.sh（Linux/macOS）或 .\\backup.ps1 -Task Init（Windows），详见 DEPLOY.md"
     exit 1
 fi
 
@@ -160,6 +160,9 @@ backup_restic_class() {
 # BACKUP_TARGETS=("remote:子路径" ...)，设备段 <SYSTEM_ID> 自动追加避免多设备互覆；
 # 兼容旧单目标写法 WEBDAV_REMOTE(+WEBDAV_ROOT)。
 # 用 copy 而非 sync：本地 prune 后旧归档不应从云端删除，云端保留全部历史
+# 云端推送计数（main 汇总）：本地三个档案都成功 ≠ 云端拿到副本
+cloud_total=0
+cloud_failed=0
 sync_target() {
     local local_path="$1"; local dest="$2"
     # ":/" 会被子类后端解析成文件系统绝对路径——
@@ -173,7 +176,15 @@ sync_target() {
         --log-file "$RCLONE_LOG" 2>&1 | tee -a "$LOG"
     local rc=${PIPESTATUS[0]}
     set -e
-    [[ $rc -eq 0 ]] && success "[rclone] $dest 同步完成" || warn "[rclone] $dest 同步失败 (rc=$rc)"
+    cloud_total=$((cloud_total + 1))
+    if [[ $rc -eq 0 ]]; then
+        success "[rclone] $dest 同步完成"
+    else
+        # 失败计数由 main 汇总：本地成功 ≠ 云端有副本，不能只留一行 WARN 就宣布完成
+        cloud_failed=$((cloud_failed + 1))
+        warn "[rclone] $dest 同步失败 (rc=$rc)"
+    fi
+    return 0
 }
 
 # 解析备份目标：兼容旧 WEBDAV_REMOTE；无任何目标时仅本地备份。
@@ -194,6 +205,7 @@ if [[ -f "$SCRIPT_DIR/semantic/semantic.sh" ]]; then
     source "$SCRIPT_DIR/semantic/semantic.sh"
 else
     generate_semantic() { warn "semantic/semantic.sh 缺失，跳过语义层"; }
+    notify_alert() { return 0; }
 fi
 
 # ---------- 系统元数据收集 ----------
@@ -348,18 +360,25 @@ main() {
         fi
     done
 
-    generate_semantic "${sem_archives[@]}"
+    # 语义层红线（AGENTS.md §1.3）：任何失败降级为告警，不得改写备份结论
+    generate_semantic "${sem_archives[@]}" || warn "[semantic] 语义层异常（不影响备份结论，详见 $LOG）"
     if [[ ${#sem_archives[@]} -gt 0 && "${SKIP_WEBDAV:-0}" != "1" ]]; then
         local tgt
         for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$BACKUP_BASE/timeline" "${tgt}/${SYSTEM_ID}/timeline"; done
     fi
 
-    if [[ $failed -eq 0 ]]; then
-        success "=== Backup FULLY COMPLETE ($(date '+%Y-%m-%d %H:%M:%S')) ==="
-    else
+    if [[ $failed -gt 0 ]]; then
         error "=== Backup FINISHED WITH ERRORS ($failed 个档案失败) ==="
         exit 1
     fi
+    # 云端可见性：本地全部成功不等于云端有副本——有失败就必须非零退出并留下明确标记，
+    # 让 launchd / CI / ntfy 告警链看得见，而不是宣布 FULLY COMPLETE（下次运行会自动补传）
+    if [[ $cloud_failed -gt 0 ]]; then
+        error "=== 本地完成，云端同步失败 $cloud_failed/$cloud_total 次——云端可能没有本次备份（详见 $RCLONE_LOG） ==="
+        notify_alert "云端同步失败 $cloud_failed/$cloud_total 次（设备 $DEVICE_ID），云端可能没有本次备份。详见 $RCLONE_LOG"
+        exit 1
+    fi
+    success "=== Backup FULLY COMPLETE ($(date '+%Y-%m-%d %H:%M:%S')) ==="
 }
 
 main "$@"
