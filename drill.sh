@@ -64,15 +64,15 @@ ARC="$( (BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" list --short "$REPO" 2>>"$LO
 
 info "演练快照: $SNAP"
 info "演练归档: $REPO::$ARC"
-run_drill "$SNAP" "$REPO" "$ARC"
 
 # run_drill 把结果写到设备目录（快照目录上 4 层：<dev>/YYYY/MM/DD/HHMM-标签）
 rt="$(cd "$SNAP/../../../.." && pwd)/rescue-test.txt"
+# mtime 必须在演练之前取：事后取会把「本轮没跑」判成「跑过」
 rt_before="$(file_mtime "$rt")"
 
 out="$(run_drill "$SNAP" "$REPO" "$ARC")"
 printf '%s\n' "$out"
-if [[ "$out" == *"不足 30 天"* ]]; then
+if [[ "$out" == *"[drill] 上次演练不足 30 天"* ]]; then
     info "本轮被 30 天节流跳过（未执行演练），要立刻验一次加 --force"
     exit 0
 fi

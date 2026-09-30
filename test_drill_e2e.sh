@@ -76,6 +76,15 @@ printf '%s' "$out" | grep -q "没有产出新的 rescue-test.txt" || fail "缺�
 [[ ! -e "$RT" ]] || fail "缺身份却写出了 rescue-test.txt"
 mv "$KEYS/identity.hold" "$KEYS/identity.txt"
 
+# 断言 1.5：设备还没有 rescue-test.txt 时，不带 --force 也必须真跑
+#（节流只该针对「上次演练过」）。回归守卫：drill.sh 曾把 run_drill 调两次，
+# 第一次写出 rescue-test.txt 后第二次被自己刚触发的节流挡住，脚本于是打印
+# 「本轮被 30 天节流跳过」并退出 0——演练其实跑了，用户读到的是反话。
+out="$(run_drill_sh 2>&1)" || fail "首次无 --force 演练退出非零：$out"
+printf '%s' "$out" | grep -q "\[drill\] 上次演练不足 30 天" \
+    && fail "无 rescue-test.txt 却自称被节流（演练被调用了多次）：$out"
+[[ -f "$RT" ]] || fail "首次无 --force 演练未产出 rescue-test.txt: $RT"
+
 # 断言 2：真实演练——主身份解封 → 抽样 → borg 实取 → 大小校验，全部 PASS
 out="$(run_drill_sh --force 2>&1)" || fail "drill.sh --force 退出非零：$out"
 [[ -f "$RT" ]] || fail "rescue-test.txt 未落在设备目录（rt 路径算错）: $RT"
