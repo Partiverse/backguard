@@ -173,7 +173,8 @@
    模板同修（0dc7211）：`init.sh` 的 plist 不再写口令，并补 `StandardOutPath`/
    `StandardErrorPath` → `$LOG_DIR/launchd.{out,err}.log`——不写时 launchd 把 stdout
    丢进 os_log，夜间跑挂只剩一个退出码。`INIT_SKIP_SCHEDULER` → `INIT_SCHED_NO_REGISTER`
-   （旧语义连渲染一起跳，调度产物从没被测过；新语义只跳注册）
+   （旧语义连渲染一起跳，调度产物从没被测过；新语义只跳注册）。模板另去掉 `RunAtLoad`
+   （§2「调度模板不写 RunAtLoad」）；本机旧 plist 仍带，待下次计划内重载对齐
 5. T1.3 聚类调优（等 ≥1 周真实数据；已知素材：混合簇退级、载体根噪音。STORY 逐簇
    「新增 -2」不是聚类问题，是计数口径混用，10-01 已修）
 6. T1.6 dogfood 扩 2 台设备（Windows/Linux 各一，按 `DEPLOY.md` 流程）
