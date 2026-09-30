@@ -86,7 +86,9 @@
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
    `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）/
    `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）/
-   `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）。后六个已挂 CI
+   `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）。九个都已挂 CI
+   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init），
+   `test_remote_caps.sh` 是手工能力探测，不入 CI。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
    `timeline/<dev>/rescue-test.txt` 存在且结论为「≥1 PASS / 0 FAIL」：没有密钥时
