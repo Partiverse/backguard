@@ -140,3 +140,22 @@ $env:SEM_NTFY_URL = "https://<你的-ntfy>/backguard-<设备名>"
 - 数据进 08 章 M4 的 go/no-go 判据（≥7/10 未提示即主动提及语义层价值）；
 - 任一设备的语义层连续失败 3 次即记 defect（非致命哲学的检验：备份本身必须从未因此中断）；
 - 2 周后组织者写 dogfood 复盘（含原始问卷），发布到 repo discussions。
+
+## 6. 代码更新（部署树追平）
+
+设备跑的是**部署 checkout**（launchd/Task Scheduler 里的路径），不是开发树：
+提交进 `main` 后不让部署树追平，当晚用的仍是旧代码——观察期数据因此作废
+（2026-09-30 就漏过一次，落后 14 个提交，见 `docs/HANDOVER-2026-09-30.md` §4.1）。
+
+```bash
+DEPLOY_DIR=<部署目录>          # launchd plist / 计划任务里 ProgramArguments 指向的那个目录
+git -C "$DEPLOY_DIR" fetch origin
+git -C "$DEPLOY_DIR" merge --ff-only origin/main
+# 验证：两处 HEAD 必须一致
+git -C "$DEPLOY_DIR" rev-parse --short HEAD
+```
+
+- **只允许 ff**：部署树出现本地改动就是有人在上面开发，先查 `git -C "$DEPLOY_DIR" status`
+  弄清来源再动，别 `reset --hard` 抹掉。
+- 追平后跑一次 `./drill.sh --force`（macOS/Linux）确认新代码的恢复链路仍通。
+- 观察期内的节奏：CI 全绿 → 部署树追平 → 验收次日自动备份产物（AGENTS.md §4.5）。
