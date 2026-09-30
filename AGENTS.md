@@ -40,9 +40,12 @@
   `init.sh` / `test_init_e2e.sh` 的既有告警不在清单内）：`[[ ]]` 内数组测试用 `[*]` 加引号
   （`[@]` 在 `[[ ]]` 报 SC2199、在 `[ ]` 报 SC2198）；SC2154 的 disable 注释必须贴引用行；
   `set -u` 下数组 resolve 后必须恒定义（否则 `${#arr[@]}` unbound 静默退出）。
-- **文件属性跨平台**：GNU `stat -f` 是「文件系统状态」（`%m/%N/%z` 对它是非法指令，只打垃圾
-  且 rc=0 不报错），BSD `stat` 又没有 `-c`——语义层取 mtime/尺寸一律走 `file_mtime`(`date -r`)
-  / `file_size`(`wc -c`)；新增裸 `stat -c/-f` 会被 `test_portable_stat.sh`（GNU 语义 shim）抓住。
+- **文件属性跨平台**：GNU `stat -f` 是「文件系统状态」——它把跟在前面的「格式串」当文件系统名，
+  coreutils 9.11 实测：`stat -f '%m %N' f` 打真实文件的文件系统状态块到 stdout、stderr 报
+  `cannot read file system information`、**rc=1**（pipefail 下会直接带崩整条流水线，
+  非致命调用点则把状态块并着 epoch 收成多行垃圾值）；BSD `stat` 又没有 `-c`——语义层取
+  mtime/尺寸一律走 `file_mtime`(`date -r`) / `file_size`(`wc -c`)；新增裸 `stat -c/-f`
+  会被 `test_portable_stat.sh`（顶在 PATH 前的 GNU 语义 stat shim）抓住。
 - **borg 1.4 取回面**：`extract` **没有** `--destination/-C`（解包路径相对 cwd，要取回就先 `cd`
   进目标目录），归档选择也不支持 `::--last 1` 这类通配——用 `borg list --short` 前缀过滤后取尾；
   `/tmp`→`/private/tmp` 软链会触发 "repository was previously located at" 交互中止。
