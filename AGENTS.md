@@ -57,7 +57,9 @@
   `backup.sh` 当时无兜底地调用 `generate_semantic`——Linux 设备第二次起的备份会整条退出 1；
   CI 每轮新建仓库只跑首备（stage 里没有 exclusions.json，流水线空转），所以一直没暴露。
 - **borg 1.4 取回面**：`extract` **没有** `--destination/-C`（解包路径相对 cwd，要取回就先 `cd`
-  进目标目录），归档选择也不支持 `::--last 1` 这类通配——用 `borg list --short` 前缀过滤后取尾；
+  进目标目录），**`extract --list` 也会真解包**——`--list` 只是顺带把解出的路径报告出来，
+  在仓库 cwd 里跑它等于往工作树里落文件（列路径请改用 `borg list --short`）；
+  归档选择也不支持 `::--last 1` 这类通配——用 `borg list --short` 前缀过滤后取尾；
   `/tmp`→`/private/tmp` 软链会触发 "repository was previously located at" 交互中止。
 - **时间口径**：borg info 的 start 是 **naive 本地时间**（borg 1.4.5 实测；CI 的 TZ=UTC
   环境曾误判为 naive UTC）。STORY 的 parent-time 改由归档名解析（归档名日期段=倒数第二
@@ -79,13 +81,17 @@
 
 1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（47 项全绿，
    3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
-   semantic/semantic.sh drill.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
+   semantic/semantic.sh drill.sh rescue.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
    `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）/
-   `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）。后五个已挂 CI。
+   `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）/
+   `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）。后六个已挂 CI
+   （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；`test_portable_stat.sh` 的断言 4
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
+   shell 夹具（`test_*.sh` 的 `mktemp -d`）清理一律 `trap 'rm -rf "$T"' EXIT`：
+   末行 `rm -rf` 在 `fail()` 的 exit 1 下不执行，含 age 私钥/明文账本的夹具就留在 /tmp。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、
@@ -113,7 +119,9 @@
 
 ## 5. 已知待办（代码小项；优先级与验证期安排见 HANDOVER §6）
 
-1. rescue 单文件脚本独立版（bash + PowerShell 各一份，无 Python 依赖；08 章 T3.2）
+1. ~~rescue 单文件脚本独立版~~ bash 版已完成：`rescue.sh`（08 章 T3.2，无 Python 依赖，
+   两种目录布局 + 引擎自动判定 + age 双路径；`test_rescue_e2e.sh` 锁行为）。
+   **PowerShell 版 `rescue.ps1` 仍待做**——只在能挂上 CI 验证时写（本机无 pwsh）
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，
    全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认

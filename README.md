@@ -117,6 +117,7 @@ backup/
 ├── backup.ps1          Windows 备份脚本
 ├── restore.sh          恢复脚本（Linux / macOS）
 ├── drill.sh            恢复演练独立入口（解封→抽样→实取→校验，30 天节流可 --force 绕开）
+├── rescue.sh           逃生恢复单文件脚本（无 Python、不依赖本仓库其它文件：新机只凭备份目录副本 + 恢复材料取回）
 ├── semantic/           语义层（每次备份自动生成可读时间轴）
 │   ├── semantic.sh     编排：清单导出 → convert → generate → 密封 → 推送（borg）
 │   ├── semantic.ps1    同上（restic / Windows）
@@ -196,7 +197,15 @@ expect semantic/init-keys.exp "$(command -v age)" ~/.config/partiverse-backup/ag
 # 随时验证恢复链路真的通（不必等夜间那次的 30 天节流）
 ./drill.sh --force
 
-# Windows：暂用 restic 命令行（rescue 独立脚本待补，见 docs/HANDOVER §6）
+# 逃生场景：主程序/配置都没了，只有备份目录副本 + 恢复码
+./rescue.sh --guide                                        # 目录结构、恢复步骤、密钥要放哪
+./rescue.sh --base <备份目录> --list                        # 列仓库、归档、时间轴快照
+./rescue.sh --base <备份目录> --class files --find 报告      # 引擎内按字面量搜路径
+./rescue.sh --base <备份目录> --class files --get <路径> --to <目录>
+./rescue.sh --base <目录> --ledger --identity <identity.txt>   # 解封 manifest.json.enc 看带大小的账本
+./rescue.sh --base <目录> --ledger --recovery <recovery-identity.enc>  # 只有恢复码时（tty 输入）
+
+# Windows：暂用 restore.ps1（backup.ps1 -Task Restore）；rescue.ps1 待补，见 docs/HANDOVER §6
 ```
 
 ---
