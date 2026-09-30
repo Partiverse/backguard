@@ -289,16 +289,10 @@ generate_semantic() {
     # STORY 手机推送（ntfy 可选 sidecar，research/08 T1.4）
     notify_story "$sdir/STORY.md"
 
-    # 恢复演练（30 天节流；从 files 仓库实取抽样文件并校验，research/08 T3.4）
-    local d_item d_repo d_arc
-    for d_item in "$@"; do
-        [[ "$d_item" == files:* ]] || continue
-        d_repo="${d_item#*:}"; d_repo="${d_repo%%:*}"
-        d_arc="${d_item##*:}"
-        # rc=10/20 是「节流跳过 / 未执行」的正常分支，不能被 generate_semantic 的
-        # 返回值带成「语义层异常」告警；真跑过且有失败项由 rescue-test.txt 自己说话
-        run_drill "$sdir" "$d_repo" "$d_arc" || true
-    done
+    # 恢复演练（30 天节流；抽样是跨类别的，所以三类归档都要交给它，research/08 T3.4）
+    # rc=10/20 是「节流跳过 / 未执行」的正常分支，不能被 generate_semantic 的
+    # 返回值带成「语义层异常」告警；真跑过且有失败项由 rescue-test.txt 自己说话
+    run_drill "$sdir" "$@" || true
 
     # run JSON 留档（最近 60 份，research/08 T0.3）
     mkdir -p "$runs_dir"
@@ -313,14 +307,19 @@ generate_semantic() {
 
 # 恢复演练（research/08 T3.4）：解封 → 抽样 → 从仓库实际取回 → 校验 → rescue-test.txt。
 # 主身份路径解封（救援路径需交互，留给人工季度演练）；30 天节流；非致命。
-# 用法: run_drill <快照目录> <files仓库路径> <files归档名>
+# 用法: run_drill <快照目录> <类别:仓库路径:归档名>...
 # 退出码：0 真跑了（结论在 rescue-test.txt，可能含失败项）；10 被 30 天节流；
-#         20 未执行（演练关闭 / 缺 age·主身份·密封清单）。
+#         20 未执行（演练关闭 / 缺 age·主身份·密封清单 / 没给任何归档）。
 #         调用方必须按码分支——用「结果文件 mtime 变没变」反推跑没跑不可靠：
 #         date -r 是秒级，同一秒内的两次重写分不开，陈旧文件会被判成刚跑过。
+# 仓库按样本类别查：bg sample 刻意跨类别抽样（config 里一个小 plist 恰恰是最该
+# 证明取得回的东西），拿 files 仓库去解 config 路径必然「取不回」——真机 10-01
+# 首次 --force 演练就是这样报了 2 个假失败（30 天节流让它此前从未露头）。
 run_drill() {
-    local sdir="$1" repo="$2" arc="$3"
+    local sdir="$1"; shift
     [[ "${SEM_DRILL:-1}" == "1" ]] || return 20
+    local -a items=("$@")
+    [[ ${#items[@]} -gt 0 ]] || { info "[drill] 本轮没有可演练的归档，跳过"; return 20; }
     # 设备级文件：sdir（…/<dev>/YYYY/MM/DD/HHMM-标签）上 4 层到 <dev>
     local rt="$sdir/../../../../rescue-test.txt"
     # 30 天节流（人工演练经 drill.sh --force 置 SEM_DRILL_FORCE=1 绕开）
@@ -346,7 +345,10 @@ run_drill() {
         if ! "$age_bin" -d -i "$ident" -o "$tmp/manifest.json" "$sdir/manifest.json.enc" 2>/dev/null; then
             echo "RESULT: FAIL（manifest 解封失败）"
         else
-            semantic_bg sample --manifest "$tmp/manifest.json" --count 5 > "$tmp/plan.json" 2>/dev/null
+            # 抽样数默认 5；测试里调大是为了「每一个危险文件名都必须被取回过」，
+            # 而不是「这一天的种子碰巧抽到了它」
+            semantic_bg sample --manifest "$tmp/manifest.json" --count "${SEM_DRILL_COUNT:-5}" \
+                > "$tmp/plan.json" 2>/dev/null
             local n; n="$(python3 -c "import json,sys;print(len(json.load(open('$tmp/plan.json'))['samples']))" 2>/dev/null || echo 0)"
             local i=0
             while (( i < n )); do
@@ -354,13 +356,25 @@ run_drill() {
                 path="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['path'])")"
                 size="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['size'])")"
                 cls="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['class'])")"
+                # 样本类别 → 本轮该类的「仓库::归档」。items 形如 cls:repo:arc，
+                # 首尾字段各取一次，中间整段是仓库路径
+                local dr_item dr_rest d_repo="" d_arc=""
+                for dr_item in "${items[@]}"; do
+                    [[ "${dr_item%%:*}" == "$cls" ]] || continue
+                    dr_rest="${dr_item#*:}"
+                    d_repo="${dr_rest%:*}"; d_arc="${dr_rest##*:}"
+                    break
+                done
                 # 实取：borg extract（归档内路径为剥掉前导 / 的绝对路径形态）
                 # 必须在 tmp/out 内解包——cwd 解包会污染仓库所在目录
                 mkdir -p "$tmp/out"
-                if (cd "$tmp/out" && "$BORG" extract "$repo::$arc" "$path" 2>>"$LOG"); then
+                if [[ -n "$d_repo" ]] && (cd "$tmp/out" && "$BORG" extract "$d_repo::$d_arc" "$path" 2>>"$LOG"); then
                     got="$(find "$tmp/out" -type f -path "*$path" 2>/dev/null | head -1)"
                 fi
-                if [[ -n "${got:-}" && "$(file_size "${got:-}")" == "$size" ]]; then
+                if [[ -z "$d_repo" ]]; then
+                    echo "FAIL [$cls] ${path}（本轮没有 ${cls} 类的归档，无从取回）"
+                    failn=$((failn+1))
+                elif [[ -n "${got:-}" && "$(file_size "${got:-}")" == "$size" ]]; then
                     echo "PASS [$cls] $path ($size B)"; pass=$((pass+1))
                 else
                     echo "FAIL [$cls] ${path}（取回或大小不符）"; failn=$((failn+1))

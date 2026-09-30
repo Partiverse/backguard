@@ -55,15 +55,24 @@ if [[ -z "$SNAP" ]]; then
 fi
 [[ -d "$SNAP" ]] || error "快照目录不存在: $SNAP"
 
-REPO="$BACKUP_BASE/borg-files"
-[[ -d "$REPO" ]] || error "files 仓库不存在: $REPO"
-# 设备名可含 [ ] + 等元字符（Linux hostname 允许）——归档选择必须字面量前缀匹配
-ARC="$( (BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" list --short "$REPO" 2>>"$LOG" \
-         | awk -v p="$DEVICE_ID-files-" 'index($0, p) == 1' | sort | tail -1; true) )"
-[[ -n "$ARC" ]] || error "[$DEVICE_ID-files-*] 无归档可演练"
+# 三类各查一遍最新归档，交给 run_drill 按样本类别取仓库：抽样是跨类别的，
+# 只给 files 会让 config/system 的样本变成「备份在、取不回」的假失败
+declare -a ITEMS=()
+for cls in config files system; do
+    repo="$BACKUP_BASE/borg-$cls"
+    [[ -d "$repo" ]] || continue
+    # 设备名可含 [ ] + 等元字符（Linux hostname 允许）——归档选择必须字面量前缀匹配
+    arc="$( (BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" list --short "$repo" 2>>"$LOG" \
+             | awk -v p="$DEVICE_ID-$cls-" 'index($0, p) == 1' | sort | tail -1; true) )"
+    [[ -n "$arc" ]] || continue
+    ITEMS+=("$cls:$repo:$arc")
+done
+[[ ${#ITEMS[@]} -gt 0 ]] || error "[$DEVICE_ID-*] 无归档可演练"
 
 info "演练快照: $SNAP"
-info "演练归档: $REPO::$ARC"
+for it in "${ITEMS[@]}"; do
+    info "演练归档 [${it%%:*}] ${it#*:}"
+done
 
 # run_drill 把结果写到设备目录（快照目录上 4 层：<dev>/YYYY/MM/DD/HHMM-标签）
 rt="$(cd "$SNAP/../../../.." && pwd)/rescue-test.txt"
@@ -71,7 +80,7 @@ rt="$(cd "$SNAP/../../../.." && pwd)/rescue-test.txt"
 # 按 run_drill 的退出码分支，不从结果文件反推「本轮跑过没有」：
 # 秒级 mtime 分不开陈旧文件与刚写的文件，字符串匹配又依赖提示语措辞
 rc=0
-out="$(run_drill "$SNAP" "$REPO" "$ARC")" || rc=$?
+out="$(run_drill "$SNAP" "${ITEMS[@]}")" || rc=$?
 printf '%s\n' "$out"
 case "$rc" in
     10) info "本轮被 30 天节流跳过（未执行演练），要立刻验一次加 --force"; exit 0;;

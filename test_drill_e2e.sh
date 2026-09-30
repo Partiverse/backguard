@@ -19,9 +19,12 @@ CONF="$T/conf/partiverse-backup"
 KEYS="$CONF/age"
 BASE="$T/repos"
 REPO="$BASE/borg-files"
+REPO_CONFIG="$BASE/borg-config"
+REPO_SYSTEM="$BASE/borg-system"
 # 真实布局是 <dev>/YYYY/MM/DD/HHMM-标签（4 层），设备级 rescue-test.txt 在其上 4 层
 SNAP="$BASE/timeline/$DEV/2026/09/30/0948-morning"
-mkdir -p "$KEYS" "$BASE" "$T/home" "$SNAP" "$T/src/Documents" "$T/src/Pictures"
+mkdir -p "$KEYS" "$BASE" "$T/home" "$SNAP" \
+    "$T/src/Documents" "$T/src/Pictures" "$T/src/config" "$T/src/system-meta"
 export BORG_BASE_DIR="$T/.borg"
 # 口令刻意不 export 给测试自身之外的环境：它只应通过 secrets.env 进入 drill.sh，
 # 由 drill.sh 自己 export——这样 run_drill 的 borg extract 才是在验证真实链路
@@ -46,20 +49,37 @@ chmod 600 "$KEYS/identity.txt"
 sed -n 's/^# public key: \(age1[0-9a-z]*\).*/\1/p' "$KEYS/identity.txt" > "$KEYS/recipients.txt"
 [[ -s "$KEYS/recipients.txt" ]] || fail "取不到公钥: $(head -1 "$KEYS/identity.txt")"
 
-# 真实归档：4 个非空文件，路径含空格与中文（抽样取回时引号面必须扛住）
+# 真实归档：三类各存自己的子树，路径互不重叠——这是跨类别取回的回归守卫。
+# 若三类都塞同一棵树，「拿 files 仓库去解 config 路径」照样能解出来，缺陷就测不出。
+# files 侧刻意含空格与中文（抽样取回时引号面必须扛住）
 printf 'note-v2\n'      > "$T/src/Documents/note.txt"
 printf 'a b c\n'        > "$T/src/Documents/with space.txt"
 printf '简历\n'          > "$T/src/Documents/简历.txt"
 head -c 4096 /dev/urandom > "$T/src/Pictures/photo.bin"
+printf 'cfg=1\n'       > "$T/src/config/app.pref"
+printf 'x y\n'         > "$T/src/config/with space.cfg"
+head -c 2048 /dev/urandom > "$T/src/system-meta/meta.bin"
 bpb init --encryption=repokey "$REPO" >/dev/null 2>&1 || fail "borg init 失败"
-(cd "$T" && bpb create "$REPO::$DEV-files-20260930-023400" src >/dev/null 2>&1) \
+bpb init --encryption=repokey "$REPO_CONFIG" >/dev/null 2>&1 || fail "borg init（config）失败"
+bpb init --encryption=repokey "$REPO_SYSTEM" >/dev/null 2>&1 || fail "borg init（system）失败"
+(cd "$T" && bpb create "$REPO::$DEV-files-20260930-023400" src/Documents src/Pictures >/dev/null 2>&1) \
     || fail "borg create 失败"
+(cd "$T" && bpb create "$REPO_CONFIG::$DEV-config-20260930-023400" src/config >/dev/null 2>&1) \
+    || fail "borg create（config）失败"
+(cd "$T" && bpb create "$REPO_SYSTEM::$DEV-system-20260930-023400" src/system-meta >/dev/null 2>&1) \
+    || fail "borg create（system）失败"
 
 # 密封清单（走 semantic.sh seal_manifest 的同一形态：convert → manifest → age -R）
 BG="$V0_DIR/semantic/bg_semantic.py"
 bpb list --json-lines "$REPO::$DEV-files-20260930-023400" > "$T/files.jsonl" \
     || fail "borg list --json-lines 失败"
-python3 "$BG" convert --engine borg --class files="$T/files.jsonl" --auto-strip \
+bpb list --json-lines "$REPO_CONFIG::$DEV-config-20260930-023400" > "$T/config.jsonl" \
+    || fail "borg list --json-lines（config）失败"
+bpb list --json-lines "$REPO_SYSTEM::$DEV-system-20260930-023400" > "$T/system.jsonl" \
+    || fail "borg list --json-lines（system）失败"
+python3 "$BG" convert --engine borg \
+    --class files="$T/files.jsonl" --class config="$T/config.jsonl" --class system="$T/system.jsonl" \
+    --auto-strip \
     --device "$DEV" --time "2026-09-30T09:48:20" --label morning \
     --out "$T/run.json" >/dev/null || fail "bg convert 失败"
 python3 "$BG" manifest --run "$T/run.json" | age -R "$KEYS/recipients.txt" -o "$SNAP/manifest.json.enc" \
@@ -67,7 +87,10 @@ python3 "$BG" manifest --run "$T/run.json" | age -R "$KEYS/recipients.txt" -o "$
 # 明文层不该有清单落进快照目录（隐私红线：完整文件名只进密文账本）
 [[ ! -e "$SNAP/manifest.json" ]] || fail "快照目录残留未密封 manifest.json"
 
-run_drill_sh() { HOME="$T/home" XDG_CONFIG_HOME="$T/conf" bash "$V0_DIR/drill.sh" "$@"; }
+# SEM_DRILL_COUNT=99：把整份清单都拉进样本，断言才是「每个危险文件名都被取回过」，
+# 而不是「当天日期那个种子碰巧抽到了它」（默认抽样数按日期种子变，测试不能跟着抖）
+run_drill_sh() { HOME="$T/home" XDG_CONFIG_HOME="$T/conf" SEM_DRILL_COUNT=99 \
+    bash "$V0_DIR/drill.sh" "$@"; }
 RT="$BASE/timeline/$DEV/rescue-test.txt"
 
 # 断言 1：缺主身份时，drill 必须失败可见——不能静默「跳过」后还报成功
@@ -93,12 +116,21 @@ grep -q "^RESULT: 0 PASS" "$RT" && fail "一项都没取回：$RT"
 res="$(grep -o '^RESULT: [0-9]* PASS / [0-9]* FAIL' "$RT")" || fail "无 RESULT 行：$(cat "$RT")"
 [[ "$res" == *"PASS / 0 FAIL"* ]] || fail "演练有失败项: $res"
 n="$(printf '%s' "${res#RESULT: }" | awk '{print $1}')"
-# 归档里 4 个文件、sample --count 5 → 全量入样，危险文件名必须逐个 PASS（不是「碰巧没抽到」）
-[[ "$n" -eq 4 ]] || fail "应演练 4 个文件，实际 ${n}：$(cat "$RT")"
+# 三类合计 7 个非空文件（files 4 + config 2 + system 1），SEM_DRILL_COUNT=99 → 全量入样
+[[ "$n" -eq 7 ]] || fail "应演练 7 个文件，实际 ${n}：$(cat "$RT")"
 for tricky in "with space.txt" "简历.txt" "photo.bin" "Documents/note.txt"; do
     grep -q "^PASS .*${tricky}" "$RT" \
         || fail "演练未覆盖或未通过 ${tricky}（引号面/抽样有问题）: $(cat "$RT")"
 done
+# 跨类别取回守卫：bg sample 是按类别占比抽样的，config/system 的样本必须从
+# 各自的仓库取回。曾经 run_drill 只拿到 files 仓库，这两类 100% 报假失败，
+# 而 30 天节流让它在生产上从未露头（真机 10-01 首次 --force 才抓到）
+for cls in config system; do
+    grep -q "^PASS \[$cls\] " "$RT" \
+        || fail "[$cls] 类样本一条 PASS 都没有——取回用的仓库写死成 files 了：$(cat "$RT")"
+done
+grep -q "^PASS \[config\] .*app.pref" "$RT" \
+    || fail "config 的 app.pref 未经由 config 仓库取回：$(cat "$RT")"
 
 # 断言 3：不带 --force 时 30 天节流生效（上一步刚写过 rescue-test.txt，不应重写）
 before="$(md5 -q "$RT" 2>/dev/null || cksum "$RT" | tr -d ' ')"

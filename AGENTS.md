@@ -130,7 +130,13 @@
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，
    全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认
-   逐条 FAIL 行 + 计数，结论行缺失一律判失败）
+   逐条 FAIL 行 + 计数，结论行缺失一律判失败）。**同一处第二次露头**（10-01 真机
+   `--force`）：`bg sample` 按占比跨类别抽样，而 run_drill 只拿到 files 仓库，
+   config/system 样本 100% 报「取回或大小不符」的**假失败**——现在 run_drill 收
+   `类别:仓库:归档` 列表并按样本类别查仓库。教训：**节流/低频路径的判定与数据面
+   都要在真机或跨类别夹具上跑一次**，单类别 E2E 测不出这类错配
+   （夹具规矩：三类仓库各存自己的子树，路径互不重叠，否则写死仓库也能 PASS）。
+   抽样条数由 `SEM_DRILL_COUNT`（默认 5）控制，E2E 拉满它以求确定性
 3. Windows 密钥初始化交互版 `init-keys.ps1`（对齐 `init-keys.exp`）
 4. ~~launchd plist 明文口令~~ 已删（2026-10-01 01:35）：**不需要 wrapper**——`backup.sh`
    自己 `set -a; source secrets.env`，plist 里那份 `BORG_PASSPHRASE` 与 secrets.env 同值、
