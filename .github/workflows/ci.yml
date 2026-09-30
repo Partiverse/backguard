@@ -32,6 +32,14 @@ jobs:
           test -f "$base/MANIFEST.txt" || { echo "::error::MANIFEST.txt 缺失"; exit 1; }
           test -f "$base/STORY.md"    || { echo "::error::STORY.md 缺失"; exit 1; }
           test -f "$base/restore.md"  || { echo "::error::restore.md 缺失"; exit 1; }
+      - name: Zipapp in sync with source
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 生产上 semantic.sh 优先执行仓库里的 bg.pyz：改了源没重建 pyz，夜间跑的就是旧代码。
+          # 必须跑在下一步「Build zipapp」之前——那一步会就地覆盖 semantic/bg.pyz，之后比对必然相等
+          diff <(tail -n +2 semantic/bg.pyz) <(tail -n +2 semantic/bg_semantic.py) > /dev/null \
+            || { echo "::error::semantic/bg.pyz 与 bg_semantic.py 不同步——重新 zipapp 并与源同提交"; exit 1; }
       - name: Build zipapp
         run: python -m zipapp semantic/bg_semantic.py -o semantic/bg.pyz -p "/usr/bin/env python3"
 

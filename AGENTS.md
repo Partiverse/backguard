@@ -127,6 +127,8 @@
    全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认
    逐条 FAIL 行 + 计数，结论行缺失一律判失败）
 3. Windows 密钥初始化交互版 `init-keys.ps1`（对齐 `init-keys.exp`）
-4. launchd plist 明文口令 → wrapper 读 0600 `secrets.env`
+4. launchd plist 明文口令：**不需要 wrapper**——`backup.sh` 自己 `set -a; source secrets.env`，
+   plist 里那份 `BORG_PASSPHRASE` 与 secrets.env 同值、纯冗余；删掉 plist 的
+   `EnvironmentVariables` 即可（先留 plist 副本，重载前先确认 `borg list` 只靠 secrets.env 也通）
 5. T1.3 聚类调优（等 ≥1 周真实数据；已知素材：混合簇退级、载体根噪音、STORY 逐簇「新增 -2」渲染疑点）
 6. T1.6 dogfood 扩 2 台设备（Windows/Linux 各一，按 `DEPLOY.md` 流程）
