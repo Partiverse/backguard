@@ -51,5 +51,27 @@ manifest="$(find "$T/dest/backup-mac/E2E-Mac/timeline" -name MANIFEST.txt 2>/dev
 find "$T/dest/backup-mac/E2E-Mac/timeline" -name manifest.json.enc | grep -q . \
     || echo "E2E-WARN: manifest.json.enc 未密封（E2E 环境无 recipients，属预期）"
 
-echo "E2E-OK: 多目标备份 + timeline 语义层产物齐全"
+# 断言：rescue-test.txt（恢复演练结论）不得上云——它逐条写着抽样文件的完整路径，
+# 是明文层里唯一带文件名的产物（AGENTS §1.1）。做法：本地造一份带完整路径的样本，
+# 再跑一次真实推送，看云端时间轴里它是否被 sync_target 的 --exclude 挡在外面
+LOCAL_RT="$T/repos/timeline/E2E-Mac/rescue-test.txt"
+mkdir -p "$(dirname "$LOCAL_RT")"
+printf 'PASS [files] Users/me/Documents/\xe7\xa7\x98\xe5\xaf\x86.doc (1 B)\nRESULT: 1 PASS / 0 FAIL\n' \
+    > "$LOCAL_RT"
+(
+    cd "$T/dest"
+    SKIP_WEBDAV=0 XDG_CONFIG_HOME="$T/conf" RCLONE_CONFIG="$T/rclone.conf" HOME="$T/home" \
+        bash "$V0_DIR/backup.sh" > "$T/out2.log" 2>&1
+) || { echo "E2E-FAIL: 第二次 backup.sh 退出非零"; tail -20 "$T/out2.log"; exit 1; }
+if find "$T/dest/backup-mac/E2E-Mac/timeline" -name rescue-test.txt | grep -q .; then
+    echo "E2E-FAIL: rescue-test.txt 被推上云（内含完整文件名，违反明文层红线）"
+    find "$T/dest/backup-mac/E2E-Mac/timeline" -name rescue-test.txt
+    exit 1
+fi
+[[ -f "$LOCAL_RT" ]] || { echo "E2E-FAIL: 本地 rescue-test.txt 不见了（排除≠删除）"; exit 1; }
+# 同一目录里的红线产物照常上云，证明排除是精确的而不是把 timeline 整块挡住
+find "$T/dest/backup-mac/E2E-Mac/timeline" -name MANIFEST.txt | grep -q . \
+    || { echo "E2E-FAIL: 第二次推送后云端 timeline 无 MANIFEST.txt（排除范围过大？）"; exit 1; }
+
+echo "E2E-OK: 多目标备份 + timeline 语义层产物齐全 + 演练结论只留本地"
 echo "  目标: $T/dest/backup-mac/E2E-Mac/"

@@ -172,6 +172,8 @@ backup_restic_class() {
 # 云端推送计数（main 汇总）：本地三个档案都成功 ≠ 云端拿到副本
 cloud_total=0
 cloud_failed=0
+# 调用方可在 sync_target 前设置要排除的模式（每项一个 --exclude，见时间轴推送）
+SYNC_EXCLUDES=()
 sync_target() {
     local local_path="$1"; local dest="$2"
     # ":/" 会被子类后端解析成文件系统绝对路径——
@@ -180,8 +182,12 @@ sync_target() {
     info "rclone copy -> $dest"
     "$RCLONE" mkdir "$dest" 2>>"$LOG" || true
     set +e
+    local -a ex_args=()
+    local _e
+    for _e in ${SYNC_EXCLUDES[@]+"${SYNC_EXCLUDES[@]}"}; do ex_args+=(--exclude "$_e"); done
     "$RCLONE" copy "$local_path/" "$dest/" \
         --bwlimit 10M --transfers 2 --checkers 4 \
+        ${ex_args[@]+"${ex_args[@]}"} \
         --log-file "$RCLONE_LOG" 2>&1 | tee -a "$LOG"
     local rc=${PIPESTATUS[0]}
     set -e
@@ -384,7 +390,12 @@ main() {
     generate_semantic "${sem_archives[@]}" || warn "[semantic] 语义层异常（不影响备份结论，详见 ${LOG}）"
     if [[ ${#sem_archives[@]} -gt 0 && "${SKIP_WEBDAV:-0}" != "1" ]]; then
         local tgt
+        # rescue-test.txt（恢复演练结论）逐条写着抽样文件的**完整路径**，是明文层里
+        # 唯一带文件名的产物——按红线 §1.1 它只留本地，不随时间轴上云（云端取证看
+        # MANIFEST/STORY/COVERAGE 那几件按红线渲染的即可）
+        SYNC_EXCLUDES=("rescue-test.txt")
         for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$BACKUP_BASE/timeline" "${tgt}/${SYSTEM_ID}/timeline"; done
+        SYNC_EXCLUDES=()
     fi
 
     if [[ $failed -gt 0 ]]; then
