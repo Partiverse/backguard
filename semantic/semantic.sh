@@ -317,12 +317,15 @@ run_drill() {
     [[ "${SEM_DRILL:-1}" == "1" ]] || return 0
     # 设备级文件：sdir（…/<dev>/YYYY/MM/DD/HHMM-标签）上 4 层到 <dev>
     local rt="$sdir/../../../../rescue-test.txt"
-    # 30 天节流
-    if [[ -f "$rt" ]]; then
+    # 30 天节流（人工演练经 drill.sh --force 置 SEM_DRILL_FORCE=1 绕开）
+    if [[ -f "$rt" && "${SEM_DRILL_FORCE:-0}" != "1" ]]; then
         local last now
         last="$(file_mtime "$rt")"
         now="$(date +%s)"
-        (( now - last < 30 * 86400 )) && { info "[drill] 上次演练不足 30 天，跳过"; return 0; }
+        if (( now - last < 30 * 86400 )); then
+            info "[drill] 上次演练不足 30 天，跳过（人工演练: ./drill.sh --force）"
+            return 0
+        fi
     fi
     local age_bin; age_bin="$(find_age || true)"
     local ident; ident="$(sem_keys_dir)/identity.txt"
@@ -362,8 +365,23 @@ run_drill() {
         fi
     } > "$rt" 2>/dev/null
     rm -rf "$tmp"
-    grep -q "RESULT: .*FAIL" "$rt" && warn "[drill] 恢复演练有失败项：$rt" \
-        || success "[drill] 恢复演练通过：$rt"
+    if drill_has_failure "$rt"; then
+        warn "[drill] 恢复演练有失败项：$rt"
+    else
+        success "[drill] 恢复演练通过：$rt"
+    fi
+}
+
+# 演练结论判定。汇总行本身写作「N PASS / 0 FAIL」，含字面 FAIL——
+# 用 grep 'RESULT: .*FAIL' 判失败会把全通过误判成有失败项（每次真跑演练都假告警，
+# 而 30 天节流让它在生产里长期不显眼）。只认逐条 FAIL 行 + RESULT 里的失败计数；
+# 结论行缺失或不可解析一律判失败（宁可误报，不可漏报）。
+drill_has_failure() {
+    local rt="$1" fails
+    grep -qE "^FAIL |^RESULT: FAIL" "$rt" && return 0
+    fails="$(sed -n 's/^RESULT: [0-9][0-9]* PASS \/ \([0-9][0-9]*\) FAIL.*/\1/p' "$rt")"
+    [[ -z "$fails" || "$fails" != "0" ]] && return 0
+    return 1
 }
 
 # 把三档案的 exclude 模式导出为 exclusions.json（机器可读）
