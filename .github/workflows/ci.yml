@@ -164,6 +164,13 @@ jobs:
           # GNU 语义 stat shim 顶在 PATH 前：Linux 上文件属性探测必须仍然正确
           bash test_portable_stat.sh
 
+      - name: E2E init wizard + scheduler templates
+        run: |
+          set -euo pipefail
+          # 装机向导在隔离 HOME 跑完整首备，并断言调度模板（systemd unit / launchd
+          # plist 按平台）不把明文口令写进无保护文件——新设备接入面的一次实跑
+          bash test_init_e2e.sh
+
       - name: E2E restore recovery paths
         run: |
           set -euo pipefail
@@ -290,6 +297,10 @@ jobs:
       # 系统自带 /usr/bin/expect：恢复码（路径 B）的 tty 交互分支在 BSD 上同样要跑
       - name: E2E standalone rescue entry
         run: /opt/homebrew/bin/bash test_rescue_e2e.sh
+
+      # BSD 上 plist 模板才是主角：口令不落 LaunchAgents、日志路径在位
+      - name: E2E init wizard + scheduler templates
+        run: /opt/homebrew/bin/bash test_init_e2e.sh
 
   windows:
     runs-on: windows-latest

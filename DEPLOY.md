@@ -78,6 +78,8 @@ SKIP_WEBDAV=1 ./backup.sh        # 先本地验证，不触云（备份前会自
 #  [ ] recovery-identity.enc 已按 ③ 另存第二处（云端没有它）
 ./backup.sh                      # 再跑完整链路（含 WebDAV）
 launchctl list | grep partiverse # 调度在位（init.sh 已注册，每日 02:34）
+# launchd 那一次的现场在 ~/.local/share/partiverse-backup/launchd.{out,err}.log
+# （plist 的 StandardOut/ErrorPath 指过去；不配的话 stdout 落进 os_log，跑挂只剩退出码）
 ```
 
 ## 2. Windows 接入（restic 路径）
