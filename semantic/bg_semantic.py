@@ -9,7 +9,7 @@
       restore.md     本快照的恢复指引（明文）
 
 设计红线（research/06 §2.3/§4.3）：明文层只放统计摘要级信息——
-完整文件名与路径只进加密清单（manifest.json.enc，本原型不生成）；
+完整文件名与路径只进加密清单（manifest.json.enc，由编排层调 age 密封）；
 凭据类目录一律只写数量不写名字。
 
 用法：
@@ -584,7 +584,8 @@ def build_manifest(run: dict, per_class: dict[str, tuple[list[Entry], DiffResult
     while content and content[-1] == "":
         content.pop()
     content.append("SEP")
-    content.append("完整文件清单已加密存放于 manifest.json.enc（本原型未生成）")
+    # 密封发生在 generate 之后（semantic.sh/ps1 调 age），此处无法确证结果，故缺失即未密封。
+    content.append("完整文件清单已加密存放于 manifest.json.enc（缺失=本次未密封）")
     content.append("如何恢复 → 见本目录 restore.md")
 
     W = min(max(display_width(l) for l in content if l != "SEP"), 96)
