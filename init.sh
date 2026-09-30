@@ -261,11 +261,15 @@ echo -e "${YELLOW}━━━ 调度设置 ━━━${NC}"
 
 SCHED_H="${SCHED_H:-02}"; SCHED_M="${SCHED_M:-34}"
 
-# INIT_SKIP_SCHEDULER=1（E2E 用）：跳过调度注册，避免向真实 launchd/systemd/Task
-# Scheduler 注册指向隔离环境的任务；后续备份/验收流程照常
-if [[ "${INIT_SKIP_SCHEDULER:-0}" == "1" ]]; then
-    info "（INIT_SKIP_SCHEDULER=1：跳过调度注册）"
-elif [[ "$PLATFORM" == linux ]]; then
+# INIT_SCHED_NO_REGISTER=1（E2E 用）：调度模板照常渲染并落盘，但不向真实
+# launchd / systemd --user / Task Scheduler 注册。测试里注册的 job 指向临时目录，
+# 实测：真机已有同名 Label 时沙箱那次 load 被拒装不上，但「靠冲突挡住」不是安全
+# 边界，测试里注册动作必须跳过。而模板产物本身就是被测对象
+# （明文口令有没有落盘、日志路径在不在）——只跳注册、不跳渲染才测得到。
+if [[ "${INIT_SCHED_NO_REGISTER:-0}" == "1" ]]; then
+    info "（INIT_SCHED_NO_REGISTER=1：渲染调度模板，跳过注册）"
+fi
+if [[ "$PLATFORM" == linux ]]; then
     echo "  创建 systemd user timer (每天 ${SCHED_H}:${SCHED_M})"
     mkdir -p "$HOME/.config/systemd/user"
     cat > "$HOME/.config/systemd/user/partiverse-backup.timer" <<TIMER
@@ -300,9 +304,13 @@ ProtectHome=read-only
 ReadWritePaths=$HOME/.local/share $CONF_DIR $BACKUP_BASE
 SVC
 
-    systemctl --user daemon-reload
-    systemctl --user enable --now partiverse-backup.timer
-    success "  systemd timer 已启用并立即触发首次备份"
+    if [[ "${INIT_SCHED_NO_REGISTER:-0}" == "1" ]]; then
+        info "  （unit/timer 已生成，未 systemctl enable）"
+    else
+        systemctl --user daemon-reload
+        systemctl --user enable --now partiverse-backup.timer
+        success "  systemd timer 已启用并立即触发首次备份"
+    fi
 
 elif [[ "$PLATFORM" == macos ]]; then
     echo "  创建 macOS launchd agent (每天 ${SCHED_H}:${SCHED_M})"
@@ -315,6 +323,11 @@ elif [[ "$PLATFORM" == macos ]]; then
         warn "未找到 bash 5（backup.sh 需要）——请先 brew install bash 再重跑本向导"
         LAUNCH_BASH="/bin/bash"
     fi
+    # 口令刻意不写进 plist：backup.sh 自己 `set -a; source secrets.env`（600），
+    # 而 LaunchAgents 下的 plist 没有 600 保护。真机 2026-10-01 实测：删掉
+    # plist 里的 EnvironmentVariables 后由 launchd 拉起的完整备份仍退出 0。
+    # StandardOut/ErrorPath 也不能省：不写时 launchd 把 stdout 丢进 os_log，
+    # 02:34 那次跑挂了现场基本读不到，只剩 `launchctl print` 的一个退出码。
     cat > "$PLIST_DIR/com.partiverse.backup.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -323,34 +336,42 @@ elif [[ "$PLATFORM" == macos ]]; then
     <key>Label</key><string>com.partiverse.backup</string>
     <key>ProgramArguments</key>
     <array><string>$LAUNCH_BASH</string><string>$SCRIPT_DIR/backup.sh</string></array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>BORG_PASSPHRASE</key><string>$BORG_PASSPHRASE</string>
-    </dict>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key><integer>$SCHED_H</integer>
         <key>Minute</key><integer>$SCHED_M</integer>
     </dict>
+    <key>StandardOutPath</key><string>$LOG_DIR/launchd.out.log</string>
+    <key>StandardErrorPath</key><string>$LOG_DIR/launchd.err.log</string>
     <key>RunAtLoad</key><true/>
 </dict>
 </plist>
 PLIST
-    launchctl load "$PLIST_DIR/com.partiverse.backup.plist" 2>/dev/null || true
-    success "  launchd agent 已加载"
+    if [[ "${INIT_SCHED_NO_REGISTER:-0}" == "1" ]]; then
+        # 只落盘模板、不注册：launchctl 操作的是当前用户真实的 launchd 域，测试环境
+        # 不能把指向临时目录的任务装进去
+        info "  （plist 已生成，未注册 launchd）"
+    else
+        launchctl load "$PLIST_DIR/com.partiverse.backup.plist" 2>/dev/null || true
+        success "  launchd agent 已加载"
+    fi
 
 elif [[ "$PLATFORM" == windows ]]; then
     echo "  创建 Windows Task Scheduler 任务 (每天 ${SCHED_H}:${SCHED_M})"
     TASK_NAME="PartiverseBackup"
     SCHED_TIME="${SCHED_H}:${SCHED_M}"
-    powershell -Command "
-        \$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-ExecutionPolicy Bypass -File $SCRIPT_DIR\\backup.ps1\"
-        \$trigger = New-ScheduledTaskTrigger -Daily -At '${SCHED_TIME}'
-        \$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName '$TASK_NAME' -Action \$action -Trigger \$trigger -Settings \$settings -Force 2>&1 | Out-Null
-        Start-ScheduledTask -TaskName '$TASK_NAME' 2>&1 | Out-Null
-    " 2>/dev/null || true
-    success "  Task Scheduler 任务已创建"
+    if [[ "${INIT_SCHED_NO_REGISTER:-0}" == "1" ]]; then
+        info "  （跳过 Task Scheduler 注册）"
+    else
+        powershell -Command "
+            \$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument \"-ExecutionPolicy Bypass -File $SCRIPT_DIR\\backup.ps1\"
+            \$trigger = New-ScheduledTaskTrigger -Daily -At '${SCHED_TIME}'
+            \$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName '$TASK_NAME' -Action \$action -Trigger \$trigger -Settings \$settings -Force 2>&1 | Out-Null
+            Start-ScheduledTask -TaskName '$TASK_NAME' 2>&1 | Out-Null
+        " 2>/dev/null || true
+        success "  Task Scheduler 任务已创建"
+    fi
 fi
 
 # ---------- 首次备份 ----------

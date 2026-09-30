@@ -15,10 +15,12 @@ mkdir -p "$T/dest"
 printf '[Backguard]\ntype = local\n' > "$T/rclone.conf"
 
 # 向导交互输入：密码 / 确认 / 选择已有 remote "Backguard" / 子路径回车
+# INIT_SCHED_NO_REGISTER=1：调度模板照常渲染落盘，但不注册进真实 launchd/systemd/Task
+# Scheduler——渲染出来的文件正是下面断言 5 的被测对象
 printf 'test-pass-123\ntest-pass-123\nBackguard\n\n' | (
     cd "$T/dest"
     HOME="$T/home" XDG_CONFIG_HOME="$T/conf" RCLONE_CONFIG="$T/rclone.conf" \
-    BACKUP_BASE="$T/repos" INIT_SKIP_SCHEDULER=1 \
+    BACKUP_BASE="$T/repos" INIT_SCHED_NO_REGISTER=1 \
         bash "$V0_DIR/init.sh"
 ) > "$T/out.log" 2>&1 || { echo "E2E-FAIL: init.sh 退出非零"; tail -25 "$T/out.log"; exit 1; }
 
@@ -52,4 +54,38 @@ for cls in config files system; do
 done
 [ -d "$T/dest/$DEV_ID/timeline" ] || fail "云端未收到 timeline"
 
-echo "E2E-OK: init.sh 全流程（模板数组化 / 首备 / 语义层 / 云端同步）通过"
+# 断言 5：调度模板渲染产物——明文口令必须只活在 secrets.env(600) 里。
+# launchd 的 plist 落在 ~/Library/LaunchAgents 且没有 600 保护，一旦把口令写进去
+# 就等于把凭据放进了无保护目录（真机 2026-10-01 已按此把旧 plist 的
+# EnvironmentVariables 删除，backup.sh 自己 `set -a; source secrets.env`）
+case "$(uname -s)" in
+    Darwin)
+        PL="$T/home/Library/LaunchAgents/com.partiverse.backup.plist"
+        [ -f "$PL" ] || fail "plist 未生成（调度模板没渲染）"
+        plutil -lint "$PL" > /dev/null || fail "plist 不是合法 plist"
+        # 不写 StandardOut/ErrorPath 时 launchd 把 stdout 丢进 os_log，
+        # 02:34 那次跑挂了基本读不到，只剩 launchctl print 的一个退出码
+        grep -q "StandardOutPath" "$PL" || fail "plist 缺 StandardOutPath：夜间失败没有现场"
+        grep -q "StandardErrorPath" "$PL" || fail "plist 缺 StandardErrorPath"
+        SCHED_DIR="$T/home/Library/LaunchAgents"
+        ;;
+    Linux)
+        SU="$T/home/.config/systemd/user/partiverse-backup.service"
+        [ -f "$SU" ] || fail "systemd unit 未生成（调度模板没渲染）"
+        grep -q "^EnvironmentFile=" "$SU" || fail "systemd unit 缺 EnvironmentFile"
+        SCHED_DIR="$T/home/.config/systemd/user"
+        ;;
+esac
+
+# 全隔离 HOME 扫口令探针：除 secrets.env 外任何文件出现即视为泄漏
+hits=$(grep -rl --exclude=secrets.env "test-pass-123" "$T/home" "$T/conf" "$T/repos" "$T/dest" 2>/dev/null || true)
+[ -z "$hits" ] || fail "明文口令泄漏到调度/日志产物: $(echo "$hits" | tr '\n' ' ')"
+# 注意写法：`[ -n "$(...)" ] && fail` 在未命中时返回 1，set -e 会让脚本静默中止
+if [ -n "$(grep -rl "PASSPHRASE" "$SCHED_DIR" 2>/dev/null || true)" ]; then
+    fail "调度文件里出现 PASSPHRASE 字样"
+fi
+if [ -n "$(find "$T/conf/partiverse-backup/secrets.env" ! -perm 600)" ]; then
+    fail "secrets.env 不是 600"
+fi
+
+echo "E2E-OK: init.sh 全流程（模板数组化 / 首备 / 语义层 / 云端同步 / 调度模板无明文口令）通过"
