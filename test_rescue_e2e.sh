@@ -193,6 +193,18 @@ if command -v restic >/dev/null 2>&1; then
     got="$(find "$T/out-restic" -type f -name '季度报告.txt' | head -1)"
     [[ -n "$got" ]] || fail "restic 取回后找不到文件: $(find "$T/out-restic" -type f | head -3)"
     [ "$(cat "$got")" = "Q3" ] || fail "restic 取回内容不对"
+
+    # restic restore 对不匹配的 --include 是 rc=0 + 「Restored 0 files」——
+    # 取回判据若数的是目标目录里的文件总数，目录里原本有个无关文件就会被当成成功
+    mkdir -p "$T/out-restic-decoy"
+    printf 'decoy\n' > "$T/out-restic-decoy/preexisting.txt"
+    out="$(rescue --base "$CLOUD" --class files --get "/reports/does-not-exist.txt" \
+                  --to "$T/out-restic-decoy" 2>&1)" \
+        && fail "restic 空取回却报成功：$out"
+    printf '%s' "$out" | grep -q "没有取回任何文件" || fail "restic 空取回的报错不具体：$out"
+    # 目录里只该剩下那颗诱饵：没有新文件落地，也没有把诱饵当成果
+    [[ "$(find "$T/out-restic-decoy" -type f | grep -c . || true)" == "1" ]] \
+        || fail "空取回却落了文件: $(find "$T/out-restic-decoy" -type f | head -3)"
 else
     echo "SKIP: 未装 restic，云端布局/restic 分支未测"
     SKIPPED="$SKIPPED restic(restic)"

@@ -370,12 +370,20 @@ get_mode() {
         restic) "$RESTIC" -r "$TARGET_REPO" restore "$ARCHIVE" --include "$GET" --target "$TO" \
                     || error "restic restore 失败: $GET";;
     esac
-    local got
-    got="$(find "$TO" -type f | grep -c . || true)"
+    local dest="$TO/${GET#/}" got
     # 「解开了归档但一个文件都没落下来」不能算成功：路径写错、大小写差一个字符
-    # 都会到这里静默返回 0，用户看到的是空目录
-    [[ "$got" -gt 0 ]] || error "没有取回任何文件——路径请从 --find 的输出原样复制: $GET"
-    success "已取回（$TO 下共 ${got} 个文件）"
+    # 都会到这里静默返回 0，用户看到的是空目录。
+    # 判据只看本次该落地的路径本身——数 TO 下文件总数的写法，会被 TO 里
+    # 原本就有的文件冒充成「取回了」
+    [[ -e "$dest" ]] || error "没有取回任何文件——路径请从 --find 的输出原样复制: $GET"
+    if [[ -d "$dest" ]]; then
+        got="$(find "$dest" -type f | grep -c . || true)"
+        [[ "$got" =~ ^[0-9]+$ ]] && [[ "$got" -gt 0 ]] \
+            || error "归档内 $GET 是个空目录，没有文件可取"
+        success "已取回（${got} 个文件）: $dest"
+    else
+        success "已取回: $dest"
+    fi
     info "归档内是剥掉前导 / 的绝对路径，文件在 $TO/Users/… 或 $TO/etc/… 下"
 }
 
