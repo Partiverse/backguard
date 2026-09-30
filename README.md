@@ -124,7 +124,8 @@ backup/
 │   ├── init-keys.exp   密钥初始化（expect 驱动 age，恢复码闭环验证）
 │   ├── bg_semantic.py  语义核心（MANIFEST.txt / STORY.md / restore.md / manifest）
 │   └── bg.pyz          上述单文件打包
-├── test_*.sh           隔离环境 E2E（本机与 CI 同源：多目标 / 恢复 / 云端失败 / 跨平台属性）
+├── test_*.sh           隔离环境 E2E（本机与 CI 同源：装机向导 / 多目标 / 恢复 / 演练 /
+│                       逃生 / 云端失败 / 保留策略 / 跨平台属性 / 只增不减红线）
 └── .gitignore          忽略 secrets.env 和本地缓存
 ```
 
@@ -152,6 +153,8 @@ backup/
 | `SEM_KEYS_DIR` | 密钥目录（默认 `~/.config/partiverse-backup/age` / `%APPDATA%\PartiverseBackup\age`） |
 | `SEM_PREFLIGHT` | 设 `0` 关闭备份前预检（默认开；预检 error 中止备份，warning 继续并留日志） |
 | `SEM_TIMELINE_KEEP` | 本地 timeline 暂存保留最近 N 份快照（默认 14，`0`=不清理；云端全量历史不受影响） |
+| `SEM_DRILL` | 设 `0` 关闭夜间恢复演练（默认开；结论写在 `<设备>/rescue-test.txt`，30 天节流） |
+| `SEM_DRILL_COUNT` | 每轮演练的抽样条数（默认 5；`test_drill_e2e.sh` 拉满以求确定性） |
 
 备份前预检（`bg preflight`）会检查：include 路径有效性、iCloud/OneDrive 占位文件
 （未真正落盘的"半真文件"）、.git 被静默排除、磁盘空间、引擎版本下限、
