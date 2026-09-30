@@ -58,8 +58,8 @@
    semantic/semantic.sh` 0 告警 → 相关 shell E2E（`test_init_e2e.sh` /
    `test_multi_target.sh` / `test_timeline_retention.sh` 可本机跑）。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
-3. push 前自查新增代码注入面（变量子进程、eval、`rm -rf` 变量路径——rm 前必须有白名单
-   守卫，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`）。
+3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
+   必须有白名单守卫，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`）。
 4. main 分支保护：禁 update/delete/force-push、要求线性历史；admin 凭据直推放行。
    push 后盯 CI（6 runs：semantic 三平台矩阵 + linux/macos/windows 真实备份与断言；
    CI 不触网，`SKIP_WEBDAV=1`）。
