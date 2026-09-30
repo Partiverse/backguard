@@ -88,6 +88,10 @@
    `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）/
    `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）。后六个已挂 CI
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
+   CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
+   `timeline/<dev>/rescue-test.txt` 存在且结论为「≥1 PASS / 0 FAIL」：没有密钥时
+   `run_drill` 走 rc=20 静默跳过、产物根本不存在，演练这条生产面就等于没测——10-01
+   的跨类别取回错配正是藏在这层遮罩下。**「CI 绿」≠「跑过」，先确认守卫那条 step 真的执行了。**
    新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；`test_portable_stat.sh` 的断言 4
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
    shell 夹具（`test_*.sh` 的 `mktemp -d`）清理一律 `trap 'rm -rf "$T"' EXIT`：
