@@ -9,6 +9,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 同一分支只留最新一轮：2026-10-01 02:47 实测，连推 8 个提交后 macOS job 排队 36 分钟
+# 一个都没开跑——每轮 2 个 macOS job，8 轮就是 16 个任务在免费 macOS runner 池里互相顶死，
+# 结果「唯一需要绿灯的 HEAD」反而排在最后。旧提交是被 HEAD 完全包含的祖先（且多为纯文档），
+# 它们的 verdict 对部署点没有意义，取消掉把池子让给 HEAD。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   semantic:
     # 语义层（research/06）单元测试 + demo E2E + zipapp 构建，三平台轻量矩阵
