@@ -295,8 +295,15 @@ main() {
                 warn "borg ${bv:-?} 低于最低支持版 1.2，建议升级"
             fi
         fi
+        # 告警出口检查：没配 ntfy 时 notify_alert/notify_story 直接 return 0，
+        # 「云端失败必须可见」这条红线在无人看日志时等于没有出口（真机 10-01 就是这样
+        # 静默了一整夜）。只 warning，不阻断——ntfy 是可选 sidecar
+        if [[ -z "${SEM_NTFY_URL:-}" ]]; then
+            warn "未配置 SEM_NTFY_URL：云端失败告警与 STORY 推送都不会发出，失败只进日志"
+        fi
         # 凭据外部化静默失效检测（research/05 §7）
         if [[ -n "${BORG_PASSCOMMAND:-}" ]]; then
+
             local pc="${BORG_PASSCOMMAND%% *}"
             if ! command -v "$pc" >/dev/null 2>&1; then
                 error "BORG_PASSCOMMAND 引用的 $pc 不在 PATH——备份将失败，中止"
