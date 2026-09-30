@@ -13,8 +13,19 @@
 
 sem_keys_dir() { echo "${SEM_KEYS_DIR:-$CONF_DIR/age}"; }
 
+# age 解析：launchd 环境 PATH 无 /opt/homebrew/bin，command -v 扑空 → 密封被静默跳过
+find_age() {
+    local c
+    command -v age && return 0
+    command -v rage && return 0
+    for c in /opt/homebrew/bin/age /usr/local/bin/age; do
+        [[ -x "$c" ]] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
 init_sem_keys() {
-    local age_bin; age_bin="$(command -v age || command -v rage || true)"
+    local age_bin; age_bin="$(find_age || true)"
     [[ -n "$age_bin" ]] || { warn "[semantic] 未安装 age（brew install age），跳过密钥初始化"; return 1; }
     local dir; dir="$(sem_keys_dir)"
     if [[ -f "$dir/recipients.txt" ]]; then
@@ -32,7 +43,7 @@ init_sem_keys() {
 # 密封：$1 = run.json 路径，$2 = 快照目录（产物写入其中）
 seal_manifest() {
     local run_file="$1" snapshot_dir="$2"
-    local age_bin; age_bin="$(command -v age || command -v rage || true)"
+    local age_bin; age_bin="$(find_age || true)"
     [[ -n "$age_bin" ]] || { info "[semantic] 未安装 age，跳过 manifest.json.enc"; return 0; }
     local rec; rec="$(sem_keys_dir)/recipients.txt"
     [[ -f "$rec" ]] || { info "[semantic] 无 recipients.txt（先 init_sem_keys），跳过密封"; return 0; }
@@ -121,11 +132,18 @@ generate_semantic() {
                 # 上一代时间取自首个发现的 prev 归档（同次运行的各类相差仅数秒）
                 if [[ ${#parent_args[@]} -eq 0 ]]; then
                     local pt
-                    # borg 的 start 是无后缀的 naive UTC（实测 1.4）；补 UTC 后缀转本地时区，
-                    # 与 --time 的本地时间口径对齐（bg 侧 local_naive 统一显示本地）
-                    pt="$("$BORG" info --json "$repo::$prev_arc" 2>/dev/null \
-                        | python3 -c "import sys,json,datetime;d=json.load(sys.stdin);a=d.get('archive') or (d.get('archives') or [{}])[0];s=a.get('start','');print(datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc).astimezone().isoformat() if s else '')" 2>/dev/null || true)"
-                    [[ -n "$pt" ]] && parent_args+=("--parent-time" "$pt")
+                    # 从归档名后缀解析本地时间：borg 1.4 的 info start 是 naive 本地时间，
+                    # 曾被误判为 naive UTC（TZ=UTC 的 CI 上两者无法区分），时区非零的机器
+                    # replace(utc) 会平移整时区（本机实测 STORY 出现 8 小时后的时刻）。
+                    # 归档名 YYYYMMDD-HHMMSS 由 backup.sh 用本地 date 戳，与 --time 口径一致。
+                    #（注意时间戳内部也有连字符：日期段=倒数第二字段，时间段=最后字段）
+                    local ts hhmmss
+                    ts="${prev_arc%-*}"; ts="${ts##*-}"
+                    hhmmss="${prev_arc##*-}"
+                    pt="${ts:0:4}-${ts:4:2}-${ts:6:2}T${hhmmss:0:2}:${hhmmss:2:2}:${hhmmss:4:2}"
+                    if [[ ${#pt} -eq 19 ]]; then
+                        parent_args+=("--parent-time" "$pt")
+                    fi
                 fi
             fi
         fi
@@ -149,7 +167,8 @@ generate_semantic() {
     label="${SEM_LABEL:-$label}"
 
     if ! semantic_bg convert --engine borg "${class_args[@]}" "${prev_args[@]}" "${parent_args[@]}" \
-            --device "$DEVICE_ID" --time "${SEM_TIME:-$(date +"%Y-%m-%dT%H:%M:%S%z")}" \
+            --device "$DEVICE_ID" \
+            --time "${SEM_TIME:-$(t="$(date +"%Y-%m-%dT%H:%M:%S%z")"; echo "${t%??}:${t: -2}")}" \
             --label "$label" --auto-strip --out "$tmp/run.json" >>"$LOG" 2>&1; then
         warn "[semantic] convert 失败（详见 $LOG），跳过"
         rm -rf "$tmp"
@@ -167,13 +186,14 @@ generate_semantic() {
         | sort -rn | head -1 | cut -d' ' -f2-)"
     [[ -n "$prev_ex" ]] && cp "$prev_ex" "$tmp/prev-exclusions.json" 2>/dev/null || true
 
-    local sdir
+    local sdir gen_rc=0
+    # || gen_rc=$? 中和 set -e/pipefail：bg 失败必须走下方降级而非炸掉整个备份
     semantic_bg generate --run "$tmp/run.json" --out "$stage" \
         --exclusions "$tmp/exclusions.json" \
         --prev-exclusions "$tmp/prev-exclusions.json" \
         ${LOG_DIR:+--preflight "$LOG_DIR/preflight-latest.json"} 2>>"$LOG" \
-        | sed -n 's/^已生成快照目录: //p' > "$tmp/.sdir"
-    if [[ ${PIPESTATUS[0]} -ne 0 || ! -s "$tmp/.sdir" ]]; then
+        | sed -n 's/^已生成快照目录: //p' > "$tmp/.sdir" || gen_rc=$?
+    if [[ $gen_rc -ne 0 || ! -s "$tmp/.sdir" ]]; then
         warn "[semantic] generate 失败（详见 $LOG），跳过"
         rm -rf "$tmp"
         return 0
@@ -220,7 +240,7 @@ run_drill() {
         now="$(date +%s)"
         (( now - last < 30 * 86400 )) && { info "[drill] 上次演练不足 30 天，跳过"; return 0; }
     fi
-    local age_bin; age_bin="$(command -v age || command -v rage || true)"
+    local age_bin; age_bin="$(find_age || true)"
     local ident; ident="$(sem_keys_dir)/identity.txt"
     [[ -n "$age_bin" && -f "$ident" && -f "$sdir/manifest.json.enc" ]] || {
         info "[drill] 缺 age/主身份/密封清单，跳过"; return 0; }

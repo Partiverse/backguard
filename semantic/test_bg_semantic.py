@@ -66,6 +66,17 @@ class TestParsers(unittest.TestCase):
         self.assertEqual(es[0].path, "a.jpg")
         self.assertEqual(es[0].mtime, bg.parse_iso("2026-09-28T21:00:00.337098").timestamp())
 
+    def test_parse_iso_offset_variants(self):
+        # 回归：launchd 环境 PATH 解析到系统 python3（3.9），其 fromisoformat
+        # 拒绝 date +%z 产出的 +0800——四种 RFC3339 变体必须等价可解析
+        self.assertEqual(
+            bg.parse_iso("2026-09-30T09:48:20+0800"),
+            bg.parse_iso("2026-09-30T01:48:20+00:00"),
+        )
+        for s in ("2026-09-30T09:48:20Z", "2026-09-30T09:48:20-0500",
+                  "2026-09-30T09:48:20.337098+0800"):
+            self.assertIsNotNone(bg.parse_iso(s), s)
+
     def test_norm_path_backslash_and_strip(self):
         self.assertEqual(bg._norm_path("C:\\Users\\neb\\a.txt", 2), "a.txt")
         self.assertEqual(bg._norm_path("/Users/neb/a.txt", 0), "Users/neb/a.txt")

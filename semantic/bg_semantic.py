@@ -78,7 +78,12 @@ def human_bytes(n: int) -> str:
 def parse_iso(s: str | None) -> datetime | None:
     if not s:
         return None
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    # py<3.11 的 fromisoformat 不认 Z 缩写与 ±HHMM 无冒号时区——macOS 系统 python3
+    # 是 3.9，launchd 环境 PATH 解析到它，实测被 date +%z 的 +0800 绊倒
+    t = s.strip()
+    if t.endswith(("Z", "z")):
+        t = t[:-1] + "+00:00"
+    return datetime.fromisoformat(re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", t))
 
 
 def sanitize_component(s: str) -> str:

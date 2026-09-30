@@ -268,7 +268,8 @@ main() {
             pf_args+=(--excludes "${pf_exc_ref[@]}")
         done
         local pf_rc=0
-        semantic_bg preflight "${pf_args[@]}" | tee -a "$LOG" || pf_rc=$?
+        # --json-out 落盘供覆盖报告引用（research/08 T2.5）；文本照常进日志
+        semantic_bg preflight --json-out "${LOG_DIR}/preflight-latest.json" "${pf_args[@]}" | tee -a "$LOG" || pf_rc=$?
         if [[ $pf_rc -eq 2 ]]; then
             error "preflight 发现致命问题，备份中止（修复后重跑；或 SEM_PREFLIGHT=0 跳过预检）"
             exit 1
@@ -319,7 +320,10 @@ main() {
 
     local failed=0
     local -a sem_archives=()
-    SEM_TIME="$(date +"%Y-%m-%dT%H:%M:%S%z")"  # 带时区，与 --parent-time 口径一致（bg 统一转本地显示）
+    # 带时区，与 --parent-time 口径一致（bg 统一转本地显示）；
+    # %z 产 ±HHMM，py<3.11 的 fromisoformat 不认——补冒号为 ±HH:MM
+    SEM_TIME="$(date +"%Y-%m-%dT%H:%M:%S%z")"
+    SEM_TIME="${SEM_TIME%??}:${SEM_TIME: -2}"
 
     for cls in config files system; do
         local archive_name
