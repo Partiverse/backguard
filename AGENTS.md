@@ -79,11 +79,13 @@
 
 1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（47 项全绿，
    3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
-   semantic/semantic.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
+   semantic/semantic.sh drill.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
-   `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）。
-   后四个已挂 CI。
+   `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）/
+   `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）。后五个已挂 CI。
+   新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；`test_portable_stat.sh` 的断言 4
+   会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、
@@ -112,7 +114,10 @@
 ## 5. 已知待办（代码小项；优先级与验证期安排见 HANDOVER §6）
 
 1. rescue 单文件脚本独立版（bash + PowerShell 各一份，无 Python 依赖；08 章 T3.2）
-2. `bg drill` 独立 CLI 入口（现挂于 `semantic.sh` 的 `run_drill` 函数）
+2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
+   顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，
+   全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认
+   逐条 FAIL 行 + 计数，结论行缺失一律判失败）
 3. Windows 密钥初始化交互版 `init-keys.ps1`（对齐 `init-keys.exp`）
 4. launchd plist 明文口令 → wrapper 读 0600 `secrets.env`
 5. T1.3 聚类调优（等 ≥1 周真实数据；已知素材：混合簇退级、载体根噪音、STORY 逐簇「新增 -2」渲染疑点）

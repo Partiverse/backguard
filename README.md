@@ -116,6 +116,7 @@ backup/
 ├── backup.sh           主备份脚本（跨平台）
 ├── backup.ps1          Windows 备份脚本
 ├── restore.sh          恢复脚本（Linux / macOS）
+├── drill.sh            恢复演练独立入口（解封→抽样→实取→校验，30 天节流可 --force 绕开）
 ├── semantic/           语义层（每次备份自动生成可读时间轴）
 │   ├── semantic.sh     编排：清单导出 → convert → generate → 密封 → 推送（borg）
 │   ├── semantic.ps1    同上（restic / Windows）
@@ -188,8 +189,12 @@ expect semantic/init-keys.exp "$(command -v age)" ~/.config/partiverse-backup/ag
 # Linux / macOS — 列出归档
 ./restore.sh --list
 
-# 恢复指定档案到指定路径
-./restore.sh --archive config --target ~/.restore/
+# 恢复指定档案的最新快照到指定路径（--latest 与 --id 必须二选一）
+./restore.sh --archive config --latest --target ~/.restore/
+./restore.sh --archive files --id <设备名>-files-20260930-023400 --target ~/.restore/
+
+# 随时验证恢复链路真的通（不必等夜间那次的 30 天节流）
+./drill.sh --force
 
 # Windows：暂用 restic 命令行（rescue 独立脚本待补，见 docs/HANDOVER §6）
 ```
