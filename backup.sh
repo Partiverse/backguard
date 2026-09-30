@@ -254,7 +254,16 @@ main() {
     # umask 只影响「新建」，已存在的文件得就地修：老部署留下的 0644 日志、launchd 自建
     # 的 launchd.*.log（我们不 touch 时它按默认 umask 建）一并收到 600。glob 无匹配时
     # chmod 只对那一个参数报错，不影响其余文件
-    chmod 600 "$LOG" "${LOG_DIR}"/*.log "${LOG_DIR}/preflight-latest.json" 2>/dev/null || true
+    # runs/run-*.json 是渲染前的**全量文件名清单**（真机单个 22 MB），system-meta/ 是
+    # mounts/crontab 转储——都不在 *.log 里，漏掉就等于把红线 §1.1 最怕的东西留成 0644。
+    # 真机 10-01 04:33 实测：6 个 run json 全 0644，只因 LOG_DIR 已 700 才没被同机遍历读到——
+    # 目录闸门是会回退的（重装、手工 chmod -R、新设备首备前），所以文件层也得自己站住。
+    chmod 600 "$LOG" "${LOG_DIR}"/*.log "${LOG_DIR}/preflight-latest.json" \
+        "${LOG_DIR}"/runs/*.json "${LOG_DIR}"/system-meta/* 2>/dev/null || true
+    # 子目录与备份根同理就地收紧（新建时 umask 已给 700，这里修的是老部署留下的 0755）
+    local base_dir="${BACKUP_BASE:-$HOME}"
+    chmod 700 "${LOG_DIR}/runs" "${LOG_DIR}/system-meta" "$base_dir" \
+        "$base_dir/timeline" 2>/dev/null || true
 
     load_secrets
 

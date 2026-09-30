@@ -15,6 +15,15 @@ mkdir -p "$T/home/.local/share/partiverse-backup"
 : > "$T/home/.local/share/partiverse-backup/decoy.log"
 chmod 644 "$T/home/.local/share/partiverse-backup/decoy.log"
 mkdir -p "$T/conf/partiverse-backup" "$T/home/.local/share/partiverse-backup/system-meta"
+# 老部署留下的「全量文件名清单」与转储：runs/run-*.json 单个真机 22 MB，system-meta/ 是
+# mounts/crontab 转储。两者都不叫 *.log，修复 glob 漏掉它们就等于留 0644（10-01 真机实测过）
+mkdir -p "$T/home/.local/share/partiverse-backup/runs"
+: > "$T/home/.local/share/partiverse-backup/runs/run-20260101-000000.json"
+: > "$T/home/.local/share/partiverse-backup/system-meta/decoy-mounts.txt"
+chmod 644 "$T/home/.local/share/partiverse-backup/runs/run-20260101-000000.json" \
+    "$T/home/.local/share/partiverse-backup/system-meta/decoy-mounts.txt"
+chmod 755 "$T/home/.local/share/partiverse-backup/runs" \
+    "$T/home/.local/share/partiverse-backup/system-meta"
 mkdir -p "$T/dest"
 printf '[Backguard]\ntype = local\n' > "$T/rclone.conf"
 
@@ -101,9 +110,18 @@ for d in "$T/conf/partiverse-backup" "$T/home/.local/share/partiverse-backup"; d
     dm=$(ls -ld "$d" | awk '{print $1}' | cut -c1-10)
     [ "$dm" = "drwx------" ] || fail "目录没收到 700: $d → $dm"
 done
+# 子目录与备份根：runs/、system-meta/ 是本次才新建或老部署留下的 0755，$BACKUP_BASE 与
+# 其 timeline 底下是时间轴产物——同一条「父目录 700」规则要覆盖到它们，否则一旦目录闸门
+# 回退（重装/手工 chmod -R），里头的 0644 全量清单立刻可读
+for d in "$T_LOG_DIR/runs" "$T_LOG_DIR/system-meta" "$T/repos" "$T/repos/timeline"; do
+    [ -d "$d" ] || fail "$d 未创建（权限断言失去对象）"
+    dm=$(ls -ld "$d" | awk '{print $1}' | cut -c1-10)
+    [ "$dm" = "drwx------" ] || fail "目录没收到 700: $d → $dm"
+done
 # 日志文件一律 600：decoy.log 是「本次运行前就存在的 0644」，靠 backup.sh 的修复 glob；
 # backup.log/rclone.log 是本次新建的，靠 umask 077——两条路少一条这里就红
-for lf in "$T_LOG_DIR"/*.log "$T_LOG_DIR"/preflight-latest.json; do
+for lf in "$T_LOG_DIR"/*.log "$T_LOG_DIR"/preflight-latest.json \
+          "$T_LOG_DIR"/runs/*.json "$T_LOG_DIR"/system-meta/*; do
     [ -e "$lf" ] || continue
     fm=$(ls -ld "$lf" | awk '{print $1}' | cut -c1-10)
     [ "$fm" = "-rw-------" ] || fail "日志/预检产物同机可读: $(basename "$lf") → $fm"

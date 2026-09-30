@@ -81,6 +81,10 @@
 - **权限面**：备份产物没有任何需要同机可读的东西——入口脚本（`backup.sh` / `init.sh` /
   `drill.sh`）一律 `umask 077`，`$CONF_DIR`（secrets.env + age 私钥）与 `$LOG_DIR`（backup.log /
   rclone.log / launchd.*.log / sem.log / drill.log / preflight-latest.json）700、其中文件 600。
+  清单别只数 `*.log`：`$LOG_DIR/runs/run-*.json` 是渲染前的**全量文件名清单**（真机单个 22 MB）、
+  `system-meta/` 是 mounts/crontab 转储、`$BACKUP_BASE` 与 `$BACKUP_BASE/timeline` 是时间轴根，
+  10-01 真机实测这三处当时全是 0644/0755，只靠 `LOG_DIR` 已 700 才没被同机遍历读到——目录闸门
+  会回退（重装、手工 `chmod -R`、新设备首备前），所以文件层必须自己站住。
   两层缺一不可：`umask` 只管新建，已存在的 0755 目录与 0644 日志（父目录 `~/.config`、
   `~/.local/share` 常被 `mkdir -p` 建成 755）靠 `backup.sh` 每次运行的幂等 `chmod` 修复，所以
   老设备只要 nightly 跑到新提交就自动收紧，不必改 plist。日志里是引擎输出的**完整路径**，
