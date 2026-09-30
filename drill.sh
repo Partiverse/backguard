@@ -67,19 +67,20 @@ info "演练归档: $REPO::$ARC"
 
 # run_drill 把结果写到设备目录（快照目录上 4 层：<dev>/YYYY/MM/DD/HHMM-标签）
 rt="$(cd "$SNAP/../../../.." && pwd)/rescue-test.txt"
-# mtime 必须在演练之前取：事后取会把「本轮没跑」判成「跑过」
-rt_before="$(file_mtime "$rt")"
 
-out="$(run_drill "$SNAP" "$REPO" "$ARC")"
+# 按 run_drill 的退出码分支，不从结果文件反推「本轮跑过没有」：
+# 秒级 mtime 分不开陈旧文件与刚写的文件，字符串匹配又依赖提示语措辞
+rc=0
+out="$(run_drill "$SNAP" "$REPO" "$ARC")" || rc=$?
 printf '%s\n' "$out"
-if [[ "$out" == *"[drill] 上次演练不足 30 天"* ]]; then
-    info "本轮被 30 天节流跳过（未执行演练），要立刻验一次加 --force"
-    exit 0
-fi
+case "$rc" in
+    10) info "本轮被 30 天节流跳过（未执行演练），要立刻验一次加 --force"; exit 0;;
+    20) error "演练未执行（缺 age/主身份/密封清单，或 SEM_DRILL=0），详见 ${LOG}";;
+    0)  ;;
+    *)  error "演练异常退出（rc=${rc}），详见 ${LOG}";;
+esac
 
-# 判定「本轮真的跑过」只看结果文件是否被重写：陈旧文件会被误报成通过
-[[ "$(file_mtime "$rt")" != "$rt_before" ]] \
-    || error "本轮没有产出新的 rescue-test.txt（缺 age/主身份/密封清单？详见 ${LOG}）"
+[[ -f "$rt" ]] || error "演练跑完却没有 rescue-test.txt，详见 ${LOG}"
 if drill_has_failure "$rt"; then
     error "恢复演练有失败项，详见 $rt"
 fi

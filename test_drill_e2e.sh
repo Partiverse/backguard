@@ -72,7 +72,7 @@ RT="$BASE/timeline/$DEV/rescue-test.txt"
 # 断言 1：缺主身份时，drill 必须失败可见——不能静默「跳过」后还报成功
 mv "$KEYS/identity.txt" "$KEYS/identity.hold"
 out="$(run_drill_sh --force 2>&1)" && fail "缺身份却退出 0：$out"
-printf '%s' "$out" | grep -q "没有产出新的 rescue-test.txt" || fail "缺身份的错误不具体：$out"
+printf '%s' "$out" | grep -q "演练未执行" || fail "缺身份的错误不具体：$out"
 [[ ! -e "$RT" ]] || fail "缺身份却写出了 rescue-test.txt"
 mv "$KEYS/identity.hold" "$KEYS/identity.txt"
 
@@ -105,6 +105,14 @@ out="$(run_drill_sh 2>&1)" || fail "节流路径退出非零：$out"
 printf '%s' "$out" | grep -q "不足 30 天" || fail "节流未生效：$out"
 after="$(md5 -q "$RT" 2>/dev/null || cksum "$RT" | tr -d ' ')"
 [[ "$before" == "$after" ]] || fail "节流仍改写了 rescue-test.txt"
+
+# 断言 3.5：rescue-test.txt 已存在但本轮缺主身份（密钥目录指到空处）时，
+# 必须按 rc=20 报「未执行」，而不是拿陈旧文件判「通过」——
+# 秒级 mtime 分不开陈旧文件与刚写的文件，所以判定走退出码而非文件考古
+mkdir -p "$T/empty-keys"
+out="$(HOME="$T/home" XDG_CONFIG_HOME="$T/conf" SEM_KEYS_DIR="$T/empty-keys" \
+      bash "$V0_DIR/drill.sh" --force 2>&1)" && fail "密钥目录指空处却报成功：$out"
+printf '%s' "$out" | grep -q "演练未执行" || fail "陈旧结果被当成通过：$out"
 
 # 断言 4：指定 --snapshot 时不需要自动发现；快照不存在必须报错而非静默
 out="$(run_drill_sh --snapshot "$SNAP" --force 2>&1)" || fail "--snapshot 显式路径失败：$out"
