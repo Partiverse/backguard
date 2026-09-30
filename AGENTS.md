@@ -100,9 +100,14 @@
 - 备份仓库：`~/PartiverseBackup/`（config/files/system 三个 borg 仓库，本地事实源）。
 - 调度：launchd 每日 02:34（`~/Library/LaunchAgents/com.partiverse.backup.plist`；
   内嵌明文 BORG_PASSPHRASE 已 chmod 600，彻底修法 = wrapper 读 secrets.env，见待办）。
+- **运行中的代码不是你的工作树**：plist 执行 `~/leisure/Codebase-Driven-by-AI/backguard/v0/backup.sh`，
+  它是本仓库的**纯部署 checkout**（不在上面开发）。提交进 main 后必须
+  `git -C <部署目录> fetch && merge --ff-only origin/main` 才会被 nightly 用到——
+  2026-09-30 就是漏了这步导致部署点落后 14 个提交、观察期数据一度无效（HANDOVER §4.1）。
 - 云端：rclone remote `Backguard:`（123Pan WebDAV），约 8–10GB。
-- 本仓库上一级目录的 `research/`、`PRD.md`、`prototype/`、`pitch/` 是本地工件，
-  **不在任何 git 仓库内**；关键结论已内联进 docs/HANDOVER。
+- `~/leisure/Codebase-Driven-by-AI/backguard/`（即部署树 v0 的上一级）下的 `research/`、
+  `PRD.md`、`prototype/`、`pitch/` 是本地工件，**不在任何 git 仓库内**；
+  关键结论已内联进 docs/HANDOVER。换机或移动开发树时，这些工件不随本仓库 clone 走。
 
 ## 5. 已知待办（代码小项；优先级与验证期安排见 HANDOVER §6）
 
