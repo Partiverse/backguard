@@ -109,6 +109,11 @@ jobs:
           # 脚本自带隔离的 rclone.conf（local 后端假 remote），不触网不碰真实配置
           bash test_multi_target.sh "$PWD"
 
+      - name: Unit timeline retention (prune_local_timeline)
+        run: |
+          set -euo pipefail
+          bash test_timeline_retention.sh
+
   macos:
     runs-on: macos-latest
     # macOS 自带 bash 3.2 不支持 declare -A / nameref，脚本需要 bash 5

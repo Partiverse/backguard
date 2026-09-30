@@ -53,6 +53,8 @@ expect semantic/init-keys.exp "$(command -v age)" ~/.config/partiverse-backup/ag
 echo 'export SEM_NTFY_URL="https://<你的-ntfy>/backguard-<设备名>"' >> ~/.config/partiverse-backup/config.sh
 # 密码管理器集成（可选，rbw；见 research/05 §7）：
 echo 'export BORG_PASSCOMMAND="rbw get backguard-仓库口令"' >> ~/.config/partiverse-backup/config.sh
+# 本地 timeline 暂存快照保留份数（默认 14；云端是全量历史，本地保 N 份供云端丢失时重建，0=不清理）：
+echo 'export SEM_TIMELINE_KEEP=14' >> ~/.config/partiverse-backup/config.sh
 ```
 
 首次备份与验收：

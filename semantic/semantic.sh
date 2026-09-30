@@ -94,6 +94,35 @@ notify_story() {
     fi
 }
 
+# 本地 timeline 暂存保留（2026-09-30 云端删除事件教训：快照历史此前只在云端存一份，
+# 云端被删即永久丢失）。rclone copy 只增不删、云端是全量历史；本地保留最近 N 份
+# （默认 14，SEM_TIMELINE_KEEP 可调，<=0 跳过清理、非数字回落默认）供云端丢失时重建。
+# 只清理 <设备>/YYYY/MM/DD/HHMM-标签 快照目录；profile.json / rescue-test.txt 不动。
+prune_local_timeline() {
+    local dev_dir="$1"
+    local keep="${SEM_TIMELINE_KEEP:-14}"
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=14
+    (( keep >= 1 )) || return 0
+    [[ -d "$dev_dir" ]] || return 0
+    local old
+    # 滑窗 awk 取「除最后 keep 份外」的全部（BSD head 不支持负数 -n，tail 方向是反的）
+    old="$( { find "$dev_dir" -mindepth 4 -maxdepth 4 -type d 2>/dev/null || true; } \
+        | LC_ALL=C sort | awk -v k="$keep" 'NR>k{print a[NR-k]} {a[NR]=$0}' )"
+    if [[ -n "$old" ]]; then
+        local s
+        while IFS= read -r s; do
+            [[ -n "$s" ]] || continue
+            # rm -rf 白名单守卫：只放行 basename 为 HHMM-标签 形态的快照目录，
+            # dev_dir 意外解析错时宁可漏删不可误删
+            [[ "${s##*/}" =~ ^[0-9]{4}-[a-z0-9-]+$ ]] || {
+                warn "[semantic] 跳过非快照形态路径: $s"; continue; }
+            rm -rf -- "$s" && info "[semantic] 本地暂存保留最近 $keep 份，清理: ${s#"$dev_dir"/}"
+        done <<< "$old"
+        # 快照清走后腾出的空日期目录一并收掉（-delete 自 deepest-first，空壳级联消除）
+        { find "$dev_dir" -mindepth 1 -maxdepth 3 -type d -empty -delete 2>/dev/null || true; }
+    fi
+}
+
 # 主入口：$@ = "class:repo:archive"（本次成功备份的 borg 档案）
 generate_semantic() {
     [[ $# -eq 0 ]] && { info "[semantic] 无成功档案，跳过"; return 0; }
@@ -221,6 +250,8 @@ generate_semantic() {
     cp "$tmp/run.json" "$runs_dir/run-$(date +%Y%m%d-%H%M%S).json" 2>/dev/null || true
     ls -1t "$runs_dir"/run-*.json 2>/dev/null | tail -n +61 | xargs rm -f 2>/dev/null || true
     rm -rf "$tmp"
+
+    prune_local_timeline "$stage/$DEVICE_ID"
 
     success "[semantic] 时间轴已生成: $stage"
 }
