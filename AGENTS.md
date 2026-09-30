@@ -80,7 +80,9 @@
    后四个已挂 CI。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
-   必须有白名单守卫，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`）。
+   必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、
+   `prune_run_jsons` 的 `^run-[0-9]{8}-[0-9]{6}\.json$`；`ls | xargs rm` 这类按空白拆词
+   的写法在路径含空格时会把删除目标指到别处，一律禁用）。
 4. main 分支保护：禁 update/delete/force-push、要求线性历史；admin 凭据直推放行。
    push 后盯 CI（6 runs：semantic 三平台矩阵 + linux/macos/windows 真实备份与断言；
    CI **不推云端**（`SKIP_WEBDAV=1`），windows job 仍要下载 restic/rclone 依赖）。

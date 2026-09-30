@@ -141,6 +141,27 @@ prune_local_timeline() {
     fi
 }
 
+# run JSON 留档轮转（research/08 T0.3：默认最近 60 份，第二参可覆盖）。
+# 原实现 `ls -1t … | xargs rm -f` 把 ls 输出按空白拆词喂给 rm——名字里一个空格
+# 或分号就能把删除目标指到别处。这里与 prune_local_timeline 同口径：while read
+# 逐行 + basename 白名单，只放行 run-YYYYMMDD-HHMMSS.json，宁可漏删不可误删。
+prune_run_jsons() {
+    local runs_dir="$1"
+    local keep="${2:-60}"
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=60
+    (( keep >= 1 )) || return 0
+    [[ -d "$runs_dir" ]] || return 0
+    local stale f
+    stale="$( { ls -1t "$runs_dir"/run-*.json 2>/dev/null || true; } | tail -n +$((keep + 1)) )"
+    [[ -n "$stale" ]] || return 0
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        [[ "${f##*/}" =~ ^run-[0-9]{8}-[0-9]{6}\.json$ ]] || {
+            warn "[semantic] 跳过非留档形态路径: $f"; continue; }
+        rm -f -- "$f"
+    done <<< "$stale"
+}
+
 # 上一代快照的 exclusions.json（按 mtime 最近者，不含本代）→ 变更检测数据源。
 # 首备时 stage 可能不存在——find 的 rc 经 (…; true) 中和，防 pipefail 退出。
 latest_prev_exclusions() {
@@ -271,7 +292,7 @@ generate_semantic() {
     # run JSON 留档（最近 60 份，research/08 T0.3）
     mkdir -p "$runs_dir"
     cp "$tmp/run.json" "$runs_dir/run-$(date +%Y%m%d-%H%M%S).json" 2>/dev/null || true
-    ls -1t "$runs_dir"/run-*.json 2>/dev/null | tail -n +61 | xargs rm -f 2>/dev/null || true
+    prune_run_jsons "$runs_dir"
     rm -rf "$tmp"
 
     prune_local_timeline "$stage/$DEVICE_ID"
