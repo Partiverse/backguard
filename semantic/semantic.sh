@@ -35,7 +35,7 @@ init_sem_keys() {
     [[ -n "$age_bin" ]] || { warn "[semantic] 未安装 age（brew install age），跳过密钥初始化"; return 1; }
     local dir; dir="$(sem_keys_dir)"
     if [[ -f "$dir/recipients.txt" ]]; then
-        info "[semantic] 密钥已存在: $dir（重建需手动删除并确认仍有恢复路径）"
+        info "[semantic] 密钥已存在: ${dir}（重建需手动删除并确认仍有恢复路径）"
         return 0
     fi
     if [[ ! -t 0 ]]; then
@@ -256,7 +256,7 @@ generate_semantic() {
             --device "$DEVICE_ID" \
             --time "${SEM_TIME:-$(t="$(date +"%Y-%m-%dT%H:%M:%S%z")"; echo "${t%??}:${t: -2}")}" \
             --label "$label" --auto-strip --out "$tmp/run.json" >>"$LOG" 2>&1; then
-        warn "[semantic] convert 失败（详见 $LOG），跳过"
+        warn "[semantic] convert 失败（详见 ${LOG}），跳过"
         rm -rf "$tmp"
         return 0
     fi
@@ -276,7 +276,7 @@ generate_semantic() {
         ${LOG_DIR:+--preflight "$LOG_DIR/preflight-latest.json"} 2>>"$LOG" \
         | sed -n 's/^已生成快照目录: //p' > "$tmp/.sdir" || gen_rc=$?
     if [[ $gen_rc -ne 0 || ! -s "$tmp/.sdir" ]]; then
-        warn "[semantic] generate 失败（详见 $LOG），跳过"
+        warn "[semantic] generate 失败（详见 ${LOG}），跳过"
         rm -rf "$tmp"
         return 0
     fi
@@ -354,11 +354,11 @@ run_drill() {
                 if [[ -n "${got:-}" && "$(file_size "${got:-}")" == "$size" ]]; then
                     echo "PASS [$cls] $path ($size B)"; pass=$((pass+1))
                 else
-                    echo "FAIL [$cls] $path（取回或大小不符）"; failn=$((failn+1))
+                    echo "FAIL [$cls] ${path}（取回或大小不符）"; failn=$((failn+1))
                 fi
                 i=$((i+1))
             done
-            echo "RESULT: $pass PASS / $failn FAIL（抽样 $n）"
+            echo "RESULT: $pass PASS / $failn FAIL（抽样 ${n}）"
         fi
     } > "$rt" 2>/dev/null
     rm -rf "$tmp"

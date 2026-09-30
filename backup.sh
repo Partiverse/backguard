@@ -361,7 +361,7 @@ main() {
     done
 
     # 语义层红线（AGENTS.md §1.3）：任何失败降级为告警，不得改写备份结论
-    generate_semantic "${sem_archives[@]}" || warn "[semantic] 语义层异常（不影响备份结论，详见 $LOG）"
+    generate_semantic "${sem_archives[@]}" || warn "[semantic] 语义层异常（不影响备份结论，详见 ${LOG}）"
     if [[ ${#sem_archives[@]} -gt 0 && "${SKIP_WEBDAV:-0}" != "1" ]]; then
         local tgt
         for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$BACKUP_BASE/timeline" "${tgt}/${SYSTEM_ID}/timeline"; done
@@ -374,8 +374,8 @@ main() {
     # 云端可见性：本地全部成功不等于云端有副本——有失败就必须非零退出并留下明确标记，
     # 让 launchd / CI / ntfy 告警链看得见，而不是宣布 FULLY COMPLETE（下次运行会自动补传）
     if [[ $cloud_failed -gt 0 ]]; then
-        error "=== 本地完成，云端同步失败 $cloud_failed/$cloud_total 次——云端可能没有本次备份（详见 $RCLONE_LOG） ==="
-        notify_alert "云端同步失败 $cloud_failed/$cloud_total 次（设备 $DEVICE_ID），云端可能没有本次备份。详见 $RCLONE_LOG"
+        error "=== 本地完成，云端同步失败 $cloud_failed/$cloud_total 次——云端可能没有本次备份（详见 ${RCLONE_LOG}） ==="
+        notify_alert "云端同步失败 $cloud_failed/$cloud_total 次（设备 ${DEVICE_ID}），云端可能没有本次备份。详见 $RCLONE_LOG"
         exit 1
     fi
     success "=== Backup FULLY COMPLETE ($(date '+%Y-%m-%d %H:%M:%S')) ==="

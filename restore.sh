@@ -66,7 +66,7 @@ case "$MODE" in
         [[ -d "$REPO" ]] || error "仓库不存在: $REPO"
         if [[ -n "$SNAPSHOT" ]]; then
             list_class "$REPO" "$ARCHIVE" | grep -qxF -- "$SNAPSHOT" \
-                || error "归档不存在: $SNAPSHOT（$0 --archive $ARCHIVE --list 查看）"
+                || error "归档不存在: ${SNAPSHOT}（$0 --archive $ARCHIVE --list 查看）"
         elif [[ "$WANT_LATEST" -eq 1 ]]; then
             SNAPSHOT="$(list_class "$REPO" "$ARCHIVE" | tail -1)"
             [[ -n "$SNAPSHOT" ]] || error "[$ARCHIVE] 无归档可恢复"
@@ -80,7 +80,7 @@ case "$MODE" in
         # 因此必须 cd 进目标目录解包，否则会解到调用者所在目录
         if ! (cd "$TARGET" && BORG_PASSPHRASE="$BORG_PASSPHRASE" \
                 "$BORG" extract "$REPO::$SNAPSHOT"); then
-            error "borg extract 失败（归档: $SNAPSHOT）"
+            error "borg extract 失败（归档: ${SNAPSHOT}）"
         fi
         success "已恢复到: $TARGET"
         info "注意: 归档内是剥掉前导 / 的绝对路径，文件位于 $TARGET/Users/<用户>/… 或 $TARGET/etc/… 下"

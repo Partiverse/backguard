@@ -93,4 +93,15 @@ if grep -nE '\bstat -[cf]' "$V0_DIR/semantic/semantic.sh" >/dev/null; then
     fail "semantic.sh 仍有裸 stat -c/-f 调用（跨平台必炸其一）"
 fi
 
+# ---------- 断言 4：变量展开不得紧贴非 ASCII 字符 ----------
+# bash 在部分 locale 下把紧跟变量名的多字节首字节算进名字：`$LOG）` 查的是
+# "LOG<byte>"，set -u 下直接 unbound 退出（macOS CI 曾在云端失败分支炸过）。
+# LC_ALL=C 让字符类按字节判定，GNU/BSD grep 结果一致。
+if hits="$(LC_ALL=C grep -rnE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' \
+        "$V0_DIR"/*.sh "$V0_DIR"/semantic/*.sh 2>/dev/null |
+        grep -v ':[0-9]*:[[:space:]]*#' || true)"; [[ -n "$hits" ]]; then
+    echo "$hits"
+    fail "变量后紧贴非 ASCII（需写成 \${VAR}），否则某些 locale 下变量名吃进字节"
+fi
+
 echo "PASS: 跨平台 mtime/尺寸（GNU shim 下 file_mtime/file_size/prev-exclusions 选取均正确）"
