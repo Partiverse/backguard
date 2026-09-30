@@ -17,6 +17,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# 每个 job 与每个 E2E step 都设 timeout-minutes：默认 360 分钟意味着一步卡住（等 tty
+# 提示、borg 锁、下载挂起）能白烧 6 小时 macOS 额度，而且 step 只有结束才上传日志——
+# 卡住时什么都读不到。step 级 12 分钟到点即失败，日志随即可见，才谈得上定位。
+
 jobs:
   semantic:
     # 语义层（research/06）单元测试 + demo E2E + zipapp 构建，三平台轻量矩阵
@@ -25,6 +29,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,6 +58,7 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -109,6 +115,7 @@ jobs:
           [ -s "$dir/recipients.txt" ] || { echo "::error::recipients.txt 公钥提取失败"; exit 1; }
 
       - name: Run backup
+        timeout-minutes: 25
         run: ./backup.sh
         env:
           SKIP_WEBDAV: "1"
@@ -150,6 +157,7 @@ jobs:
             || { echo "::error::演练结论行缺失或抽样为 0"; exit 1; }
 
       - name: E2E multi-target (rclone local backend)
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # 脚本自带隔离的 rclone.conf（local 后端假 remote），不触网不碰真实配置
@@ -161,18 +169,21 @@ jobs:
           bash test_timeline_retention.sh
 
       - name: E2E redline cloud append-only
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # 静态守卫：全仓脚本不得出现 rclone sync（云端只增不减）
           bash test_cloud_copy_only.sh
 
       - name: E2E portable file attrs
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # GNU 语义 stat shim 顶在 PATH 前：Linux 上文件属性探测必须仍然正确
           bash test_portable_stat.sh
 
       - name: E2E init wizard + scheduler templates
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # 装机向导在隔离 HOME 跑完整首备，并断言调度模板（systemd unit / launchd
@@ -180,12 +191,14 @@ jobs:
           bash test_init_e2e.sh
 
       - name: E2E restore recovery paths
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # 真实 borg 仓库：--list / --archive --list / --latest / --id 四条路径实取回
           bash test_restore_e2e.sh
 
       - name: E2E cloud push failure visible
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # 只读目标使 rclone copy 失败：必须非零退出 + 告警，解除后恢复 FULLY COMPLETE
@@ -193,12 +206,14 @@ jobs:
           bash test_cloud_failure.sh
 
       - name: E2E standalone drill entry
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # 真实 borg 仓库 + 真实 age 密封：解封 → 抽样 → 实取 → 结论判定不得误报
           bash test_drill_e2e.sh
 
       - name: E2E standalone rescue entry
+        timeout-minutes: 12
         run: |
           set -euo pipefail
           # 单文件逃生恢复：两种目录布局 / borg+restic 搜与取 / age 双路径（expect 驱动 tty）
@@ -206,6 +221,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 50
     # macOS 自带 bash 3.2 不支持 declare -A / nameref，脚本需要 bash 5
     defaults:
       run:
@@ -254,6 +270,7 @@ jobs:
           [ -s "$dir/recipients.txt" ] || { echo "::error::recipients.txt 公钥提取失败"; exit 1; }
 
       - name: Run backup
+        timeout-minutes: 25
         run: ./backup.sh
         env:
           SKIP_WEBDAV: "1"
@@ -294,24 +311,30 @@ jobs:
 
       # BSD 平台专属回归：borg extract 的 cwd 相对语义 + 只读云端目标的失败可见性
       - name: E2E restore recovery paths
+        timeout-minutes: 12
         run: /opt/homebrew/bin/bash test_restore_e2e.sh
 
       - name: E2E cloud push failure visibility
+        timeout-minutes: 12
         run: /opt/homebrew/bin/bash test_cloud_failure.sh
 
       - name: E2E standalone drill entry
+        timeout-minutes: 12
         run: /opt/homebrew/bin/bash test_drill_e2e.sh
 
       # 系统自带 /usr/bin/expect：恢复码（路径 B）的 tty 交互分支在 BSD 上同样要跑
       - name: E2E standalone rescue entry
+        timeout-minutes: 12
         run: /opt/homebrew/bin/bash test_rescue_e2e.sh
 
       # BSD 上 plist 模板才是主角：口令不落 LaunchAgents、日志路径在位
       - name: E2E init wizard + scheduler templates
+        timeout-minutes: 12
         run: /opt/homebrew/bin/bash test_init_e2e.sh
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     permissions:
       contents: write
     steps:
@@ -374,7 +397,7 @@ jobs:
             Out-File "$conf\secrets.env" -Encoding utf8
 
       - name: Run backup and assert
-        shell: pwsh
+        timeout-minutes: 25
         env:
           SKIP_WEBDAV: "1"
         run: |
