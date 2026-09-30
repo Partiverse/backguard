@@ -138,10 +138,20 @@ class Cluster:
     tag: str  # 语义标签键（photos/documents/credentials/...）
     cls: str  # 所属档案类别（config/files/system）
     name: str  # 展示目录名（明文层允许的最深形态；"" 表示不显示名称）
-    members: list[Entry] = field(default_factory=list)
-    modified_count: int = 0
+    # 新增与修改分开存：合成一列就没法在「按标签筛过的成员」里分清哪个数是新增、
+    # 哪个是修改（真机 STORY 把 8 张新照片说成 103 张，就是这么来的）
+    added: list[Entry] = field(default_factory=list)
+    modified: list[Entry] = field(default_factory=list)  # 存每次变更的新版本
     bytes: int = 0
     raw_count: int = 0  # 照片簇内 RAW 计数
+
+    @property
+    def members(self) -> list[Entry]:
+        return [*self.added, *self.modified]
+
+    @property
+    def modified_count(self) -> int:
+        return len(self.modified)
 
 
 def _read_text(path: Path) -> str:
@@ -418,8 +428,8 @@ def cluster_changes(diff: DiffResult, cls: str = "files",
             tag=tag,
             cls=cls,
             name=name,
-            members=all_members,
-            modified_count=len(mod_members),
+            added=added,
+            modified=mod_members,
             bytes=sum(e.size for e in all_members),
             raw_count=sum(1 for e in added if e.path.rsplit(".", 1)[-1].lower() in RAW_EXTS),
         ))
@@ -474,23 +484,34 @@ def build_story(run: dict, per_class: dict[str, DiffResult], clusters: list[Clus
             intro += (f"> ⚠️ 距上次备份已约 {gap_h / 24:.0f} 天——中间出现了断档，"
                       f"请留意定时任务是否正常。\n\n")
 
-    def tag_members(c: Cluster, tag: str) -> list[Entry]:
-        return [m for m in c.members if classify(m.path) == tag]
+    def tag_split(c: Cluster) -> tuple[list[Entry], list[Entry]]:
+        """按簇的主标签筛出「新增」与「修改」两组。标签是按多数打给整簇的，
+        混进来的少量异类文件既不该计进「新增 N 张」，也不该被整簇的修改数从
+        n 里减掉（真机把 8 张新照片说成 103 张，就是这么减出来的；减过头就是
+        「新增 -2」）。一个同类成员都没有时退回整簇——那也要有话可说"""
+        add = [e for e in c.added if classify(e.path) == c.tag]
+        mod = [e for e in c.modified if classify(e.path) == c.tag]
+        return (add, mod) if (add or mod) else (c.added, c.modified)
 
     bullets: list[str] = []
     for c in clusters[:3]:
         loc = _cluster_label(c, privacy)
         loc_part = f"，集中在 `{loc}/`" if loc else ""
-        # 叙事计数只统计同类成员：簇按多数打标签，但混入的少量异类文件不应算数
-        own = tag_members(c, c.tag) or c.members
-        n = len(own)
-        size = human_bytes(sum(e.size for e in own))
+        own_add, own_mod = tag_split(c)
+        n_add, n_mod = len(own_add), len(own_mod)
+        n = n_add + n_mod
+        size = human_bytes(sum(e.size for e in own_add) + sum(e.size for e in own_mod))
         if c.tag == "photos":
-            raw = sum(1 for e in own if e.path.rsplit(".", 1)[-1].lower() in RAW_EXTS)
+            raw = sum(1 for e in own_add if e.path.rsplit(".", 1)[-1].lower() in RAW_EXTS)
             raw_part = f"（其中 RAW {raw} 张）" if raw else ""
-            bullets.append(f"- 📷 新增约 **{n} 张照片 / {size}**{loc_part}{raw_part}；")
+            if n_add and n_mod:
+                bullets.append(f"- 📷 新增 **{n_add} 张照片**、另有 {n_mod} 张有改动"
+                               f" / {size}{loc_part}{raw_part}；")
+            elif n_add:
+                bullets.append(f"- 📷 新增约 **{n} 张照片 / {size}**{loc_part}{raw_part}；")
+            else:
+                bullets.append(f"- 📷 照片有变化：**{n} 张**（{size}）{loc_part}；")
         elif c.tag == "documents":
-            n_add, n_mod = n - c.modified_count, c.modified_count
             if n_add and n_mod:
                 bullets.append(f"- 📄 文档有变化：新增 {n_add} · 修改 {n_mod} 份（{size}）{loc_part}；")
             elif n_mod:
@@ -503,12 +524,17 @@ def build_story(run: dict, per_class: dict[str, DiffResult], clusters: list[Clus
         elif c.cls == "system":
             bullets.append(f"- 🗂 系统图纸有更新：**{n} 个文件**（包清单/系统配置），增量 {size}；")
         elif c.tag == "code":
-            bullets.append(f"- 💻 代码有变更：`{loc or '代码目录'}`（新增 {len(c.members) - c.modified_count} · 修改 {c.modified_count}）；")
+            bullets.append(f"- 💻 代码有变更：`{loc or '代码目录'}`（新增 {n_add} · 修改 {n_mod}）；")
         elif c.tag == "video":
-            bullets.append(f"- 🎬 新增 **{n} 段视频 / {size}**{loc_part}；")
+            if n_add and n_mod:
+                bullets.append(f"- 🎬 新增 **{n_add} 段视频**、另有 {n_mod} 段有改动 / {size}{loc_part}；")
+            elif n_mod:
+                bullets.append(f"- 🎬 视频有变化：**{n} 段**（{size}）{loc_part}；")
+            else:
+                bullets.append(f"- 🎬 新增 **{n} 段视频 / {size}**{loc_part}；")
         else:
             zh, emoji, _ = TAG_INFO[c.tag]
-            bullets.append(f"- {emoji} `{loc or zh}`：新增 {n - c.modified_count} · 修改 {c.modified_count}（{size}）；")
+            bullets.append(f"- {emoji} `{loc or zh}`：新增 {n_add} · 修改 {n_mod}（{size}）；")
 
     total_add = sum(d.added_bytes for d in per_class.values())
     total_churn = sum(d.churn_bytes for d in per_class.values())

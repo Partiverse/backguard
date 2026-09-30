@@ -138,6 +138,34 @@ class TestClusters(unittest.TestCase):
         self.assertNotIn("3 张照片", story)
         self.assertIn("相比上一份快照", story)
 
+    def test_photo_cluster_never_counts_modified_as_added(self):
+        # 真机 10-01 的 STORY 写「新增约 103 张照片」，实际新增 8 张、改动 95 张：
+        # n 数的是同类成员（含修改），modified_count 数的却是整簇，两个口径混用
+        d = bg.DiffResult()
+        d.added = [E(f"Pictures/IMG_{i:03d}.jpg", 3_000_000) for i in range(8)]
+        d.modified = [(E(f"Pictures/OLD_{i:03d}.jpg", 3_000_000),
+                       E(f"Pictures/OLD_{i:03d}.jpg", 3_100_000)) for i in range(95)]
+        cs = bg.cluster_changes(d)
+        story = bg.build_story({"time": "2026-09-28T21:00:00+08:00", "device": "T"}, {}, cs, streak=2)
+        self.assertIn("新增 **8 张照片**、另有 95 张有改动", story)
+        self.assertNotIn("103 张照片", story)
+
+    def test_story_counts_never_go_negative(self):
+        # 「新增 -2」那类渲染：簇的多数标签是 documents，修改却散在别的标签上，
+        # 拿「同类成员数」减「整簇修改数」就减成了负数（09-30 真机 STORY 出现过）
+        d = bg.DiffResult()
+        d.added = [E(f"work/报告 {i}.pdf", 1_000) for i in range(4)]
+        d.modified = (
+            [(E(f"work/IMG_{i}.jpg", 3_000_000), E(f"work/IMG_{i}.jpg", 3_100_000))
+             for i in range(3)]
+            + [(E(f"work/state{i}.db", 10), E(f"work/state{i}.db", 20)) for i in range(3)]
+        )
+        story = bg.build_story({"time": "2026-09-28T21:00:00+08:00", "device": "T"}, {},
+                               bg.cluster_changes(d), streak=2)
+        self.assertNotIn("新增 -", story)
+        # 修复前这里是「新增 -2 · 修改 6」：文档簇只该报自己那 4 份新增
+        self.assertIn("新增了 **4 份文档", story)
+
     def test_credentials_cluster_hides_name(self):
         d = bg.DiffResult()
         d.modified = [(E(".ssh/id_ed25519", 400), E(".ssh/id_ed25519", 390))]

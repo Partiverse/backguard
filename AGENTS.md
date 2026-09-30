@@ -79,7 +79,7 @@
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（47 项全绿，
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（49 项全绿，
    3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
    semantic/semantic.sh drill.sh rescue.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
@@ -92,6 +92,9 @@
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
    shell 夹具（`test_*.sh` 的 `mktemp -d`）清理一律 `trap 'rm -rf "$T"' EXIT`：
    末行 `rm -rf` 在 `fail()` 的 exit 1 下不执行，含 age 私钥/明文账本的夹具就留在 /tmp。
+   **夹具必须与生产同形**：三类仓库齐（只建 files 就测不到跨类别错配）、抽样/计数类断言
+   把全集拉满（`SEM_DRILL_COUNT=99`）而非依赖当天种子。断言「跑通了」之前先问：
+   生产上真长这样吗？
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、
@@ -141,5 +144,6 @@
 4. ~~launchd plist 明文口令~~ 已删（2026-10-01 01:35）：**不需要 wrapper**——`backup.sh`
    自己 `set -a; source secrets.env`，plist 里那份 `BORG_PASSPHRASE` 与 secrets.env 同值、
    纯冗余。删除后重载 launchd 并手动触发了完整一次备份（退出 0、产物齐全）作为验证
-5. T1.3 聚类调优（等 ≥1 周真实数据；已知素材：混合簇退级、载体根噪音、STORY 逐簇「新增 -2」渲染疑点）
+5. T1.3 聚类调优（等 ≥1 周真实数据；已知素材：混合簇退级、载体根噪音。STORY 逐簇
+   「新增 -2」不是聚类问题，是计数口径混用，10-01 已修）
 6. T1.6 dogfood 扩 2 台设备（Windows/Linux 各一，按 `DEPLOY.md` 流程）
