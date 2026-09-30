@@ -833,20 +833,32 @@ def _scan_placeholders(root: Path, max_depth: int = 3,
     return seen, found
 
 
+def _looks_like_joined_paths(s: str) -> bool:
+    """旧版模板 bug 的形态特征：一个数组元素里空格拼接了多个绝对/家目录路径。
+
+    单纯含空格的路径（/Users/John Smith/…）不满足——只有拆出来每段都像路径才是旧格式。
+    """
+    parts = s.split()
+    return len(parts) > 1 and all(x.startswith(("/", "~")) for x in parts)
+
+
 def cmd_preflight(args: argparse.Namespace) -> None:
     findings: list[tuple[str, str, str]] = []  # (级别, 检查项, 消息)
 
     # 1. include 路径与云同步占位文件
     for inc in args.include or []:
-        if " " in inc.strip():
-            findings.append((
-                "error", "include 路径",
-                f"「{inc.strip()[:60]}…」含空格——疑似旧版单字符串格式（旧模板 bug），"
-                "请重跑 init.sh 重新生成 config.sh（新版为每路径一个元素的数组）"))
-            continue
+        inc = inc.strip()
         p = Path(inc).expanduser()
+        # 存在性先判：路径本身合法时，名字里有空格（家目录 /Users/John Smith、
+        # 外置卷）是常态，不得当成旧版单字符串——判错会直接中止用户备份
         if not p.exists():
-            findings.append(("error", "include 路径", f"{p} 不存在——将备份不到任何内容"))
+            if _looks_like_joined_paths(inc):
+                findings.append((
+                    "error", "include 路径",
+                    f"「{inc[:60] + ('…' if len(inc) > 60 else '')}」含空格——疑似旧版单字符串格式（旧模板 bug），"
+                    "请重跑 init.sh 重新生成 config.sh（新版为每路径一个元素的数组）"))
+            else:
+                findings.append(("error", "include 路径", f"{p} 不存在——将备份不到任何内容"))
             continue
         scanned, ph = _scan_placeholders(p)
         if ph:

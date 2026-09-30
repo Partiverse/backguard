@@ -422,6 +422,16 @@ class TestPreflight(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("旧版单字符串格式", out["findings"][0]["message"])
 
+    def test_preflight_include_with_space_in_path_is_ok(self):
+        # 回归：家目录含空格（/Users/John Smith、外置卷）是合法 include，
+        # 曾被「含空格即旧版单字符串」判成 error → backup.sh 中止整个备份
+        with tempfile.TemporaryDirectory() as tmp:
+            inc = str(Path(tmp) / "John Smith" / "Documents")
+            Path(inc).mkdir(parents=True)
+            (Path(inc) / "a.txt").write_text("x")
+            code, out = self._run_pf("--include", inc)
+            self.assertEqual((code, out["errors"], out["warnings"]), (0, 0, 0))
+
     def test_preflight_clean_dir_exit_0(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
