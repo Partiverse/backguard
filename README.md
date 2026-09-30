@@ -91,6 +91,10 @@ partiverse-kubuntu   # Linux（/etc/os-release 的 ID）
 
 > 若云端空间将来吃紧，可对云端仓库单独执行低频 prune（如 `--keep-monthly=24`），但脚本默认不做。
 
+云端推送失败**不再被算作完成**：任一目标 `rclone copy` 失败时，`backup.sh` 打出
+「本地完成，云端同步失败 X/Y」并以非零退出（配置 `SEM_NTFY_URL` 时同时推送告警）。
+本地仓库不受影响，失败的目标下次运行自动补传。
+
 ---
 
 ## 平台支持
@@ -112,16 +116,13 @@ backup/
 ├── backup.sh           主备份脚本（跨平台）
 ├── backup.ps1          Windows 备份脚本
 ├── restore.sh          恢复脚本（Linux / macOS）
-├── platform/
-│   ├── linux.sh        Linux 平台配置（依赖安装、元数据、调度）
-│   ├── macos.sh        macOS 平台配置
-│   └── windows.ps1     Windows 平台配置
 ├── semantic/           语义层（每次备份自动生成可读时间轴）
 │   ├── semantic.sh     编排：清单导出 → convert → generate → 密封 → 推送（borg）
 │   ├── semantic.ps1    同上（restic / Windows）
 │   ├── init-keys.exp   密钥初始化（expect 驱动 age，恢复码闭环验证）
 │   ├── bg_semantic.py  语义核心（MANIFEST.txt / STORY.md / restore.md / manifest）
 │   └── bg.pyz          上述单文件打包
+├── test_*.sh           隔离环境 E2E（本机与 CI 同源：多目标 / 恢复 / 云端失败 / 跨平台属性）
 └── .gitignore          忽略 secrets.env 和本地缓存
 ```
 
@@ -144,7 +145,7 @@ backup/
 | 变量 | 作用 |
 |---|---|
 | `BACKUP_TARGETS` | 备份目标数组，`"remote:子路径"` 格式，设备目录自动追加；**rclone 统一管理**，可配多个（WebDAV/B2/S3/SFTP/NAS…），例：`BACKUP_TARGETS=("webdav-main:backups" "b2-backup:backups")`。旧变量 `WEBDAV_REMOTE`(+`WEBDAV_ROOT`) 仍兼容（自动转为单目标） |
-| `SEM_NTFY_URL` | STORY 摘要推送（如自托管 `https://ntfy.example.com/backguard-设备名`）；推荐自托管，公共服务 topic 请用高熵随机串 |
+| `SEM_NTFY_URL` | ntfy 推送（STORY 摘要 + 云端同步失败告警，如自托管 `https://ntfy.example.com/backguard-设备名`）；推荐自托管，公共服务 topic 请用高熵随机串 |
 | `SEM_LABEL` | 覆盖自动时段标签（morning/noon/afternoon/evening/night） |
 | `SEM_KEYS_DIR` | 密钥目录（默认 `~/.config/partiverse-backup/age` / `%APPDATA%\PartiverseBackup\age`） |
 | `SEM_PREFLIGHT` | 设 `0` 关闭备份前预检（默认开；预检 error 中止备份，warning 继续并留日志） |

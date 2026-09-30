@@ -1,6 +1,6 @@
 # Partiverse Backup System — 三平台 CI
 # 真实 OS runner 上验证核心备份流程：装依赖 → 写测试配置 → 跑 backup → 断言归档
-# CI 不触网（SKIP_WEBDAV=1），密码为一次性随机值，仅存于 runner 内存
+# CI 不推云端（SKIP_WEBDAV=1，windows job 仍要下载 restic/rclone），密码为一次性随机值，仅存于 runner 内存
 name: ci
 
 on:
@@ -48,7 +48,7 @@ jobs:
       - name: Lint
         run: |
           shellcheck --version
-          shellcheck -S warning -f gcc backup.sh restore.sh platform/linux.sh semantic/semantic.sh 2>&1 | tee /tmp/lint.txt
+          shellcheck -S warning -f gcc backup.sh restore.sh semantic/semantic.sh 2>&1 | tee /tmp/lint.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             grep -E '^[^ :]+:[0-9]+:[0-9]+' /tmp/lint.txt | sed 's/^/::error::/' | head -20 || true
@@ -114,6 +114,31 @@ jobs:
           set -euo pipefail
           bash test_timeline_retention.sh
 
+      - name: E2E redline cloud append-only
+        run: |
+          set -euo pipefail
+          # 静态守卫：全仓脚本不得出现 rclone sync（云端只增不减）
+          bash test_cloud_copy_only.sh
+
+      - name: E2E portable file attrs
+        run: |
+          set -euo pipefail
+          # GNU 语义 stat shim 顶在 PATH 前：Linux 上文件属性探测必须仍然正确
+          bash test_portable_stat.sh
+
+      - name: E2E restore recovery paths
+        run: |
+          set -euo pipefail
+          # 真实 borg 仓库：--list / --archive --list / --latest / --id 四条路径实取回
+          bash test_restore_e2e.sh
+
+      - name: E2E cloud push failure visible
+        run: |
+          set -euo pipefail
+          # 只读目标使 rclone copy 失败：必须非零退出 + 告警，解除后恢复 FULLY COMPLETE
+          # （root 下 chmod 只读不生效，脚本自身会 E2E-SKIP）
+          bash test_cloud_failure.sh
+
   macos:
     runs-on: macos-latest
     # macOS 自带 bash 3.2 不支持 declare -A / nameref，脚本需要 bash 5
@@ -175,6 +200,13 @@ jobs:
           [ -n "$manifest" ] || { echo "::error::timeline 无 MANIFEST.txt"; exit 1; }
           echo "--- $manifest ---"
           cat "$manifest"
+
+      # BSD 平台专属回归：borg extract 的 cwd 相对语义 + 只读云端目标的失败可见性
+      - name: E2E restore recovery paths
+        run: /opt/homebrew/bin/bash test_restore_e2e.sh
+
+      - name: E2E cloud push failure visibility
+        run: /opt/homebrew/bin/bash test_cloud_failure.sh
 
   windows:
     runs-on: windows-latest

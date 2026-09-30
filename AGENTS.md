@@ -19,10 +19,13 @@
 2. **凭据纪律**：口令/密钥/恢复码/token 只进 `secrets.env`（600）或 age 密钥目录，
    永不入库、不进日志、不进 issue/截图；文档示例一律占位符。
 3. **非致命分层**：语义层是引擎旁路——语义层任何故障不得中断备份本体（接入点全部
-   告警降级）。`bg preflight` 等 Python 侧只做纯文件系统检查，**不做变量子进程调用**；
+   告警降级，`backup.sh` 的 `generate_semantic` 调用点也带 `|| warn` 兜底）。
+   `bg preflight` 等 Python 侧只做纯文件系统检查，**不做变量子进程调用**；
    引擎/凭据/网络检查一律放 bash 编排层。
 4. **云端只增不减**：云端用 `rclone copy` 不用 `sync`；timeline 云端永不删除；
    本地 timeline 保留策略（`SEM_TIMELINE_KEEP`，默认 14）只清理本地暂存。
+   反过来「本地成功」不等于「云端有副本」：任一目标推送失败必须非零退出并告警，
+   不得宣布 `FULLY COMPLETE`（`test_cloud_failure.sh` 锁定）。
 5. **不可逆操作先确认**：删除、force-push、改 CI/分支保护、覆盖未读文件——先问用户。
 
 ## 2. 工程约束（实测教训速查，违反必炸）
@@ -30,11 +33,19 @@
 - **bash 双轨兼容**：macOS 系统 bash 3.2 与用户态 5.x 都要跑（CI 双环境验证）。
   `config.sh` 的 includes/excludes 是索引数组，每路径/模式一元素（禁止空格拼接单字符串）。
 - **`set -euo pipefail` 陷阱**：管道任一段 rc≠0 会炸整个赋值语句——可容忍失败用
-  `(…; true)` 中和（borg prune rc=1 是 warning 级，与 create 同等容忍）；
+  `(…; true)` 中和（borg prune rc=1 是 warning 级，与 create 同等容忍；
+  `notify_story` 里 `grep -m2 '^- '` 无命中曾炸掉整次备份）；
   `local a="$1" b="$a/x"` 取不到值（SC2318：声明与赋值拆两行，或 `declare -n`）。
-- **shellcheck 全量 0 告警**（CI `-S warning` 卡门禁）：`[[ ]]` 内数组测试用 `[*]` 加引号
+- **shellcheck 门禁文件 0 告警**（CI `-S warning` 卡 `backup.sh restore.sh semantic/semantic.sh`；
+  `init.sh` / `test_init_e2e.sh` 的既有告警不在清单内）：`[[ ]]` 内数组测试用 `[*]` 加引号
   （`[@]` 在 `[[ ]]` 报 SC2199、在 `[ ]` 报 SC2198）；SC2154 的 disable 注释必须贴引用行；
   `set -u` 下数组 resolve 后必须恒定义（否则 `${#arr[@]}` unbound 静默退出）。
+- **文件属性跨平台**：GNU `stat -f` 是「文件系统状态」（`%m/%N/%z` 对它是非法指令，只打垃圾
+  且 rc=0 不报错），BSD `stat` 又没有 `-c`——语义层取 mtime/尺寸一律走 `file_mtime`(`date -r`)
+  / `file_size`(`wc -c`)；新增裸 `stat -c/-f` 会被 `test_portable_stat.sh`（GNU 语义 shim）抓住。
+- **borg 1.4 取回面**：`extract` **没有** `--destination/-C`（解包路径相对 cwd，要取回就先 `cd`
+  进目标目录），归档选择也不支持 `::--last 1` 这类通配——用 `borg list --short` 前缀过滤后取尾；
+  `/tmp`→`/private/tmp` 软链会触发 "repository was previously located at" 交互中止。
 - **时间口径**：borg info 的 start 是 **naive 本地时间**（borg 1.4.5 实测；CI 的 TZ=UTC
   环境曾误判为 naive UTC）。STORY 的 parent-time 改由归档名解析（归档名日期段=倒数第二
   字段、时间段=最后字段，时间戳内部含连字符）。bg 侧 `local_naive` 统一转本地显示；
@@ -53,16 +64,19 @@
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（43 项全绿，
-   3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh platform/linux.sh
-   semantic/semantic.sh` 0 告警 → 相关 shell E2E（`test_init_e2e.sh` /
-   `test_multi_target.sh` / `test_timeline_retention.sh` 可本机跑）。
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（44 项全绿，
+   3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
+   semantic/semantic.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
+   `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
+   `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
+   `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）。
+   后四个已挂 CI。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`）。
 4. main 分支保护：禁 update/delete/force-push、要求线性历史；admin 凭据直推放行。
    push 后盯 CI（6 runs：semantic 三平台矩阵 + linux/macos/windows 真实备份与断言；
-   CI 不触网，`SKIP_WEBDAV=1`）。
+   CI **不推云端**（`SKIP_WEBDAV=1`），windows job 仍要下载 restic/rclone 依赖）。
 
 ## 4. 本机与真实设备事实（开发机 = 用户 Mac，设备 particloud-macos）
 
