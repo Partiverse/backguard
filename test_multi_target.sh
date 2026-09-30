@@ -4,6 +4,7 @@
 set -euo pipefail
 V0_DIR="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d /tmp/bg-multi.XXXXXX)"
+trap 'rm -rf "$T"' EXIT   # 失败路径也要清：夹具可能含 age 私钥/解密出的明文账本，不能留在 /tmp
 mkdir -p "$T/src" "$T/conf/partiverse-backup" "$T/home"
 echo hello > "$T/src/a.txt"
 
@@ -52,4 +53,3 @@ find "$T/dest/backup-mac/E2E-Mac/timeline" -name manifest.json.enc | grep -q . \
 
 echo "E2E-OK: 多目标备份 + timeline 语义层产物齐全"
 echo "  目标: $T/dest/backup-mac/E2E-Mac/"
-rm -rf "$T"

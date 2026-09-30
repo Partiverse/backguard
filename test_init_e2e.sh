@@ -6,6 +6,7 @@
 set -euo pipefail
 V0_DIR="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d /tmp/bg-init-e2e.XXXXXX)"
+trap 'rm -rf "$T"' EXIT   # 失败路径也要清：夹具可能含 age 私钥/解密出的明文账本，不能留在 /tmp
 
 # 隔离环境：HOME 下造「存在」的用户目录；local remote 名与真实向导可选形态一致
 mkdir -p "$T/home/.config" "$T/home/.ssh" "$T/home/Documents" "$T/home/Desktop"
@@ -52,4 +53,3 @@ done
 [ -d "$T/dest/$DEV_ID/timeline" ] || fail "云端未收到 timeline"
 
 echo "E2E-OK: init.sh 全流程（模板数组化 / 首备 / 语义层 / 云端同步）通过"
-rm -rf "$T"

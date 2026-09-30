@@ -6,6 +6,7 @@
 set -euo pipefail
 V0_DIR="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d /tmp/bg-restore-e2e.XXXXXX)"
+trap 'rm -rf "$T"' EXIT   # 失败路径也要清：夹具可能含 age 私钥/解密出的明文账本，不能留在 /tmp
 fail() { echo "E2E-FAIL: $1"; exit 1; }
 command -v borg >/dev/null 2>&1 || { echo "E2E-SKIP: 需要 borgbackup"; exit 0; }
 
@@ -75,4 +76,3 @@ oldest="$DEV-config-20260929-023400"
 [ -z "$(prev_archive_for "$REPO" config "$oldest")" ] || fail "最老归档不应有 prev"
 
 echo "E2E-OK: restore.sh 四条路径（--list / --archive --list / --latest / --id）+ 语义层 prev 归档选取均真实可用"
-rm -rf "$T"

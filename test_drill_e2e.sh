@@ -7,6 +7,7 @@
 set -euo pipefail
 V0_DIR="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d /tmp/bg-drill-e2e.XXXXXX)"
+trap 'rm -rf "$T"' EXIT   # 失败路径也要清：夹具可能含 age 私钥/解密出的明文账本，不能留在 /tmp
 fail() { echo "E2E-FAIL: $1"; exit 1; }
 command -v borg >/dev/null 2>&1 || { echo "E2E-SKIP: 需要 borgbackup"; exit 0; }
 command -v age >/dev/null 2>&1 || { echo "E2E-SKIP: 需要 age"; exit 0; }
@@ -138,4 +139,3 @@ mkrt "PASS [files] a.txt (8 B)"
 drill_has_failure "$T/rt.txt" || fail "无结论行必须判失败（宁可误报不可漏报）"
 
 echo "E2E-OK: drill.sh 独立入口（缺身份失败可见 / 真实解封+实取+校验 / 30 天节流 / --snapshot 两条路径 / 结论判定不误报）"
-rm -rf "$T"
