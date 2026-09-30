@@ -18,43 +18,70 @@ CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/partiverse-backup"
 source "$CONF_DIR/config.sh"
 source "$CONF_DIR/secrets.env" 2>/dev/null || error "secrets.env 未找到"
 
-ARCHIVE="" TARGET="" SNAPSHOT_ID="--last 1"
+ARCHIVE="" TARGET="" SNAPSHOT="" WANT_LATEST=0 MODE="show"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --archive)  ARCHIVE="$2"; shift 2;;
         --target)   TARGET="$2"; shift 2;;
-        --id)       SNAPSHOT_ID="$2"; shift 2;;
-        --latest)   SNAPSHOT_ID="--last 1"; shift;;
+        --id)       SNAPSHOT="$2"; shift 2;;
+        --latest)   WANT_LATEST=1; shift;;
         --list)     MODE=list; shift;;
         *)          error "未知参数: $1";;
     esac
 done
 
-[[ -z "${ARCHIVE:-}" ]] && error "用法: $0 --archive <class> [--latest|--id <id>] [--target <dir>]"
 BACKUP_BASE="${BACKUP_BASE:-/backup-nvme1n1}"
-REPO="$BACKUP_BASE/borg-$ARCHIVE"
+[[ -n "${BORG_PASSPHRASE:-}" ]] || error "BORG_PASSPHRASE 未设置"
 
-[[ -d "$REPO" ]] || error "仓库不存在: $REPO"
-[[ -z "$BORG_PASSPHRASE" ]] && error "BORG_PASSPHRASE 未设置"
-
-list_snapshots() {
-    info "[$ARCHIVE] 可用快照:"
-    BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" list "$REPO" --short | \
-        grep "^${DEVICE_ID}-${ARCHIVE}-" | sort -r
+# 归档名后缀是本地时间戳 YYYYMMDD-HHMMSS，字典序即时间序
+list_class() {  # $1=仓库路径 $2=档案类别
+    [[ -d "$1" ]] || return 0
+    BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" list --short "$1" 2>/dev/null \
+        | grep "^${DEVICE_ID}-${2}-" | sort
 }
 
-case "${MODE:-show}" in
+case "$MODE" in
     list)
-        list_snapshots;;
+        if [[ -n "$ARCHIVE" ]]; then
+            REPO="$BACKUP_BASE/borg-$ARCHIVE"
+            [[ -d "$REPO" ]] || error "仓库不存在: $REPO"
+            info "[$ARCHIVE] 可用快照（新 → 旧）:"
+            list_class "$REPO" "$ARCHIVE" | sort -r
+        else
+            for cls in config files system; do
+                REPO="$BACKUP_BASE/borg-$cls"
+                [[ -d "$REPO" ]] || continue
+                info "[$cls] 可用快照（新 → 旧）:"
+                list_class "$REPO" "$cls" | sort -r
+            done
+        fi
+        ;;
     show)
-        [[ -z "$TARGET" ]] && error "--target <目录> 必须指定"
+        [[ -n "$ARCHIVE" ]] || error "用法: $0 --archive <class> [--latest|--id <归档名>] --target <目录>"
+        [[ -z "$SNAPSHOT" || "$WANT_LATEST" -eq 0 ]] || error "--latest 与 --id 二选一"
+        REPO="$BACKUP_BASE/borg-$ARCHIVE"
+        [[ -d "$REPO" ]] || error "仓库不存在: $REPO"
+        if [[ -n "$SNAPSHOT" ]]; then
+            list_class "$REPO" "$ARCHIVE" | grep -qxF -- "$SNAPSHOT" \
+                || error "归档不存在: $SNAPSHOT（$0 --archive $ARCHIVE --list 查看）"
+        elif [[ "$WANT_LATEST" -eq 1 ]]; then
+            SNAPSHOT="$(list_class "$REPO" "$ARCHIVE" | tail -1)"
+            [[ -n "$SNAPSHOT" ]] || error "[$ARCHIVE] 无归档可恢复"
+        else
+            error "请指定 --latest 或 --id <归档名>（$0 --archive $ARCHIVE --list 查看）"
+        fi
+        [[ -n "$TARGET" ]] || error "--target <目录> 必须指定"
         mkdir -p "$TARGET"
-        info "[$ARCHIVE] 恢复到: $TARGET (快照: ${SNAPSHOT_ID#-- })"
-        BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" extract \
-            "$REPO::$SNAPSHOT_ID" \
-            --target "$TARGET" 2>&1 | tee /dev/stderr
+        info "[$ARCHIVE] 恢复 $SNAPSHOT → $TARGET"
+        # borg 1.4 无 --destination（restore.md 亦不写）：提取路径相对当前目录，
+        # 因此必须 cd 进目标目录解包，否则会解到调用者所在目录
+        if ! (cd "$TARGET" && BORG_PASSPHRASE="$BORG_PASSPHRASE" \
+                "$BORG" extract "$REPO::$SNAPSHOT"); then
+            error "borg extract 失败（归档: $SNAPSHOT）"
+        fi
         success "已恢复到: $TARGET"
-        success "注意: 恢复后请手动重启相关服务"
+        info "注意: 归档内是剥掉前导 / 的绝对路径，文件位于 $TARGET/Users/<用户>/… 或 $TARGET/etc/… 下"
+        info "恢复后请手动重启相关服务"
         ;;
 esac
