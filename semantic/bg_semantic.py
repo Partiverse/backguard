@@ -636,10 +636,22 @@ def build_restore(run: dict) -> str:
 
 ## 逃生恢复（backguard 软件本身不可用时）
 
-1. 阅读仓库根目录的 `README.md`（明文）——它解释目录结构与仓库格式；
-2. `MANIFEST.txt` 是明文摘要；完整文件清单在 `manifest.json.enc`
+仓库根的 `rescue.sh` 是单文件救援器：不依赖本仓库其它文件、不依赖 Python，
+新机器只要装有 bash + 引擎（borg 或 restic）+ age，凭「备份目录副本 + 恢复材料」即可。
+
+```bash
+./rescue.sh --guide                    # 目录结构与恢复步骤先读这个
+./rescue.sh --base <备份目录> --list     # 列仓库 / 归档 / 时间轴快照
+./rescue.sh --base <备份目录> --class files --find <关键词>
+./rescue.sh --base <备份目录> --class files --get <路径> --to <恢复目录>
+```
+
+`--find` 直接问引擎、不需要 age；要跨档案带大小就解封账本（`--ledger`，
+需下面任一恢复材料）。本机布局 `borg-<cls>` 与云端副本布局 `<cls>` 都认。
+
+1. `MANIFEST.txt` 是明文摘要；完整文件清单在 `manifest.json.enc`
    （age X25519 加密，双恢复路径任选其一，格式 schema 版本化）；
-3. 内容块按内容寻址存放于类别内容池（config/files/system），按清单逐文件重建路径。
+2. 内容块按内容寻址存放于类别内容池（config/files/system），按清单逐文件重建路径。
 
 ### manifest.json.enc 的两条解密路径
 
@@ -653,8 +665,10 @@ age -d -i recovery-identity.txt -o manifest.json manifest.json.enc
 rm recovery-identity.txt   # 用完即删
 ```
 
-> 本段为原型占位文本。正式版由仓库根 `README.md` 与单文件救援器
-> （research/06 §6「逃生恢复」）接替，并每年自动演练一次。
+> 注意：age 身份文件（`identity.txt` / `recovery-identity.enc`）与 `secrets.env`
+> 一样**不推云端**，只存在本机密钥目录。真正盲恢复前要把密钥目录另存一份副本。
+> 恢复链路的周期性验证由 `drill.sh`（夜间 30 天节流 / 人工 `--force`）承担，
+> 结果落在设备目录的 `rescue-test.txt`。
 """
 
 
