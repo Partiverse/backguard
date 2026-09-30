@@ -55,6 +55,11 @@ echo 'export SEM_NTFY_URL="https://<你的-ntfy>/backguard-<设备名>"' >> ~/.c
 echo 'export BORG_PASSCOMMAND="rbw get backguard-仓库口令"' >> ~/.config/partiverse-backup/config.sh
 # 本地 timeline 暂存快照保留份数（默认 14；云端是全量历史，本地保 N 份供云端丢失时重建，0=不清理）：
 echo 'export SEM_TIMELINE_KEEP=14' >> ~/.config/partiverse-backup/config.sh
+
+# ③ 救援身份的密文另存第二处（第二台设备 / 加密 U 盘）
+#    云端副本里**没有** age/ 目录：recovery-identity.enc 从不推送，所以「干净机器 +
+#    云端备份目录 + 纸上恢复码」目前还缺一块料。拷法是人工搬运，不经本仓库、不触云
+cp ~/.config/partiverse-backup/age/recovery-identity.enc <第二处目录>/
 ```
 
 首次备份与验收：
@@ -68,6 +73,9 @@ SKIP_WEBDAV=1 ./backup.sh        # 先本地验证，不触云（备份前会自
 #  [ ] STORY.md 说的和你知道的最近改动对得上
 #  [ ] ntfy 手机收到推送（配置了 SEM_NTFY_URL 时）
 #  [ ] manifest.json.enc 可解：age -d -i ~/.config/partiverse-backup/age/identity.txt -o /tmp/m.json <enc>
+#  [ ] 逃生面自证：./rescue.sh --base $BACKUP_BASE --class files --find <一个你知道的文件名>
+#      能列出、--get 到临时目录能取回（rescue.sh 不依赖本仓库其它文件，见 --guide）
+#  [ ] recovery-identity.enc 已按 ③ 另存第二处（云端没有它）
 ./backup.sh                      # 再跑完整链路（含 WebDAV）
 launchctl list | grep partiverse # 调度在位（init.sh 已注册，每日 02:34）
 ```
