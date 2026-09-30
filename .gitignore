@@ -21,3 +21,6 @@ restore-test/
 
 # Python 字节码缓存
 __pycache__/
+
+# 安全审计本地工件（Mimosa）
+.mimosa/

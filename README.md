@@ -11,18 +11,19 @@
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Partiverse/backguard/main/init.sh)"
 ```
 
-**Windows** (PowerShell)
+**Windows** (PowerShell) —— 克隆后初始化：
 ```powershell
-irm https://raw.githubusercontent.com/Partiverse/backguard/main/init.ps1 | iex
+git clone https://github.com/Partiverse/backguard.git
+cd backguard
+.\backup.ps1 -Task Init
 ```
 
 或手动克隆：
 ```bash
-git clone git@github.com:Partiverse/backguard.git ~/partiverse-backup
+git clone https://github.com/Partiverse/backguard.git ~/partiverse-backup
 cd ~/partiverse-backup
-./init.sh        # Linux / macOS
-# 或
-.\init.ps1       # Windows
+./init.sh                # Linux / macOS
+# Windows 用 .\backup.ps1 -Task Init（init.ps1 尚未提供）
 ```
 
 ---
@@ -46,35 +47,35 @@ cd ~/partiverse-backup
 
 ### 档案命名
 
-设备系统标识自动生成，格式：
+设备标识自动生成：`<设备名>-<系统>`，**统一小写、不含 OS 版本**（大小写是跨云厂商的
+安全交集——不少 WebDAV 大小写不敏感；系统升级不分裂备份历史，版本信息进 system-meta）：
 
 ```
-<hostname>-<OS><version>
-
-# 示例
-partiverse-Kubuntu26.04    # 本机
-MacBook-Pro-macOS15.0      # macOS
-DESKTOP-WIN11-Windows11    # Windows
+particloud-macos     # macOS（hostname 短名，去 .local）
+particloud-windows   # Windows
+partiverse-kubuntu   # Linux（/etc/os-release 的 ID）
 ```
+
+品牌原名（macOS / Windows / 发行版全名）记录在 `timeline/<设备>/profile.json`；
+路径中的点统一转连字符。
 
 归档格式：`<device-id>-<class>-<YYYYMMDD-HHMMSS>`
 
-### WebDAV 目录结构
+### 云端目录结构
 
 ```
-<WebDAV root>/
-  partiverse-Kubuntu26.04/
+<remote:子路径>/              ← BACKUP_TARGETS 可配多个 remote，结构一致
+  particloud-macos/
     config/     ← borg/restic repo
     files/      ← borg/restic repo
     system/     ← borg/restic repo
-  MacBook-Pro-macOS15.0/
-    config/
-    files/
-    system/
-  DESKTOP-WIN11-Windows11/
-    config/
-    files/
-    system/
+  partiverse-kubuntu/
+    config/  files/  system/
+  timeline/                   ← 语义层，只增不减
+    particloud-macos/
+      profile.json            ← 设备品牌原名等元数据
+      2026/09/30/0234-morning/
+        MANIFEST.txt · STORY.md · restore.md · COVERAGE.txt · exclusions.json · manifest.json.enc
 ```
 
 ---
@@ -107,8 +108,7 @@ DESKTOP-WIN11-Windows11    # Windows
 ```
 backup/
 ├── README.md           本文件
-├── init.sh             交互式初始化（Linux / macOS）
-├── init.ps1            交互式初始化（Windows）
+├── init.sh             交互式初始化（Linux / macOS；Windows 走 backup.ps1 -Task Init）
 ├── backup.sh           主备份脚本（跨平台）
 ├── backup.ps1          Windows 备份脚本
 ├── restore.sh          恢复脚本（Linux / macOS）
@@ -129,7 +129,8 @@ backup/
 
 ## 语义层配置（可选，全部非致命：缺依赖只跳过不影响备份）
 
-备份成功后自动在 `<BACKUP_BASE>/timeline/<设备>/timeline/年/月/日/时分-标签/` 生成：
+备份成功后自动生成语义快照（本地暂存 `<BACKUP_BASE>/timeline/<设备>/年/月/日/时分-标签/`，
+随内容池上传到每个 `BACKUP_TARGETS` 的 `timeline/<设备>/` 下）：
 
 | 文件 | 说明 |
 |---|---|
@@ -147,6 +148,7 @@ backup/
 | `SEM_LABEL` | 覆盖自动时段标签（morning/noon/afternoon/evening/night） |
 | `SEM_KEYS_DIR` | 密钥目录（默认 `~/.config/partiverse-backup/age` / `%APPDATA%\PartiverseBackup\age`） |
 | `SEM_PREFLIGHT` | 设 `0` 关闭备份前预检（默认开；预检 error 中止备份，warning 继续并留日志） |
+| `SEM_TIMELINE_KEEP` | 本地 timeline 暂存保留最近 N 份快照（默认 14，`0`=不清理；云端全量历史不受影响） |
 
 备份前预检（`bg preflight`）会检查：include 路径有效性、iCloud/OneDrive 占位文件
 （未真正落盘的"半真文件"）、.git 被静默排除、磁盘空间、引擎版本下限、
@@ -188,9 +190,7 @@ expect semantic/init-keys.exp "$(command -v age)" ~/.config/partiverse-backup/ag
 # 恢复指定档案到指定路径
 ./restore.sh --archive config --target ~/.restore/
 
-# Windows
-.\restore.ps1 -List
-.\restore.ps1 -Archive config -Target C:\Restore
+# Windows：暂用 restic 命令行（rescue 独立脚本待补，见 docs/HANDOVER §6）
 ```
 
 ---
