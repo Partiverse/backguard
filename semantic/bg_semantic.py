@@ -398,9 +398,9 @@ def cluster_changes(diff: DiffResult, cls: str = "files",
             name = ""
         else:
             # 逐级回退细化：单一根载体且路径足够深时先试三级，否则两级。
-            # 三级仅当 known_dirs 提供目录证据（纯文件清单的第三段可能是文件名，
-            # 2026-09-29 真实 E2E 隐私测试抓到过单文件路径泄入叙事）；
-            # 两级在无证据时保守允许，有证据时必须命中。
+            # 细化名一律要求 known_dirs 目录证据——纯文件清单里二级/三级的最后一段
+            # 都可能是文件名（Pictures/IMG_0001.jpg 这类一级目录下只有单个文件的路径），
+            # 无证据时宁可只写一级目录名，也不把文件名冒充目录名写进明文层。
             firsts = {e.path.split("/", 1)[0] for e in all_members if "/" in e.path}
             candidates = [2]
             if len(firsts) == 1 and all(e.path.count("/") >= 2 for e in added):
@@ -411,11 +411,7 @@ def cluster_changes(diff: DiffResult, cls: str = "files",
                 if not (tops and all(t == tops[0] for t in tops)):
                     continue
                 cand = "/".join(tops[0])
-                if known_dirs is not None:
-                    if cand in known_dirs:
-                        name = cand
-                        break
-                elif d == 2:
+                if known_dirs is not None and cand in known_dirs:
                     name = cand
                     break
         clusters.append(Cluster(
@@ -1189,6 +1185,11 @@ def make_demo_run() -> dict:
     ]
 
     history = [(cur_t - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(46)]
+    # demo 与真实 run 同构：明文层的两级细化名需要目录证据（cluster_changes 无证据
+    # 只写一级）。证据由条目父目录段现推，不引入任何新的名字。
+    known_dirs = {str(Path(e.path).parent)
+                  for lst in (cur, prev, config_cur, config_prev, system_cur)
+                  for e in lst if "/" in e.path}
     return {
         "format": RUN_FORMAT,
         "engine": "borg",
@@ -1200,6 +1201,7 @@ def make_demo_run() -> dict:
         "parent_id": "snap_71b0ee",
         "parent_time": prev_t.isoformat(),
         "history": history,
+        "known_dirs": sorted(known_dirs),
         "classes": {
             "files": {"entries": [e.__dict__ for e in cur],
                       "prev_entries": [e.__dict__ for e in prev]},

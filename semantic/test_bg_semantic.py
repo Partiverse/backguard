@@ -104,6 +104,12 @@ class TestDiffAndClassify(unittest.TestCase):
         # .kdbx 在 documents 扩展名表（key）之前判定为凭据
         self.assertEqual(bg.classify("Documents/vault.kdbx"), "credentials")
 
+    def test_key_ext_stays_credentials_even_in_documents_dir(self):
+        # .key 同时命中 credentials 与 documents 扩展名表：规则顺序让凭据赢，
+        # 且方向刻意保守——误判成凭据只是多隐去名称，反向会把私钥文件名写进明文层
+        self.assertEqual(bg.classify("Documents/提案.key"), "credentials")
+        self.assertEqual(bg.classify("ssl/server.key"), "credentials")
+
 
 class TestClusters(unittest.TestCase):
     def _diff(self) -> bg.DiffResult:
@@ -140,6 +146,21 @@ class TestClusters(unittest.TestCase):
         story = bg.build_story({"time": "2026-09-28T21:00:00+08:00", "device": "T"}, {}, cs, streak=2)
         self.assertNotIn(".ssh", story)
         self.assertIn("名称已隐去", story)
+
+    def test_cluster_refuses_second_level_without_dir_evidence(self):
+        # 明文层隐私红线：无目录证据时二级回退会把文件名冒充目录名
+        #（Pictures/IMG_0001.jpg 只有一级目录证据）——必须退回一级
+        d = bg.DiffResult()
+        d.added = [E("Pictures/IMG_0001.jpg", 3_000_000)]
+        self.assertEqual(bg.cluster_changes(d)[0].name, "Pictures")
+        story = bg.build_story({"time": "2026-09-28T21:00:00+08:00", "device": "T"},
+                               {}, bg.cluster_changes(d), streak=1)
+        self.assertNotIn("IMG_0001", story)
+        # 有目录证据时两级细化照常生效（不得把修复做成「永远只写一级」）
+        deep = bg.DiffResult()
+        deep.added = [E("Pictures/2026夏/IMG_0001.jpg", 3_000_000)]
+        self.assertEqual(bg.cluster_changes(deep, known_dirs={"Pictures/2026夏"})[0].name,
+                         "Pictures/2026夏")
 
 
 class TestPrivacy(unittest.TestCase):
