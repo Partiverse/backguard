@@ -88,4 +88,30 @@ if [ -n "$(find "$T/conf/partiverse-backup/secrets.env" ! -perm 600)" ]; then
     fail "secrets.env 不是 600"
 fi
 
-echo "E2E-OK: init.sh 全流程（模板数组化 / 首备 / 语义层 / 云端同步 / 调度模板无明文口令）通过"
+# 断言 6：凭据/日志目录与 launchd 日志权限收紧。~/.config 与 ~/.local/share 常被
+# mkdir -p 建成 755，日志里是含完整路径的备份全量输出——同机用户列名即可见
+for d in "$T/conf/partiverse-backup" "$T/home/.local/share/partiverse-backup"; do
+    [ -d "$d" ] || fail "$d 未创建"
+    # cut -c1-10：macOS 的 ls 会在权限串尾追加 '@'（扩展属性），完整比较会误判
+    dm=$(ls -ld "$d" | awk '{print $1}' | cut -c1-10)
+    [ "$dm" = "drwx------" ] || fail "目录没收到 700: $d → $dm"
+done
+case "$(uname -s)" in
+    Darwin)
+        # 预建 600：不 touch 时 launchd 按默认 umask 建出 0644，之后只追加不改权限
+        for f in launchd.out.log launchd.err.log; do
+            lf="$T/home/.local/share/partiverse-backup/$f"
+            [ -f "$lf" ] || fail "$f 未预建：launchd 自建会落成 0644"
+            fm=$(ls -ld "$lf" | awk '{print $1}' | cut -c1-10)
+            [ "$fm" = "-rw-------" ] || fail "$f 不是 600: $fm"
+        done
+        # RunAtLoad 让每次 launchctl load（装机、改配置后重载）都立刻多跑一发全量上传，
+        # 观察期「一天几个快照」的口径会被搅浑（10-01 重载就多出一个 0241-night）。
+        # 匹配 <key> 而不是裸词：模板注释里就在讨论这个键名
+        if grep -q "<key>RunAtLoad</key>" "$PL"; then
+            fail "plist 仍写 RunAtLoad：重载即重跑备份"
+        fi
+        ;;
+esac
+
+echo "E2E-OK: init.sh 全流程（模板数组化 / 首备 / 语义层 / 云端同步 / 调度模板无明文口令 / 凭据与日志权限）通过"

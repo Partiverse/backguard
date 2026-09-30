@@ -30,6 +30,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/partiverse-backup"
 LOG_DIR="$HOME/.local/share/partiverse-backup"
 mkdir -p "$CONF_DIR" "$LOG_DIR"
+# 配置目录收 700：secrets.env（600）与 age/ 私钥就在这底下，父目录 ~/.config 常被
+# mkdir -p 建成 755，同机用户能直接列出文件名
+chmod 700 "$CONF_DIR" 2>/dev/null || true
+# 日志目录收 700：这里落 backup.log / rclone.log / launchd.*.log / preflight-latest.json，
+# 内容含 borg/rclone 输出的完整路径，默认 755 目录 + 0644 文件让同机其它用户可读
+chmod 700 "$LOG_DIR" 2>/dev/null || true
 
 # ---------- 加载配置 ----------
 if [[ -f "$CONF_DIR/config.sh" ]]; then
@@ -236,6 +242,10 @@ collect_meta() {
 main() {
     LOG="${LOG:-$LOG_DIR/backup.log}"
     RCLONE_LOG="${RCLONE_LOG:-$LOG_DIR/rclone.log}"
+    # 老部署留下的 0644 日志、以及 launchd 自建（我们不 touch、它按默认 umask 建）的
+    # launchd.*.log，都在此幂等收紧到 600；chmod 对不存在的参数失败不影响其余文件
+    chmod 600 "$LOG" "$RCLONE_LOG" 2>/dev/null || true
+    chmod 600 "$LOG_DIR"/launchd.*.log "${LOG_DIR}/preflight-latest.json" 2>/dev/null || true
 
     load_secrets
 

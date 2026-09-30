@@ -76,6 +76,15 @@
   （research/05 §1.5，本地）。
 - **age 密封**：age 只读 /dev/tty 不吃管道——密钥初始化必须 expect 驱动
   （`init-keys.exp`）；passphrase stanza 独占，双恢复路径用双 X25519 recipient 实现。
+- **权限面**：`$CONF_DIR`（secrets.env + age 私钥所在）与 `$LOG_DIR`（backup.log /
+  rclone.log / launchd.*.log / preflight-latest.json）必须 700，日志文件 600——父目录
+  `~/.config`、`~/.local/share` 被 `mkdir -p` 建成 755，而备份 stdout 里是引擎输出的
+  **完整路径**（真机 10-01 实测全部 0644）。`backup.sh` 每次运行幂等收紧，所以老部署
+  只要 nightly 跑到新提交就自动修好，不必改 plist。
+- **调度模板不写 `RunAtLoad`**：`launchctl load`（装机、改配置后重载）会因它立刻再跑
+  一发全量上传，而向导本身已经跑过首次备份；错过的排程 launchd 唤醒时本会补跑，
+  不需要 RunAtLoad。真机旧 plist 仍带这个键，留给下次计划内重载对齐——观察期中间
+  不折腾调度。
 
 ## 3. 改动与验证流程
 
@@ -101,6 +110,11 @@
    **夹具必须与生产同形**：三类仓库齐（只建 files 就测不到跨类别错配）、抽样/计数类断言
    把全集拉满（`SEM_DRILL_COUNT=99`）而非依赖当天种子。断言「跑通了」之前先问：
    生产上真长这样吗？
+   **新断言必须变异验证**（把被测实现摘掉，确认断言真报错）；若断言被**另一处冗余实现
+   救场**，看着就像「没咬住」——本次删掉 `init.sh` 的 chmod 后权限仍是 700，因为
+   `backup.sh` 也 chmod（两条路都要给老部署和新部署各自兜底，是有意的冗余），变异要
+   把同源实现一起摘。变异树还要连测试文件一起从工作树拷进去（`git archive HEAD` 出来
+   的是旧测试，会假打 E2E-OK）。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、
@@ -109,6 +123,10 @@
 4. main 分支保护：禁 update/delete/force-push、要求线性历史；admin 凭据直推放行。
    push 后盯 CI（6 runs：semantic 三平台矩阵 + linux/macos/windows 真实备份与断言；
    CI **不推云端**（`SKIP_WEBDAV=1`），windows job 仍要下载 restic/rclone 依赖）。
+   工作流带 `concurrency`（同分支只留最新一轮，`cancel-in-progress`）：免费 macOS
+   runner 池很小，连推 8 个提交＝16 个 macOS job 互相顶死，实测最早的 run 排队 36 分钟
+   一个 job 都没开跑，而**唯一需要绿灯的 HEAD 排在最后**。所以别拿「CI 没有这个 run」
+   当异常——被取消的是被 HEAD 覆盖的旧提交，部署点只认 HEAD 那一轮的结论。
 
 ## 4. 本机与真实设备事实（开发机 = 用户 Mac，设备 particloud-macos）
 

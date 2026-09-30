@@ -54,6 +54,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/partiverse-backup"
 LOG_DIR="$HOME/.local/share/partiverse-backup"
 mkdir -p "$CONF_DIR" "$LOG_DIR"
+chmod 700 "$CONF_DIR" "$LOG_DIR" 2>/dev/null || true   # 日志含备份输出的完整路径，默认 755 同机可读
 
 echo -e "${BLUE}[3/6]${NC} 配置目录: $CONF_DIR"
 echo -e "${BLUE}[4/6]${NC} 日志目录: $LOG_DIR"
@@ -328,6 +329,14 @@ elif [[ "$PLATFORM" == macos ]]; then
     # plist 里的 EnvironmentVariables 后由 launchd 拉起的完整备份仍退出 0。
     # StandardOut/ErrorPath 也不能省：不写时 launchd 把 stdout 丢进 os_log，
     # 02:34 那次跑挂了现场基本读不到，只剩 `launchctl print` 的一个退出码。
+    # 先按 600 建好这两个日志：launchd 自建时按默认 umask 落成 0644，而 stdout 里是
+    # 含完整路径的备份全量输出。文件已存在时 launchd 只追加、不改权限。
+    touch "$LOG_DIR/launchd.out.log" "$LOG_DIR/launchd.err.log"
+    chmod 600 "$LOG_DIR/launchd.out.log" "$LOG_DIR/launchd.err.log"
+    # 模板刻意不写 RunAtLoad：向导自己已经跑过首次备份，launchctl load（装机、改配置后
+    # 重载）再触发一次等于多一发全量上传；错过的排程 launchd 唤醒时本会补跑，这个键没有
+    # 补漏价值（10-01 重载就多出一个 0241-night 快照）。真机旧 plist 仍带着它，留给下次
+    # 计划内重载对齐——观察期中间不折腾调度。
     cat > "$PLIST_DIR/com.partiverse.backup.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -343,7 +352,6 @@ elif [[ "$PLATFORM" == macos ]]; then
     </dict>
     <key>StandardOutPath</key><string>$LOG_DIR/launchd.out.log</string>
     <key>StandardErrorPath</key><string>$LOG_DIR/launchd.err.log</string>
-    <key>RunAtLoad</key><true/>
 </dict>
 </plist>
 PLIST

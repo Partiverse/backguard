@@ -76,6 +76,9 @@ SKIP_WEBDAV=1 ./backup.sh        # 先本地验证，不触云（备份前会自
 #  [ ] 逃生面自证：./rescue.sh --base $BACKUP_BASE --class files --find <一个你知道的文件名>
 #      能列出、--get 到临时目录能取回（rescue.sh 不依赖本仓库其它文件，见 --guide）
 #  [ ] recovery-identity.enc 已按 ③ 另存第二处（云端没有它）
+#  [ ] 权限面：ls -ld ~/.config/partiverse-backup ~/.local/share/partiverse-backup → 700，
+#      底下 backup.log / launchd.out.log → 600（日志里是引擎输出的完整路径，同机用户不该
+#      可读；backup.sh 每次运行都幂等收紧，老设备拿到新代码即自动修好，无需改 plist）
 ./backup.sh                      # 再跑完整链路（含 WebDAV）
 launchctl list | grep partiverse # 调度在位（init.sh 已注册，每日 02:34）
 # launchd 那一次的现场在 ~/.local/share/partiverse-backup/launchd.{out,err}.log
