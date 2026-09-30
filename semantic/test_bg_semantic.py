@@ -162,6 +162,21 @@ class TestClusters(unittest.TestCase):
         self.assertEqual(bg.cluster_changes(deep, known_dirs={"Pictures/2026夏"})[0].name,
                          "Pictures/2026夏")
 
+    def test_demo_known_dirs_use_archive_style_separators(self):
+        # run JSON 的 known_dirs 与 cluster 展示名一律用 "/" 拼（归档内路径口径）。
+        # 取父目录若走 Path，Windows 上会产出 Documents\\2026-09 报销 这类 OS 原生
+        # 分隔符——本机跑不出来，故这里用 PureWindowsPath 顶掉 Path 复现 Windows。
+        import pathlib
+        orig = bg.Path
+        try:
+            bg.Path = pathlib.PureWindowsPath
+            kd = bg.make_demo_run()["known_dirs"]
+        finally:
+            bg.Path = orig
+        self.assertTrue(kd, "demo run 应带目录证据")
+        bad = [d for d in kd if "\\" in d]
+        self.assertFalse(bad, f"known_dirs 混入 OS 原生分隔符: {bad}")
+
 
 class TestPrivacy(unittest.TestCase):
     def test_story_never_contains_full_filenames(self):

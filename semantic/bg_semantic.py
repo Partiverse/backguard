@@ -1186,8 +1186,9 @@ def make_demo_run() -> dict:
 
     history = [(cur_t - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(46)]
     # demo 与真实 run 同构：明文层的两级细化名需要目录证据（cluster_changes 无证据
-    # 只写一级）。证据由条目父目录段现推，不引入任何新的名字。
-    known_dirs = {str(Path(e.path).parent)
+    # 只写一级）。证据由条目父目录段现推，不引入任何新的名字。归档内路径是
+    # "/" 分隔的 POSIX 口径，取父目录不能用 Path（Windows 上产出 "\"）。
+    known_dirs = {e.path.rsplit("/", 1)[0]
                   for lst in (cur, prev, config_cur, config_prev, system_cur)
                   for e in lst if "/" in e.path}
     return {
