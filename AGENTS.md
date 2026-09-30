@@ -147,7 +147,11 @@
 3. Windows 密钥初始化交互版 `init-keys.ps1`（对齐 `init-keys.exp`）
 4. ~~launchd plist 明文口令~~ 已删（2026-10-01 01:35）：**不需要 wrapper**——`backup.sh`
    自己 `set -a; source secrets.env`，plist 里那份 `BORG_PASSPHRASE` 与 secrets.env 同值、
-   纯冗余。删除后重载 launchd 并手动触发了完整一次备份（退出 0、产物齐全）作为验证
+   删除后重载 launchd 并手动触发了完整一次备份（退出 0、产物齐全）作为验证。
+   模板同修（0dc7211）：`init.sh` 的 plist 不再写口令，并补 `StandardOutPath`/
+   `StandardErrorPath` → `$LOG_DIR/launchd.{out,err}.log`——不写时 launchd 把 stdout
+   丢进 os_log，夜间跑挂只剩一个退出码。`INIT_SKIP_SCHEDULER` → `INIT_SCHED_NO_REGISTER`
+   （旧语义连渲染一起跳，调度产物从没被测过；新语义只跳注册）
 5. T1.3 聚类调优（等 ≥1 周真实数据；已知素材：混合簇退级、载体根噪音。STORY 逐簇
    「新增 -2」不是聚类问题，是计数口径混用，10-01 已修）
 6. T1.6 dogfood 扩 2 台设备（Windows/Linux 各一，按 `DEPLOY.md` 流程）
