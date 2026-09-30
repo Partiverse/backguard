@@ -87,6 +87,19 @@ jobs:
           CFG
           echo "BORG_PASSPHRASE='ci-$(openssl rand -hex 12)'" > ~/.config/partiverse-backup/secrets.env
 
+      - name: Prepare age identity
+        run: |
+          set -euo pipefail
+          # 一次性主身份密钥（仅存于 runner）。没有 age 密钥时 seal_manifest 跳过密封、
+          # run_drill 直接 rc=20「未执行」——10-01 那个跨类别取回错配就藏在这层遮罩下：
+          # CI 从未真跑过演练，修好了也没有断言。配好密钥让演练路径在 CI 里常驻。
+          dir="$HOME/.config/partiverse-backup/age"
+          mkdir -p "$dir"
+          age-keygen -o "$dir/identity.txt" 2>/dev/null
+          chmod 600 "$dir/identity.txt"
+          sed -n 's/^# public key: \(age1[0-9a-z]*\).*/\1/p' "$dir/identity.txt" > "$dir/recipients.txt"
+          [ -s "$dir/recipients.txt" ] || { echo "::error::recipients.txt 公钥提取失败"; exit 1; }
+
       - name: Run backup
         run: ./backup.sh
         env:
@@ -110,6 +123,23 @@ jobs:
           [ -n "$manifest" ] || { echo "::error::timeline 无 MANIFEST.txt"; exit 1; }
           echo "--- $manifest ---"
           cat "$manifest"
+
+      - name: Assert restore drill ran clean
+        run: |
+          set -euo pipefail
+          # rescue-test.txt 缺失 = run_drill 走了 rc=20（缺 age/主身份/密封清单或无归档），
+          # 也就是「演练被静默跳过」，绝不能算通过
+          rt=$(find "$HOME/ci-repos/timeline" -maxdepth 2 -name rescue-test.txt | head -1)
+          if [ -z "$rt" ]; then
+            echo "::error::无 rescue-test.txt：恢复演练未执行（主身份或密封清单缺失？）"; exit 1
+          fi
+          echo "--- $rt ---"
+          cat "$rt"
+          if grep -qE '^FAIL |^RESULT: FAIL' "$rt"; then
+            echo "::error::恢复演练有失败项"; exit 1
+          fi
+          grep -qE '^RESULT: [1-9][0-9]* PASS / 0 FAIL' "$rt" \
+            || { echo "::error::演练结论行缺失或抽样为 0"; exit 1; }
 
       - name: E2E multi-target (rclone local backend)
         run: |
@@ -197,6 +227,17 @@ jobs:
           CFG
           echo "BORG_PASSPHRASE='ci-$(openssl rand -hex 12)'" > ~/.config/partiverse-backup/secrets.env
 
+      - name: Prepare age identity
+        run: |
+          set -euo pipefail
+          # 同 linux job：没有 age 主身份，run_drill 一律 rc=20 静默跳过演练
+          dir="$HOME/.config/partiverse-backup/age"
+          mkdir -p "$dir"
+          age-keygen -o "$dir/identity.txt" 2>/dev/null
+          chmod 600 "$dir/identity.txt"
+          sed -n 's/^# public key: \(age1[0-9a-z]*\).*/\1/p' "$dir/identity.txt" > "$dir/recipients.txt"
+          [ -s "$dir/recipients.txt" ] || { echo "::error::recipients.txt 公钥提取失败"; exit 1; }
+
       - name: Run backup
         run: ./backup.sh
         env:
@@ -220,6 +261,21 @@ jobs:
           [ -n "$manifest" ] || { echo "::error::timeline 无 MANIFEST.txt"; exit 1; }
           echo "--- $manifest ---"
           cat "$manifest"
+
+      - name: Assert restore drill ran clean
+        run: |
+          set -euo pipefail
+          rt=$(find "$HOME/ci-repos/timeline" -maxdepth 2 -name rescue-test.txt | head -1)
+          if [ -z "$rt" ]; then
+            echo "::error::无 rescue-test.txt：恢复演练未执行（主身份或密封清单缺失？）"; exit 1
+          fi
+          echo "--- $rt ---"
+          cat "$rt"
+          if grep -qE '^FAIL |^RESULT: FAIL' "$rt"; then
+            echo "::error::恢复演练有失败项"; exit 1
+          fi
+          grep -qE '^RESULT: [1-9][0-9]* PASS / 0 FAIL' "$rt" \
+            || { echo "::error::演练结论行缺失或抽样为 0"; exit 1; }
 
       # BSD 平台专属回归：borg extract 的 cwd 相对语义 + 只读云端目标的失败可见性
       - name: E2E restore recovery paths
