@@ -64,9 +64,23 @@ run_backup() {
 }
 
 # ---------- 第 1 轮：ro-mac 必失败 ----------
+# 失败时把现场打全：CI 上只报「无云端标记」无法区分「计数逻辑坏」与
+# 「备份在推云之前就死了（rc≠0 是别的原因）」
+dump_ctx() {
+    echo "--- out.log 尾部 30 行 ---"
+    tail -30 "$T/out.log" 2>/dev/null
+    echo "--- rclone.log ---"
+    find "$T" -maxdepth 4 -name 'rclone.log' 2>/dev/null | head -1 |
+        { read -r rl && tail -15 "$rl"; } || echo "(无 rclone.log)"
+    echo "--- 目标目录状态 ---"
+    ls -ld "$T/dest/good-mac" "$T/dest/ro-mac" 2>/dev/null
+}
 rc=0; run_backup || rc=$?
 [[ $rc -ne 0 ]] || fail "云端有目标失败却退出 0（旧行为：静默 FULLY COMPLETE）"
-grep -q "云端" "$T/out.log" || fail "输出无云端失败标记"
+if ! grep -q "云端" "$T/out.log"; then
+    dump_ctx
+    fail "输出无云端失败标记（rc=${rc}；若上面显示备份更早失败，则是另一条路径的问题）"
+fi
 if grep -q "FULLY COMPLETE" "$T/out.log"; then fail "云端失败仍打 FULLY COMPLETE"; fi
 
 # 备份本体与其他目标不受影响
