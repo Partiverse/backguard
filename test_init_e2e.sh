@@ -10,6 +10,10 @@ trap 'rm -rf "$T"' EXIT   # 失败路径也要清：夹具可能含 age 私钥/�
 
 # 隔离环境：HOME 下造「存在」的用户目录；local remote 名与真实向导可选形态一致
 mkdir -p "$T/home/.config" "$T/home/.ssh" "$T/home/Documents" "$T/home/Desktop"
+# 老部署留下的同机可读日志（0644）：backup.sh 的修复 glob 必须把它一起收到 600
+mkdir -p "$T/home/.local/share/partiverse-backup"
+: > "$T/home/.local/share/partiverse-backup/decoy.log"
+chmod 644 "$T/home/.local/share/partiverse-backup/decoy.log"
 mkdir -p "$T/conf/partiverse-backup" "$T/home/.local/share/partiverse-backup/system-meta"
 mkdir -p "$T/dest"
 printf '[Backguard]\ntype = local\n' > "$T/rclone.conf"
@@ -88,6 +92,7 @@ if [ -n "$(find "$T/conf/partiverse-backup/secrets.env" ! -perm 600)" ]; then
     fail "secrets.env 不是 600"
 fi
 
+T_LOG_DIR="$T/home/.local/share/partiverse-backup"
 # 断言 6：凭据/日志目录与 launchd 日志权限收紧。~/.config 与 ~/.local/share 常被
 # mkdir -p 建成 755，日志里是含完整路径的备份全量输出——同机用户列名即可见
 for d in "$T/conf/partiverse-backup" "$T/home/.local/share/partiverse-backup"; do
@@ -96,18 +101,22 @@ for d in "$T/conf/partiverse-backup" "$T/home/.local/share/partiverse-backup"; d
     dm=$(ls -ld "$d" | awk '{print $1}' | cut -c1-10)
     [ "$dm" = "drwx------" ] || fail "目录没收到 700: $d → $dm"
 done
+# 日志文件一律 600：decoy.log 是「本次运行前就存在的 0644」，靠 backup.sh 的修复 glob；
+# backup.log/rclone.log 是本次新建的，靠 umask 077——两条路少一条这里就红
+for lf in "$T_LOG_DIR"/*.log "$T_LOG_DIR"/preflight-latest.json; do
+    [ -e "$lf" ] || continue
+    fm=$(ls -ld "$lf" | awk '{print $1}' | cut -c1-10)
+    [ "$fm" = "-rw-------" ] || fail "日志/预检产物同机可读: $(basename "$lf") → $fm"
+done
 case "$(uname -s)" in
     Darwin)
         # 预建 600：不 touch 时 launchd 按默认 umask 建出 0644，之后只追加不改权限
         for f in launchd.out.log launchd.err.log; do
-            lf="$T/home/.local/share/partiverse-backup/$f"
-            [ -f "$lf" ] || fail "$f 未预建：launchd 自建会落成 0644"
-            fm=$(ls -ld "$lf" | awk '{print $1}' | cut -c1-10)
-            [ "$fm" = "-rw-------" ] || fail "$f 不是 600: $fm"
+            [ -f "$T_LOG_DIR/$f" ] || fail "$f 未预建：launchd 自建会落成 0644"
         done
         # RunAtLoad 让每次 launchctl load（装机、改配置后重载）都立刻多跑一发全量上传，
         # 观察期「一天几个快照」的口径会被搅浑（10-01 重载就多出一个 0241-night）。
-        # 匹配 <key> 而不是裸词：模板注释里就在讨论这个键名
+        # 匹配 <key> 而不是裸词：说明注释一旦写进 plist，裸词 grep 会自己踩自己
         if grep -q "<key>RunAtLoad</key>" "$PL"; then
             fail "plist 仍写 RunAtLoad：重载即重跑备份"
         fi

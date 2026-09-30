@@ -53,8 +53,9 @@ echo -e "${BLUE}[2/6]${NC} 设备名:   ${BOLD}$DEVICE_NAME${NC}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/partiverse-backup"
 LOG_DIR="$HOME/.local/share/partiverse-backup"
+umask 077   # 向导新建的一切（config.sh / secrets.env / age/ / 仓库 / 日志）默认私有
 mkdir -p "$CONF_DIR" "$LOG_DIR"
-chmod 700 "$CONF_DIR" "$LOG_DIR" 2>/dev/null || true   # 日志含备份输出的完整路径，默认 755 同机可读
+chmod 700 "$CONF_DIR" "$LOG_DIR" 2>/dev/null || true   # 老部署留下的 755 就地收紧
 
 echo -e "${BLUE}[3/6]${NC} 配置目录: $CONF_DIR"
 echo -e "${BLUE}[4/6]${NC} 日志目录: $LOG_DIR"

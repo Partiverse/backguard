@@ -76,11 +76,13 @@
   （research/05 §1.5，本地）。
 - **age 密封**：age 只读 /dev/tty 不吃管道——密钥初始化必须 expect 驱动
   （`init-keys.exp`）；passphrase stanza 独占，双恢复路径用双 X25519 recipient 实现。
-- **权限面**：`$CONF_DIR`（secrets.env + age 私钥所在）与 `$LOG_DIR`（backup.log /
-  rclone.log / launchd.*.log / preflight-latest.json）必须 700，日志文件 600——父目录
-  `~/.config`、`~/.local/share` 被 `mkdir -p` 建成 755，而备份 stdout 里是引擎输出的
-  **完整路径**（真机 10-01 实测全部 0644）。`backup.sh` 每次运行幂等收紧，所以老部署
-  只要 nightly 跑到新提交就自动修好，不必改 plist。
+- **权限面**：备份产物没有任何需要同机可读的东西——入口脚本（`backup.sh` / `init.sh` /
+  `drill.sh`）一律 `umask 077`，`$CONF_DIR`（secrets.env + age 私钥）与 `$LOG_DIR`（backup.log /
+  rclone.log / launchd.*.log / sem.log / drill.log / preflight-latest.json）700、其中文件 600。
+  两层缺一不可：`umask` 只管新建，已存在的 0755 目录与 0644 日志（父目录 `~/.config`、
+  `~/.local/share` 常被 `mkdir -p` 建成 755）靠 `backup.sh` 每次运行的幂等 `chmod` 修复，所以
+  老设备只要 nightly 跑到新提交就自动收紧，不必改 plist。日志里是引擎输出的**完整路径**，
+  这是隐私红线之外没人管过的一面。
 - **调度模板不写 `RunAtLoad`**：`launchctl load`（装机、改配置后重载）会因它立刻再跑
   一发全量上传，而向导本身已经跑过首次备份；错过的排程 launchd 唤醒时本会补跑，
   不需要 RunAtLoad。真机旧 plist 仍带这个键，留给下次计划内重载对齐——观察期中间

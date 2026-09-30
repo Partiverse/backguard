@@ -29,13 +29,16 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/partiverse-backup"
 LOG_DIR="$HOME/.local/share/partiverse-backup"
+# 全程 umask 077：本次运行新建的每个文件（backup.log / sem.log / drill.log /
+# preflight-latest.json / run-*.json / 引擎仓库）建出来就是私有的——备份产物没有任何
+# 需要同机可读的东西，borg 自己也建议仓库目录 700。只靠后面 chmod 列举会漏掉「本次
+# 运行中途才新建」的日志——真机 10-01 实测：列举式 chmod 赶不上 sem.log/drill.log，
+# 它们仍是 0644）。
+umask 077
 mkdir -p "$CONF_DIR" "$LOG_DIR"
-# 配置目录收 700：secrets.env（600）与 age/ 私钥就在这底下，父目录 ~/.config 常被
-# mkdir -p 建成 755，同机用户能直接列出文件名
-chmod 700 "$CONF_DIR" 2>/dev/null || true
-# 日志目录收 700：这里落 backup.log / rclone.log / launchd.*.log / preflight-latest.json，
-# 内容含 borg/rclone 输出的完整路径，默认 755 目录 + 0644 文件让同机其它用户可读
-chmod 700 "$LOG_DIR" 2>/dev/null || true
+# 老部署留下的 0755 目录就地收紧：CONF_DIR 底下是 secrets.env 与 age/ 私钥，LOG_DIR
+# 底下是含引擎输出完整路径的日志；父目录 ~/.config、~/.local/share 常被 mkdir -p 建成 755
+chmod 700 "$CONF_DIR" "$LOG_DIR" 2>/dev/null || true
 
 # ---------- 加载配置 ----------
 if [[ -f "$CONF_DIR/config.sh" ]]; then
@@ -242,10 +245,10 @@ collect_meta() {
 main() {
     LOG="${LOG:-$LOG_DIR/backup.log}"
     RCLONE_LOG="${RCLONE_LOG:-$LOG_DIR/rclone.log}"
-    # 老部署留下的 0644 日志、以及 launchd 自建（我们不 touch、它按默认 umask 建）的
-    # launchd.*.log，都在此幂等收紧到 600；chmod 对不存在的参数失败不影响其余文件
-    chmod 600 "$LOG" "$RCLONE_LOG" 2>/dev/null || true
-    chmod 600 "$LOG_DIR"/launchd.*.log "${LOG_DIR}/preflight-latest.json" 2>/dev/null || true
+    # umask 只影响「新建」，已存在的文件得就地修：老部署留下的 0644 日志、launchd 自建
+    # 的 launchd.*.log（我们不 touch 时它按默认 umask 建）一并收到 600。glob 无匹配时
+    # chmod 只对那一个参数报错，不影响其余文件
+    chmod 600 "$LOG" "${LOG_DIR}"/*.log "${LOG_DIR}/preflight-latest.json" 2>/dev/null || true
 
     load_secrets
 

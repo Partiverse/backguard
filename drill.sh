@@ -25,6 +25,7 @@ source "$CONF_DIR/secrets.env" 2>/dev/null || error "secrets.env 未找到"
 
 # run_drill 里的 borg extract 把 stderr 并进 ${LOG}；set -u 下未定义会直接 unbound
 LOG="${DRILL_LOG:-$HOME/.local/share/partiverse-backup/drill.log}"
+umask 077                     # 演练日志里是引擎输出的完整路径，同机不该可读
 mkdir -p "$(dirname "$LOG")"
 # secrets.env 里是无 export 的一行（init.sh 模板如此），backup.sh 靠自己的 export 补上；
 # 独立入口必须同样 export，否则 run_drill 的 borg extract 拿不到口令
