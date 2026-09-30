@@ -106,13 +106,18 @@
 - 部署配置：`~/.config/partiverse-backup/`（`config.sh` / `secrets.env` / `age/`），
   **不在本仓库内，勿动**；恢复码已由用户抄写纸质留存。
 - 备份仓库：`~/PartiverseBackup/`（config/files/system 三个 borg 仓库，本地事实源）。
-- 调度：launchd 每日 02:34（`~/Library/LaunchAgents/com.partiverse.backup.plist`；
-  内嵌明文 BORG_PASSPHRASE 已 chmod 600，彻底修法 = wrapper 读 secrets.env，见待办）。
+- 调度：launchd 每日 02:34（`~/Library/LaunchAgents/com.partiverse.backup.plist`）。
+  plist 的 `EnvironmentVariables`（内嵌明文 BORG_PASSPHRASE）已于 2026-10-01 删除，
+  口令现在**只**来自 `secrets.env`；改动前的副本在同目录 `*.bak-20261001`。
 - **运行中的代码不是你的工作树**：plist 执行 `~/leisure/Codebase-Driven-by-AI/backguard/v0/backup.sh`，
   它是本仓库的**纯部署 checkout**（不在上面开发）。提交进 main 后必须
   `git -C <部署目录> fetch && merge --ff-only origin/main` 才会被 nightly 用到——
   2026-09-30 就是漏了这步导致部署点落后 14 个提交、观察期数据一度无效（HANDOVER §4.1）。
-- 云端：rclone remote `Backguard:`（123Pan WebDAV），约 8–10GB。
+- 云端：rclone remote `Backguard:`（123Pan WebDAV），约 8–10GB。实测目录形状
+  `Backguard:/<SYSTEM_ID>/{config,files,system,timeline}`，timeline 下即
+  `<dev>/YYYY/MM/DD/HHMM-标签/`（与 `rescue.sh --base <云端目录>` 认的布局一致）。
+  云端**没有** `age/`——`recovery-identity.enc` 从不推送，盲恢复目前要求密钥目录另有副本
+  （已写进 `rescue.sh --guide` §4，是否推送待用户定夺，属凭据红线不擅自改）。
 - `~/leisure/Codebase-Driven-by-AI/backguard/`（即部署树 v0 的上一级）下的 `research/`、
   `PRD.md`、`prototype/`、`pitch/` 是本地工件，**不在任何 git 仓库内**；
   关键结论已内联进 docs/HANDOVER。换机或移动开发树时，这些工件不随本仓库 clone 走。
@@ -127,8 +132,8 @@
    全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认
    逐条 FAIL 行 + 计数，结论行缺失一律判失败）
 3. Windows 密钥初始化交互版 `init-keys.ps1`（对齐 `init-keys.exp`）
-4. launchd plist 明文口令：**不需要 wrapper**——`backup.sh` 自己 `set -a; source secrets.env`，
-   plist 里那份 `BORG_PASSPHRASE` 与 secrets.env 同值、纯冗余；删掉 plist 的
-   `EnvironmentVariables` 即可（先留 plist 副本，重载前先确认 `borg list` 只靠 secrets.env 也通）
+4. ~~launchd plist 明文口令~~ 已删（2026-10-01 01:35）：**不需要 wrapper**——`backup.sh`
+   自己 `set -a; source secrets.env`，plist 里那份 `BORG_PASSPHRASE` 与 secrets.env 同值、
+   纯冗余。删除后重载 launchd 并手动触发了完整一次备份（退出 0、产物齐全）作为验证
 5. T1.3 聚类调优（等 ≥1 周真实数据；已知素材：混合簇退级、载体根噪音、STORY 逐簇「新增 -2」渲染疑点）
 6. T1.6 dogfood 扩 2 台设备（Windows/Linux 各一，按 `DEPLOY.md` 流程）
