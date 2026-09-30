@@ -14,7 +14,8 @@
 ## 1. 不可妥协红线（改动前先读）
 
 1. **明文层隐私红线**：`MANIFEST.txt` / `STORY.md` / `COVERAGE.txt` 等一切明文产物
-   **永不出现完整文件名**（两级目录名之外的细化必须有 known_dirs 目录证据；凭据类
+   **永不出现完整文件名**（一级目录名之外的任何细化都必须命中 known_dirs 目录证据——
+   纯文件清单里二级/三级的最后一段可能就是文件名，无证据退回一级；凭据类
    目录只写数量；根级散文件聚类不显示名称）。unittest 有测试锁定，改渲染逻辑先跑测试。
 2. **凭据纪律**：口令/密钥/恢复码/token 只进 `secrets.env`（600）或 age 密钥目录，
    永不入库、不进日志、不进 issue/截图；文档示例一律占位符。
@@ -41,11 +42,14 @@
   （`[@]` 在 `[[ ]]` 报 SC2199、在 `[ ]` 报 SC2198）；SC2154 的 disable 注释必须贴引用行；
   `set -u` 下数组 resolve 后必须恒定义（否则 `${#arr[@]}` unbound 静默退出）。
 - **文件属性跨平台**：GNU `stat -f` 是「文件系统状态」——它把跟在前面的「格式串」当文件系统名，
-  coreutils 9.11 实测：`stat -f '%m %N' f` 打真实文件的文件系统状态块到 stdout、stderr 报
+  coreutils 9.4 实测（ubuntu:24.04 容器）：`stat -f '%m %N' f` 打真实文件的文件系统状态块到 stdout、stderr 报
   `cannot read file system information`、**rc=1**（pipefail 下会直接带崩整条流水线，
   非致命调用点则把状态块并着 epoch 收成多行垃圾值）；BSD `stat` 又没有 `-c`——语义层取
   mtime/尺寸一律走 `file_mtime`(`date -r`) / `file_size`(`wc -c`)；新增裸 `stat -c/-f`
-  会被 `test_portable_stat.sh`（顶在 PATH 前的 GNU 语义 stat shim）抓住。
+  会被 `test_portable_stat.sh`（顶在 PATH 前的 GNU 语义 stat shim）抓住。修复前
+  `latest_prev_exclusions` 的裸 `stat -f` 流水线在 GNU 上 rc=1、被 pipefail 中断，而
+  `backup.sh` 当时无兜底地调用 `generate_semantic`——Linux 设备第二次起的备份会整条退出 1；
+  CI 每轮新建仓库只跑首备（stage 里没有 exclusions.json，流水线空转），所以一直没暴露。
 - **borg 1.4 取回面**：`extract` **没有** `--destination/-C`（解包路径相对 cwd，要取回就先 `cd`
   进目标目录），归档选择也不支持 `::--last 1` 这类通配——用 `borg list --short` 前缀过滤后取尾；
   `/tmp`→`/private/tmp` 软链会触发 "repository was previously located at" 交互中止。
@@ -67,7 +71,7 @@
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（44 项全绿，
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（46 项全绿，
    3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
    semantic/semantic.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
