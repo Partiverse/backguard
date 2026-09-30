@@ -148,7 +148,9 @@
   它是本仓库的**纯部署 checkout**（不在上面开发）。提交进 main 后必须
   `git -C <部署目录> fetch && merge --ff-only origin/main` 才会被 nightly 用到——
   2026-09-30 就是漏了这步导致部署点落后 14 个提交、观察期数据一度无效（HANDOVER §4.1）。
-- 云端：rclone remote `Backguard:`（123Pan WebDAV），约 8–10GB。实测目录形状
+- 云端：rclone remote `Backguard:`（123Pan WebDAV），体量 2026-09-30 记「约 8–10GB」，
+  10-01 05:25 实测 `rclone size` = 329 objects / **30.79 GiB**（增长来源本会话未查，
+  记体量以云端实测为准；本地 `~/PartiverseBackup` 同时刻 7.6 GB）。实测目录形状
   `Backguard:/<SYSTEM_ID>/{config,files,system,timeline}`，timeline 下即
   `<dev>/YYYY/MM/DD/HHMM-标签/`（与 `rescue.sh --base <云端目录>` 认的布局一致）。
   云端**没有** `age/`——`recovery-identity.enc` 从不推送，盲恢复目前要求密钥目录另有副本
