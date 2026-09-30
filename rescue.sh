@@ -219,8 +219,9 @@ borg_archives() {  # $1=repo $2=前缀（空 = 全量）
 }
 
 # restic 0.19 没有 snapshots --short；表格行首是 8 位以上十六进制 ID
+# stderr 不重定向：RESTIC_PASSWORD 错时「无归档可取」是误导话，引擎自己的报错才看得见
 restic_archives() {  # $1=repo
-    ( "$RESTIC" -r "$1" snapshots 2>/dev/null \
+    ( "$RESTIC" -r "$1" snapshots \
         | grep -E '^[0-9a-f]{8,}[[:space:]]' | awk '{print $1}'; true )
 }
 
@@ -344,7 +345,7 @@ find_mode() {
     case "$TARGET_ENG" in
         borg)   "$BORG" list --short "$TARGET_REPO::$ARCHIVE" > "$lst" \
                     || error "borg 列归档失败: $ARCHIVE";;
-        restic) "$RESTIC" -r "$TARGET_REPO" ls "$ARCHIVE" 2>/dev/null \
+        restic) "$RESTIC" -r "$TARGET_REPO" ls "$ARCHIVE" \
                     | grep -v '^snapshot ' > "$lst" || error "restic 列快照失败: $ARCHIVE";;
     esac
     # grep -F：模式是字面量（文件名里的 [ ] . 不该被当正则读）

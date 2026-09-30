@@ -205,8 +205,13 @@ if command -v restic >/dev/null 2>&1; then
     # 目录里只该剩下那颗诱饵：没有新文件落地，也没有把诱饵当成果
     [[ "$(find "$T/out-restic-decoy" -type f | grep -c . || true)" == "1" ]] \
         || fail "空取回却落了文件: $(find "$T/out-restic-decoy" -type f | head -3)"
+    # 口令错必须看得见引擎原话：restic_archives 曾把 stderr 丢掉，用户只拿到
+    # 「无归档可取（--device 是否给对？」这种把人往错方向带的话
+    out="$(RESTIC_PASSWORD='wrong-pass' rescue --base "$CLOUD" --class files --find 季度报告 2>&1)" \
+        && fail "restic 口令错却退出 0：$out"
+    printf '%s' "$out" | grep -qi "password" \
+        || fail "restic 的口令报错被吞了（stderr 该透传）：$(printf '%s' "$out" | tail -2)"
 else
-    echo "SKIP: 未装 restic，云端布局/restic 分支未测"
     SKIPPED="$SKIPPED restic(restic)"
 fi
 
