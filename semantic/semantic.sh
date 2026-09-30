@@ -171,6 +171,16 @@ latest_prev_exclusions() {
         sort -rn | head -1 | cut -d' ' -f2-
 }
 
+# 上一代归档名：仓库里 <设备>-<类别>- 前缀的归档按名排序，取 $arc 的前一个
+# （首份快照返回空）。设备名来自 hostname，允许 [ ] _ + 等字符——拼进 grep 模式会被
+# 当正则读、选取静默变空，所以前缀与整行比较都走 awk 的字面量匹配。
+prev_archive_for() {
+    local repo="$1" cls="$2" arc="$3"
+    "$BORG" list --short "$repo" 2>/dev/null | sort |
+        awk -v p="$DEVICE_ID-$cls-" -v a="$arc" '
+            index($0, p) == 1 { if (prev != "" && $0 == a) { print prev; exit } prev = $0 }'
+}
+
 # 主入口：$@ = "class:repo:archive"（本次成功备份的 borg 档案）
 generate_semantic() {
     [[ $# -eq 0 ]] && { info "[semantic] 无成功档案，跳过"; return 0; }
@@ -199,8 +209,7 @@ generate_semantic() {
         fi
         class_args+=("--class" "$cls=$cur_json")
         # 上一代归档：同名前缀按名排序取当前的前一个（首份快照无 prev）
-        prev_arc="$("$BORG" list --short "$repo" 2>/dev/null \
-            | grep "^${DEVICE_ID}-${cls}-" | sort | grep -B1 -x "$arc" | head -1 || true)"
+        prev_arc="$(prev_archive_for "$repo" "$cls" "$arc" || true)"
         if [[ -n "$prev_arc" && "$prev_arc" != "$arc" ]]; then
             prev_json="$tmp/$cls-prev.jsonl"
             if "$BORG" list --json-lines "$repo::$prev_arc" \

@@ -100,7 +100,7 @@ if [[ ${#EXISTING_REMOTES[@]} -gt 0 ]]; then
 fi
 
 if [[ -n "$TARGET_REMOTE" ]]; then
-    if ! printf '%s\n' "${EXISTING_REMOTES[@]}" | grep -qx "$TARGET_REMOTE"; then
+    if ! printf '%s\n' "${EXISTING_REMOTES[@]}" | grep -qxF -- "$TARGET_REMOTE"; then
         warn "remote '$TARGET_REMOTE' 不在已有列表中，将按其名引用（请确认已 rclone config 配置）"
     fi
 else

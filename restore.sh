@@ -37,8 +37,10 @@ BACKUP_BASE="${BACKUP_BASE:-/backup-nvme1n1}"
 # 归档名后缀是本地时间戳 YYYYMMDD-HHMMSS，字典序即时间序
 list_class() {  # $1=仓库路径 $2=档案类别
     [[ -d "$1" ]] || return 0
+    # 设备名来自 hostname，允许 [ ] _ + 等字符——拼进 grep 模式会被当正则读，
+    # 归档选取静默变空。awk index 做字面量前缀匹配。
     BORG_PASSPHRASE="$BORG_PASSPHRASE" "$BORG" list --short "$1" 2>/dev/null \
-        | grep "^${DEVICE_ID}-${2}-" | sort
+        | awk -v p="$DEVICE_ID-$2-" 'index($0, p) == 1' | sort
 }
 
 case "$MODE" in

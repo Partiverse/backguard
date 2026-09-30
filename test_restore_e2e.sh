@@ -9,7 +9,10 @@ T="$(mktemp -d /tmp/bg-restore-e2e.XXXXXX)"
 fail() { echo "E2E-FAIL: $1"; exit 1; }
 command -v borg >/dev/null 2>&1 || { echo "E2E-SKIP: 需要 borgbackup"; exit 0; }
 
-DEV=particloud-macos
+# 设备名带正则元字符：DEVICE_ID = lower(hostname -s)，init.sh 不做字符过滤，
+# Linux 上 hostname 允许 [ ] _ + 等——这类名字一旦进 grep 模式就被当正则读，
+# 归档选取（restore 列表 / 语义层 prev 归档）静默变空。
+DEV='web[01]-macos'
 CONF="$T/conf/partiverse-backup"
 BASE="$T/repos"
 REPO="$BASE/borg-config"
@@ -41,9 +44,9 @@ run_restore() { HOME="$T/home" XDG_CONFIG_HOME="$T/conf" bash "$V0_DIR/restore.s
 out="$(run_restore --list 2>&1)" || fail "--list 退出非零：$out"
 printf '%s' "$out" | grep -q -e "-20260930-023400" || fail "--list 未列出归档：$out"
 
-# 断言 2：--archive config --list 两个归档都在
+# 断言 2：--archive config --list 两个归档都在（设备名含 [01]，只能按字面量匹配）
 out="$(run_restore --archive config --list 2>&1)" || fail "--archive --list 失败：$out"
-n="$(printf '%s\n' "$out" | grep -c "^$DEV-config-")"
+n="$(printf '%s\n' "$out" | grep -cF "$DEV-config-")"
 [ "$n" = 2 ] || fail "--archive --list 应列 2 个归档，实际 $n"
 
 # 断言 3：--latest 取回的是最新快照内容
@@ -58,5 +61,18 @@ run_restore --archive config --id "$DEV-config-20260929-023400" --target "$T/out
 [ "$(cat "$T/out-id/src/Documents/note.txt" 2>/dev/null)" = v1 ] || fail "--id 未取到指定快照"
 [ ! -e "$T/out-id/src/Documents/added.txt" ] || fail "--id 快照不应含 added.txt"
 
-echo "E2E-OK: restore.sh 四条路径（--list / --archive --list / --latest / --id）均真实取回"
+# 断言 5：语义层的 prev 归档选取走同一份 fixture——元字符设备名下仍要取到
+# 「名排序后的前一个」，且最老归档没有 prev
+log(){ :; }; info(){ :; }; warn(){ :; }; error(){ :; }; success(){ :; }
+BORG="$(command -v borg)"
+DEVICE_ID="$DEV"
+source "$V0_DIR/semantic/semantic.sh"
+declare -F prev_archive_for >/dev/null || fail "prev_archive_for 未定义（prev 选取仍是内联 grep 正则）"
+newest="$DEV-config-20260930-023400"
+oldest="$DEV-config-20260929-023400"
+[ "$(prev_archive_for "$REPO" config "$newest")" = "$oldest" ] || \
+    fail "prev 归档选取失败（设备名被当正则读）: [$(prev_archive_for "$REPO" config "$newest")]"
+[ -z "$(prev_archive_for "$REPO" config "$oldest")" ] || fail "最老归档不应有 prev"
+
+echo "E2E-OK: restore.sh 四条路径（--list / --archive --list / --latest / --id）+ 语义层 prev 归档选取均真实可用"
 rm -rf "$T"
