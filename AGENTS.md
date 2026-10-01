@@ -148,6 +148,11 @@
    的跨类别取回错配正是藏在这层遮罩下。**「CI 绿」≠「跑过」，先确认守卫那条 step 真的执行了。**
    新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；`test_portable_stat.sh` 的断言 4
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
+   **改目录形状时 `.github/workflows/ci.yml` 里那些硬编码路径也是被测面**——本机九条 E2E
+   全绿也看不见它：10-01 时间轴去设备层那一改，`semantic (linux/macos/windows)` 三条一起红在
+   `base=demo_output/<dev>/YYYY/…` 这行。改完先 `grep -n 'timeline\|demo_output' .github/workflows/ci.yml`
+   把所有形状相关断言找齐，再逐字节复刻那条 step 的命令跑一次（**日期路径在转录里会被显示成连字符**，
+   `test -f` 手敲必错——用 python 数 `chr(47)` 或直接 `find` 定位）。
    shell 夹具（`test_*.sh` 的 `mktemp -d`）清理一律 `trap 'rm -rf "$T"' EXIT`：
    末行 `rm -rf` 在 `fail()` 的 exit 1 下不执行，含 age 私钥/明文账本的夹具就留在 /tmp。
    **夹具必须与生产同形**：三类仓库齐（只建 files 就测不到跨类别错配）、抽样/计数类断言

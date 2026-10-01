@@ -44,7 +44,10 @@ jobs:
         shell: bash
         run: |
           python semantic/bg_semantic.py demo --out demo_output
-          base=demo_output/macbook-pro-macos15/2026/09/28/2100-evening
+          # 时间轴根下**没有**设备名一层（2026-10-01 起）：demo 的 out_root 直接就是 YYYY/MM/DD。
+          # 这条正断言同时是反向守卫——若设备层回来，路径变成 demo_output/<dev>/YYYY/…，
+          # 这里的 test -f 当场失败（10-01 就是这步没跟着改，三平台 semantic 一起红）
+          base=demo_output/2026/09/28/2100-evening
           test -f "$base/MANIFEST.txt" || { echo "::error::MANIFEST.txt 缺失"; exit 1; }
           test -f "$base/STORY.md"    || { echo "::error::STORY.md 缺失"; exit 1; }
           test -f "$base/restore.md"  || { echo "::error::restore.md 缺失"; exit 1; }
@@ -146,10 +149,15 @@ jobs:
         run: |
           set -euo pipefail
           # rescue-test.txt 缺失 = run_drill 走了 rc=20（缺 age/主身份/密封清单或无归档），
-          # 也就是「演练被静默跳过」，绝不能算通过
-          rt=$(find "$HOME/ci-repos/timeline" -maxdepth 2 -name rescue-test.txt | head -1)
+          # 也就是「演练被静默跳过」，绝不能算通过。
+          # maxdepth 1 而不是 2：新形状下它在时间轴根级，写成 2 会把「设备层又回来了」
+          # 一并放过（旧的 <timeline>/<dev>/rescue-test.txt 同样命中），那条回归就没人在场
+          rt=$(find "$HOME/ci-repos/timeline" -maxdepth 1 -name rescue-test.txt | head -1)
           if [ -z "$rt" ]; then
-            echo "::error::无 rescue-test.txt：恢复演练未执行（主身份或密封清单缺失？）"; exit 1
+            # 把根级实际形状打出来：分不清「演练没跑」还是「设备层又长回来了」
+            find "$HOME/ci-repos/timeline" -maxdepth 1 2>&1 | head -10 || true
+            echo "::error::根级无 rescue-test.txt：演练未执行（缺主身份/密封清单），或时间轴又多了一层设备目录"
+            exit 1
           fi
           echo "--- $rt ---"
           cat "$rt"
@@ -302,9 +310,12 @@ jobs:
       - name: Assert restore drill ran clean
         run: |
           set -euo pipefail
-          rt=$(find "$HOME/ci-repos/timeline" -maxdepth 2 -name rescue-test.txt | head -1)
+          rt=$(find "$HOME/ci-repos/timeline" -maxdepth 1 -name rescue-test.txt | head -1)
           if [ -z "$rt" ]; then
-            echo "::error::无 rescue-test.txt：恢复演练未执行（主身份或密封清单缺失？）"; exit 1
+            # 把根级实际形状打出来：分不清「演练没跑」还是「设备层又长回来了」
+            find "$HOME/ci-repos/timeline" -maxdepth 1 2>&1 | head -10 || true
+            echo "::error::根级无 rescue-test.txt：演练未执行（缺主身份/密封清单），或时间轴又多了一层设备目录"
+            exit 1
           fi
           echo "--- $rt ---"
           cat "$rt"
