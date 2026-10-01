@@ -54,7 +54,8 @@ find "$T/dest/backup-mac/E2E-Mac/timeline" -name manifest.json.enc | grep -q . \
 # 断言：rescue-test.txt（恢复演练结论）不得上云——它逐条写着抽样文件的完整路径，
 # 是明文层里唯一带文件名的产物（AGENTS §1.1）。做法：本地造一份带完整路径的样本，
 # 再跑一次真实推送，看云端时间轴里它是否被 sync_target 的 --exclude 挡在外面
-LOCAL_RT="$T/repos/timeline/E2E-Mac/rescue-test.txt"
+# 生产同形：run_drill 把结果写在时间轴根（快照目录上 4 层），不在设备目录里
+LOCAL_RT="$T/repos/timeline/rescue-test.txt"
 mkdir -p "$(dirname "$LOCAL_RT")"
 printf 'PASS [files] Users/me/Documents/\xe7\xa7\x98\xe5\xaf\x86.doc (1 B)\nRESULT: 1 PASS / 0 FAIL\n' \
     > "$LOCAL_RT"

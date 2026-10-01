@@ -694,7 +694,7 @@ rm recovery-identity.txt   # 用完即删
 > 注意：age 身份文件（`identity.txt` / `recovery-identity.enc`）与 `secrets.env`
 > 一样**不推云端**，只存在本机密钥目录。真正盲恢复前要把密钥目录另存一份副本。
 > 恢复链路的周期性验证由 `drill.sh`（夜间 30 天节流 / 人工 `--force`）承担，
-> 结果落在设备目录的 `rescue-test.txt`。
+> 结果落在时间轴根的 `rescue-test.txt`。
 """
 
 
