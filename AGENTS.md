@@ -85,6 +85,13 @@
   `system-meta/` 是 mounts/crontab 转储、`$BACKUP_BASE` 与 `$BACKUP_BASE/timeline` 是时间轴根，
   10-01 真机实测这三处当时全是 0644/0755，只靠 `LOG_DIR` 已 700 才没被同机遍历读到——目录闸门
   会回退（重装、手工 `chmod -R`、新设备首备前），所以文件层必须自己站住。
+  **但点名式清单注定还要漏，别再去补 glob**：补齐那次之后同一天 09:36 的 nightly 把
+  `$CONF_DIR` 收紧成 700，`$CONF_DIR/age` **子目录本身**仍是 0755、`recipients.txt` 仍 0644，
+  因为清单里只写了 `*.log`（凭据目录的年龄比日志更短，漏一项就是私钥目录可遍历）。所以
+  `backup.sh` 每次运行对 `$CONF_DIR` / `$LOG_DIR` / `$BACKUP_BASE/timeline` 三棵树 `find`
+  **整棵归一化**（目录 700、文件 600），`test_init_e2e.sh` 断言 6 是逐节点通则而非文件清单——
+  新增子目录/新深度自动在守卫内。`$BACKUP_BASE/borg-*` 不递归（引擎自建即 600，仓库根已被
+  `base_dir` 700 挡住，为几千 chunk 每轮全扫不划算）。
   两层缺一不可：`umask` 只管新建，已存在的 0755 目录与 0644 日志（父目录 `~/.config`、
   `~/.local/share` 常被 `mkdir -p` 建成 755）靠 `backup.sh` 每次运行的幂等 `chmod` 修复，所以
   老设备只要 nightly 跑到新提交就自动收紧，不必改 plist。日志里是引擎输出的**完整路径**，
@@ -157,8 +164,10 @@
   是 `rclone size` 整仓口径把它读成了增长。实测目录形状
   `Backguard:/<SYSTEM_ID>/{config,files,system,timeline}`，timeline 下即
   `<dev>/YYYY/MM/DD/HHMM-标签/`（与 `rescue.sh --base <云端目录>` 认的布局一致）。
-  云端**没有** `age/`——`recovery-identity.enc` 从不推送，盲恢复目前要求密钥目录另有副本
-  （已写进 `rescue.sh --guide` §4，是否推送待用户定夺，属凭据红线不擅自改）。
+  云端**没有** `age/`——**已定（2026-10-01 用户拍板）：`recovery-identity.enc` 不上云**，凭据
+  纪律优先，这不是缺口而是设计。所以「干净机器 + 云端目录 + 纸质恢复码」的盲恢复**硬性要求**
+  密钥目录另有第二处离线副本（`DEPLOY.md` 步骤 ③ + `rescue.sh --guide` §4）；将来若要改主意，
+  走的是一次凭据面变更决策，不是顺手往推送清单里加一行。
 - `~/leisure/Codebase-Driven-by-AI/backguard/`（即部署树 v0 的上一级）下的 `research/`、
   `PRD.md`、`prototype/`、`pitch/` 是本地工件，**不在任何 git 仓库内**；
   关键结论已内联进 docs/HANDOVER。换机或移动开发树时，这些工件不随本仓库 clone 走。

@@ -76,11 +76,13 @@ SKIP_WEBDAV=1 ./backup.sh        # 先本地验证，不触云（备份前会自
 #  [ ] 逃生面自证：./rescue.sh --base $BACKUP_BASE --class files --find <一个你知道的文件名>
 #      能列出、--get 到临时目录能取回（rescue.sh 不依赖本仓库其它文件，见 --guide）
 #  [ ] recovery-identity.enc 已按 ③ 另存第二处（云端没有它）
-#  [ ] 权限面：ls -ld ~/.config/partiverse-backup ~/.local/share/partiverse-backup → 700，
-#      底下 backup.log / launchd.out.log → 600（日志里是引擎输出的完整路径，同机用户不该
-#      可读；backup.sh 每次运行都幂等收紧，老设备拿到新代码即自动修好，无需改 plist）。
-#      顺手别漏 runs/：`ls -l ~/.local/share/partiverse-backup/runs` 底下 run-*.json 是
-#      **全量文件名清单**（单个几十 MB 级），必须 600；system-meta/ 与 $BACKUP_BASE 同理
+#  [ ] 权限面（整棵扫，一条命令判完）：
+#      find ~/.config/partiverse-backup ~/.local/share/partiverse-backup \
+#           ~/PartiverseBackup/timeline \( -type d ! -perm 700 \) -o \( -type f ! -perm 600 \)
+#      → 无输出即合格（目录 700、文件 600）。**别只 ls -ld 两个根目录就算过**：真机 10-01
+#      实测根目录已 700，而根下的 age/ 仍是 0755、runs/run-*.json（渲染前的**全量文件名清单**，
+#      单个几十 MB 级）与 system-meta/ 转储仍是 0644。backup.sh 每次运行幂等地整树收紧，
+#      老设备跑到新提交即自动修好，无需改 plist（日志里是引擎输出的完整路径，同机用户不该可读）。
 ./backup.sh                      # 再跑完整链路（含 WebDAV）
 launchctl list | grep partiverse # 调度在位（init.sh 已注册，每日 02:34）
 # launchd 那一次的现场在 ~/.local/share/partiverse-backup/launchd.{out,err}.log

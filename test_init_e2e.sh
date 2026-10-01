@@ -24,6 +24,21 @@ chmod 644 "$T/home/.local/share/partiverse-backup/runs/run-20260101-000000.json"
     "$T/home/.local/share/partiverse-backup/system-meta/decoy-mounts.txt"
 chmod 755 "$T/home/.local/share/partiverse-backup/runs" \
     "$T/home/.local/share/partiverse-backup/system-meta"
+# 深层 decoy：修复式 chmod 改成整棵扫之后，被测对象就不再是「某个文件名」而是「任何
+# 深度的一项」。这两处是列举式清单注定漏的形状——$CONF_DIR/age 子目录本身（真机 10-01
+# 实测：nightly 已把 $CONF_DIR 收到 700，age/ 仍 0755、recipients.txt 仍 0644，因为 glob
+# 只写了 *.log），以及「已收紧目录底下第二层」的旧文件（父目录闸门会回退，见红线 §2）
+mkdir -p "$T/conf/partiverse-backup/age/sub" \
+    "$T/home/.local/share/partiverse-backup/system-meta/dump"
+# 名字一律带 decoy-：`recipients.txt` 是生产文件名，空文件会让语义层真去解析它
+# （变异跑实测 [WARN] manifest 密封失败），等于悄悄改掉夹具的既有分支
+: > "$T/conf/partiverse-backup/age/decoy-recipients.txt"
+: > "$T/conf/partiverse-backup/age/sub/deep-identity.txt"
+: > "$T/home/.local/share/partiverse-backup/system-meta/dump/deep.txt"
+chmod 755 "$T/conf/partiverse-backup/age" "$T/conf/partiverse-backup/age/sub"
+chmod 644 "$T/conf/partiverse-backup/age/decoy-recipients.txt" \
+    "$T/conf/partiverse-backup/age/sub/deep-identity.txt" \
+    "$T/home/.local/share/partiverse-backup/system-meta/dump/deep.txt"
 mkdir -p "$T/dest"
 printf '[Backguard]\ntype = local\n' > "$T/rclone.conf"
 
@@ -102,29 +117,26 @@ if [ -n "$(find "$T/conf/partiverse-backup/secrets.env" ! -perm 600)" ]; then
 fi
 
 T_LOG_DIR="$T/home/.local/share/partiverse-backup"
-# 断言 6：凭据/日志目录与 launchd 日志权限收紧。~/.config 与 ~/.local/share 常被
-# mkdir -p 建成 755，日志里是含完整路径的备份全量输出——同机用户列名即可见
-for d in "$T/conf/partiverse-backup" "$T/home/.local/share/partiverse-backup"; do
-    [ -d "$d" ] || fail "$d 未创建"
+T_CONF_DIR="$T/conf/partiverse-backup"
+# 断言 6：凭据/日志/时间轴三棵「整棵都该私有」的树，逐节点验权限。
+# **不点名文件**：列举式清单一晚漏过两次（先漏 runs/run-*.json 与 system-meta/，补齐后
+# 又漏 $CONF_DIR/age 子目录本身——真机 nightly 收紧了 $CONF_DIR，age/ 仍是 0755）。
+# 新增子目录/新深度不必再改这条断言，它自己就咬得住。
+for root in "$T_CONF_DIR" "$T_LOG_DIR" "$T/repos/timeline"; do
+    [ -d "$root" ] || fail "$root 未创建（权限断言失去对象）"
+    # -xdev 无必要；只报前 3 项，失败信息要能一眼指认漏的是哪一层
+    bad=$(find "$root" \( -type d ! -perm 700 \) -o \( -type f ! -perm 600 \) 2>/dev/null | head -3)
+    if [ -n "$bad" ]; then
+        fail "$root 底下仍有同机可读项（目录须 700、文件须 600）: $(echo "$bad" | tr '\n' ' ')"
+    fi
+done
+# $BACKUP_BASE 只验目录本身：borg/restic 仓库内部文件由引擎自己建（实测 0600），
+# 为几千个 chunk 每轮全扫不划算，且这条断言不该替引擎的决定负责
+for d in "$T/repos"; do
+    [ -d "$d" ] || fail "$d 未创建（权限断言失去对象）"
     # cut -c1-10：macOS 的 ls 会在权限串尾追加 '@'（扩展属性），完整比较会误判
     dm=$(ls -ld "$d" | awk '{print $1}' | cut -c1-10)
     [ "$dm" = "drwx------" ] || fail "目录没收到 700: $d → $dm"
-done
-# 子目录与备份根：runs/、system-meta/ 是本次才新建或老部署留下的 0755，$BACKUP_BASE 与
-# 其 timeline 底下是时间轴产物——同一条「父目录 700」规则要覆盖到它们，否则一旦目录闸门
-# 回退（重装/手工 chmod -R），里头的 0644 全量清单立刻可读
-for d in "$T_LOG_DIR/runs" "$T_LOG_DIR/system-meta" "$T/repos" "$T/repos/timeline"; do
-    [ -d "$d" ] || fail "$d 未创建（权限断言失去对象）"
-    dm=$(ls -ld "$d" | awk '{print $1}' | cut -c1-10)
-    [ "$dm" = "drwx------" ] || fail "目录没收到 700: $d → $dm"
-done
-# 日志文件一律 600：decoy.log 是「本次运行前就存在的 0644」，靠 backup.sh 的修复 glob；
-# backup.log/rclone.log 是本次新建的，靠 umask 077——两条路少一条这里就红
-for lf in "$T_LOG_DIR"/*.log "$T_LOG_DIR"/preflight-latest.json \
-          "$T_LOG_DIR"/runs/*.json "$T_LOG_DIR"/system-meta/*; do
-    [ -e "$lf" ] || continue
-    fm=$(ls -ld "$lf" | awk '{print $1}' | cut -c1-10)
-    [ "$fm" = "-rw-------" ] || fail "日志/预检产物同机可读: $(basename "$lf") → $fm"
 done
 case "$(uname -s)" in
     Darwin)
