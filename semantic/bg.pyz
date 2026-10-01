@@ -638,9 +638,10 @@ def build_restore(run: dict) -> str:
     cmds = []
     if engine in ("borg", "generic"):
         cmds.append(
-            "# borg：先列出再提取\n"
+            "# borg：列清单用 list --short；extract 没有 --destination，解包路径相对当前目录\n"
             "  borg list <仓库路径>::\n"
-            "  borg extract --list <仓库路径>::<归档名>  <要恢复的子路径>"
+            "  borg list <仓库路径>::<归档名> --short\n"
+            "  cd <恢复目标目录> && borg extract <仓库路径>::<归档名> <要恢复的子路径>"
         )
     if engine in ("restic", "generic"):
         cmds.append(

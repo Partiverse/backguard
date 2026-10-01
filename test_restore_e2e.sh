@@ -35,6 +35,14 @@ export SYSTEM_ID="$DEV"
 export BACKUP_BASE="$BASE"
 export BORG="$(command -v borg)"
 export RCLONE="$(command -v rclone || true)"
+# 与生产 config.sh 同形：三个类别各有 includes/excludes 索引数组（语义层的
+# export_exclusions 会逐类读取，缺一个就是一条下方断言 6c 的死法）
+BORG_INCLUDES_config=("$T/src")
+BORG_EXCLUDES_config=("--exclude" "*/.git")
+BORG_INCLUDES_files=("$T/src")
+BORG_EXCLUDES_files=("--exclude" "*/.cache")
+BORG_INCLUDES_system=()
+BORG_EXCLUDES_system=()
 CFG
 printf "BORG_PASSPHRASE='%s'\n" "$BORG_PASSPHRASE" > "$CONF/secrets.env"
 chmod 600 "$CONF/secrets.env"
@@ -75,4 +83,62 @@ oldest="$DEV-config-20260929-023400"
     fail "prev 归档选取失败（设备名被当正则读）: [$(prev_archive_for "$REPO" config "$newest")]"
 [ -z "$(prev_archive_for "$REPO" config "$oldest")" ] || fail "最老归档不应有 prev"
 
-echo "E2E-OK: restore.sh 四条路径（--list / --archive --list / --latest / --id）+ 语义层 prev 归档选取均真实可用"
+# 断言 6：restore.md 教的命令必须能照抄执行——「产物即脚本」。
+# 10-01 复核实测：模板写的是 `borg extract --list`，borg 1.4 没有这个选项，
+# 而 extract --list 会**真的解包**（在仓库目录里跑等于往工作树落文件）。
+# 指南写错不是显示问题，是恢复链路的一部分。
+mkdir -p "$T/logs"
+# 与生产同形：backup.sh 是 source config.sh 之后才调 generate_semantic 的，
+# 这里也照做——SCRIPT_DIR 同理（backup.sh export 它，semantic_bg 用它找 vendored bg）
+# shellcheck disable=SC1090
+source "$CONF/config.sh"
+# generate_semantic 读这三个全局（backup.sh 在生产里都备好了）：SCRIPT_DIR 让
+# semantic_bg 找到 vendored bg，LOG_DIR 是 runs/ 落点，LOG 是它的日志。
+# 少一个就是 set -u 下的致命变量错误——消息会被调用点的 2>&1 吞进 gen.log，
+# 表面症状是「脚本静默退出 1」，10-01 在这条上排查了三次才挖出来。
+SCRIPT_DIR="$V0_DIR"
+LOG_DIR="$T/logs"
+LOG="$T/logs/sem.log"
+generate_semantic "config:$REPO:$newest" >"$T/gen.log" 2>&1 \
+    || fail "断言 6 前置：generate_semantic 失败：$(tail -5 "$T/gen.log")"
+sdir_all="$(find "$BASE/timeline" -mindepth 4 -maxdepth 4 -type d)"
+[ -n "$sdir_all" ] || fail "断言 6：没生成深度 4 的快照目录"
+# 不用 `find | head -1`：pipefail 下 head 先退会让 find 收到 SIGPIPE，
+# 赋值语句的非零状态在 set -e 里直接静默终止整个脚本（AGENTS §2 同一条坑）
+sdir="${sdir_all%%$'\n'*}"
+[ -f "$sdir/restore.md" ] || fail "断言 6：快照里没有 restore.md（${sdir}）"
+
+# 6a：任何明文产物都不得再出现那条错命令
+for f in MANIFEST.txt STORY.md COVERAGE.txt restore.md; do
+    [ -f "$sdir/$f" ] || continue
+    if grep -qF 'extract --list' "$sdir/$f"; then
+        fail "断言 6a：明文产物 $f 里出现 extract --list（borg 1.4 无此选项且会真解包）"
+    fi
+done
+
+# 6b：把产物里的命令行原文抽出来，替换占位符后真跑一遍
+grep -E '^[[:space:]]+(borg|cd) ' "$sdir/restore.md" | sed \
+    -e "s#<仓库路径>#$REPO#g" \
+    -e "s#<归档名>#$newest#g" \
+    -e "s#<恢复目标目录>#$T/out-guide#g" \
+    -e "s#<要恢复的子路径>#src/Documents/note.txt#g" > "$T/guide.sh"
+[ -s "$T/guide.sh" ] || fail "断言 6b：restore.md 里抽不到任何 borg/cd 命令行"
+mkdir -p "$T/out-guide"
+bash "$T/guide.sh" >"$T/guide.log" 2>&1 || fail "断言 6b：照抄 restore.md 的命令执行失败：$(cat "$T/guide.log")"
+[ "$(cat "$T/out-guide/src/Documents/note.txt" 2>/dev/null)" = v2 ] \
+    || fail "断言 6b：按指南取回的文件内容不对（应为 v2）：$(ls -R "$T/out-guide" 2>/dev/null)"
+# extract 只解那一个子路径，不该把整份归档倒进目标目录
+[ ! -e "$T/out-guide/src/Documents/added.txt" ] \
+    || fail "断言 6b：指南命令解出了未指定的文件（子路径过滤失效）"
+
+# 6c：非致命分层（AGENTS §1.3）——老配置/半手改配置缺一个 BORG_EXCLUDES_* 时，
+# 语义层不得终止整次备份。修复前 `${#e_ref[@]}` 在 set -u 下是**致命变量错误**：
+# 它不是 return，`backup.sh` 那句 `|| warn` 根本兜不住，整轮备份当场退出且无一条错误消息。
+( set -e
+  unset BORG_EXCLUDES_files
+  SEM_LABEL=partial generate_semantic "config:$REPO:$newest" >"$T/gen2.log" 2>&1 ) \
+    || fail "断言 6c：缺 BORG_EXCLUDES_files 时语义层终止了备份（应只跳过该类别的排除清单）：$(tail -3 "$T/gen2.log")"
+find "$BASE/timeline" -maxdepth 4 -type d -name '*-partial' | grep -q . \
+    || fail "断言 6c：降级后仍应产出快照（partial 标签目录不存在）"
+
+echo "E2E-OK: restore.sh 四条路径（--list / --archive --list / --latest / --id）+ 语义层 prev 归档选取 + restore.md 命令照抄可执行 + 缺数组时语义层不杀备份，均真实可用"

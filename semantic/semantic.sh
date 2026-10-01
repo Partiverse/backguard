@@ -423,6 +423,11 @@ export_exclusions() {
     {
         printf '{"generated":"%s","exclusions":[' "$(date -Iseconds)"
         for cls in config files system; do
+            # 未定义即跳过：`${#arr[@]}` 在 set -u 下是**致命**变量错误，会当场终止整个
+            # shell——不是 return，`|| warn` 兜不住它，非致命分层红线在这条路径上是破的。
+            # 老配置/半手改配置缺一个 BORG_EXCLUDES_* 就等于让语义层杀掉整次备份。
+            # `${arr[0]+x}` 在 bash 3.2 与 5.x 都能安全探测（未定义或空 → 不是 x）。
+            eval "[[ \${BORG_EXCLUDES_${cls}[0]+x} == x ]]" || continue
             eval "declare -n e_ref=\"BORG_EXCLUDES_$cls\""  # declare -n 避开 SC2318
             # shellcheck disable=SC2154  # e_ref 经上方 eval 动态绑定
             for ((i = 0; i < ${#e_ref[@]}; i += 2)); do
