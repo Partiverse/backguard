@@ -138,6 +138,24 @@
   `SCRIPT_DIR/LOG_DIR/LAUNCH_BASH/SCHED_H/SCHED_M/PLIST_DIR` 求值到临时目录），
   再拿 `plutil -p` **按键比较**而不是 diff 文本——模板是紧凑单行，现存件被 launchd
   重排过缩进，纯文本 diff 会显示「整份都变了」而看不出只有一个真实差异。
+- **交替模式一律 `grep -E 'a|b'`**：BSD grep（macOS / CI 的 macos runner）**不支持** BRE 的
+  `\|`——它按字面量找，匹配不到就返回空。用它判断「文档里有没有这段话」会得出「文件被人改过」
+  的假结论（10-01 就是这样误判了一次 AGENTS.md 被改动，而 `git status` 其实是干净的）。
+- **`gh ... --jq '.[0].a + "/" + .[0].b'` 会当场报错**（`expected an object but got: array`），
+  而 `--jq '.[0].headSha'` 同一份输出却不报错——别拿 `--jq` 的字符串拼接版当可用查询。
+  迁移驱动的门禁改成「取原始 JSON + `python3` 解析」，并**逐 job、逐 step 读 conclusion**：
+  整轮 `success` 不等于 E2E 那几步跑过（§3「CI 绿 ≠ 跑过」的机器化形态）。
+- **`set -u` 下未绑定的数组是**致命**错误，不是可捕获的非零**：`${#arr[@]}` 直接终止整个
+  shell，调用点的 `|| warn` 兜不住它，而错误消息常被上层的 `2>&1` 吞进日志文件——表面症状是
+  「脚本静默退出 1」。语义层碰 `BORG_EXCLUDES_<cls>` 前先用
+  `eval "[[ \${BORG_EXCLUDES_${cls}[0]+x} == x ]]" || continue` 探测（`${arr[0]+x}` 在
+  bash 3.2/5.x 都安全；写 `$cls[0]` 会被 shellcheck 报 SC1087，必须 `${cls}[0]`）。
+  同理：E2E 里直接 source `semantic.sh` 调 `generate_semantic` 时，`SCRIPT_DIR`/`LOG_DIR`/`LOG`
+  三个全局都得备好（生产由 `backup.sh` 备好），少一个就死，且死得没有声音——
+  现由 `test_restore_e2e.sh` 断言 6c 锁住「缺一个排除数组不得终止备份」这条非致命分层。
+- **E2E 夹具要与生产同形**：夹具桩只返回「脚本想要的那种形状」时，会把真 bug 遮掉——
+  迁移门禁的 `gh --jq` 版在本机真实 gh 上炸、在桩上却一直「通过」，因为桩直接 echo 结论字符串。
+  桩要么吐原始 JSON，要么连被调对象的返回形状一起复刻。
 
 ## 3. 改动与验证流程
 
