@@ -230,6 +230,14 @@ jobs:
           # 单文件逃生恢复：两种目录布局 / borg+restic 搜与取 / age 双路径（expect 驱动 tty）
           bash test_rescue_e2e.sh
 
+      - name: E2E log rotation + run boundary line
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          # 现役日志只装本轮：超阈值才切、副本封顶 SEM_LOG_KEEP、删除只认轮转形态
+          # （宽 glob + 两道守卫）；run 边界行一轮一行并如实带失败轮的 rc
+          bash test_log_rotation.sh
+
   macos:
     runs-on: macos-latest
     # 实测 macos job 76 分钟（dd4de89 那轮：runner 派工 18:36 → 完成 19:52）——
@@ -347,6 +355,11 @@ jobs:
       - name: E2E init wizard + scheduler templates
         timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_init_e2e.sh
+
+      # 真机调度就是 launchd：日志轮转与边界行在 BSD 的 ls/rm/wc 上必须同样成立
+      - name: E2E log rotation + run boundary line
+        timeout-minutes: 40
+        run: /opt/homebrew/bin/bash test_log_rotation.sh
 
   windows:
     runs-on: windows-latest

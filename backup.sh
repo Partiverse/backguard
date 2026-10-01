@@ -27,6 +27,8 @@ esac
 
 # ---------- 目录 ----------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# run 边界行的耗时起点：从脚本入口算，不含「config 加载花了多久」这段日志里看不见的空白
+RUN_START_TS="$(date +%s)"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/partiverse-backup"
 LOG_DIR="$HOME/.local/share/partiverse-backup"
 # 全程 umask 077：本次运行新建的每个文件（backup.log / sem.log / drill.log /
@@ -247,10 +249,88 @@ collect_meta() {
     info "元数据已采集: $meta_dir/manifest.txt"
 }
 
+# ---------- 运行史可审计（research/11 A4）----------
+# 两个互补的小东西，都不碰备份本体：
+#
+# 1) 轮转。现役日志里混着**早已修掉**的历史错误时，读日志的人（包括下一次会话里的
+#    代理自己）会把死缺陷当现役的读——10-01 复核就在 backup.log 里为一条 09-30 的
+#    rclone 500 花了十分钟才确认它不再复发。超阈值切一份带时间戳的副本，留最近 N 份。
+#    删除按 `^<名字>\.[0-9]{8}-[0-9]{6}$` 白名单逐行判（AGENTS §3 注入面自查），
+#    绝不 `ls | xargs rm`：路径含空格时那会把删除目标指到别处。
+# 2) run 边界行。一轮一行写明「哪个代码基、退出码、跑了多久」——夜间出问题时，
+#    「这条错误属于哪一轮、那轮部署点是什么 SHA」现在全靠翻提交时间猜。
+rotate_log_if_oversized() {
+    local f="$1" size max keep base stale g
+    [[ -f "$f" ]] || return 0
+    size="$(wc -c < "$f" 2>/dev/null || true)"
+    size="${size//[^0-9]/}"
+    [[ -n "$size" ]] || return 0
+    max="${SEM_LOG_MAX_BYTES:-4194304}"   # 4 MiB
+    keep="${SEM_LOG_KEEP:-7}"
+    [[ "$max" =~ ^[0-9]+$ ]] || max=4194304
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=7
+    (( size > max )) || return 0
+    base="${f##*/}"
+    if ! mv -- "$f" "${f}.$(date +%Y%m%d-%H%M%S)"; then
+        warn "[log] 轮转失败（不阻断备份）: $f"
+        return 0
+    fi
+    # 宽 glob + 窄守卫：`$f.*` 会把用户手放的 `backup.log.bak`、同名目录之类都捞进来，
+    # 真正放行删除的是下面两道判定（形态正则 + 必须是普通文件）。反过来「窄 glob + 无守卫」
+    # 看着安全，其实守卫一旦漏改就无人兜底——E2E 的变异验证正是从这两道各自摘一次咬住的。
+    # -d 是必需的，不是排版偏好：`ls -1t "$f".*` 遇到目录操作数会**打印它的内容**而不是它
+    # 自己（真机同名目录因此在候选清单里根本不存在，「挡住目录」那道守卫等于没被测到，
+    # 摘掉它 E2E 照样绿）。不加 -d 还有第二个后果：ls 给目录内容加前缀（子目录里的项变成
+    # `20240101-000000/a.txt`，含 / 或不再是 `<base>.<纯时间戳>`），形态守卫把它挡在
+    # 删除之外——两个 bug 正好互相掩盖。
+    stale="$( { ls -1dt -- "$f".* 2>/dev/null || true; } | tail -n +$((keep + 1)) )"
+    [[ -n "$stale" ]] || return 0
+    while IFS= read -r g; do
+        [[ -n "$g" ]] || continue
+        [[ "${g##*/}" =~ ^"${base}"\.[0-9]{8}-[0-9]{6}$ ]] || {
+            warn "[log] 跳过非轮转形态: $g"; continue; }
+        # 同名形态的**目录**也要挡住：rm -f 对目录是失败退出，而本函数在 main 的正常
+        # 路径上——set -e 下轮转就会把整次备份带走（红线 §1.3 的反面）
+        [[ -f "$g" ]] || { warn "[log] 跳过非普通文件: $g"; continue; }
+        rm -f -- "$g"
+    done <<< "$stale"
+    info "[log] 已轮转 ${base}（${size} B > ${max} B，留最近 ${keep} 份）"
+}
+
+log_run_boundary() {
+    local rc="$1" sha dur
+    # LOG 在 main 里才定稿（config 可覆盖），早退的轮次没有落点就整条跳过——
+    # 边界行本身属于旁路，绝不反过来把备份拖进 set -u 的致命变量错误
+    [[ -n "${LOG:-}" ]] || return 0
+    sha="$( { git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true; } )"
+    sha="${sha%%$'\n'*}"
+    [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || sha=nogit
+    dur=$(( $(date +%s) - ${RUN_START_TS:-$(date +%s)} ))
+    printf '[%s] run 边界: sha=%s rc=%s dur=%ss\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$sha" "$rc" "$dur" >> "$LOG" || true
+}
+
 # ---------- 主流程 ----------
 main() {
     LOG="${LOG:-$LOG_DIR/backup.log}"
     RCLONE_LOG="${RCLONE_LOG:-$LOG_DIR/rclone.log}"
+    # 先轮转再登记边界：本轮那一行要落在**新**日志的开头附近，
+    # 而上一轮的痕迹已经在切出去的副本里
+    # 只轮转 $LOG_DIR 底下的标准日志：$LOG / $RCLONE_LOG 允许被 config 指到别处，
+    # 而那两个路径已经在上面单独 chmod 过——对**用户指定**的路径动手删除，等于让一次
+    # 日志尺寸超限变成「删掉某个不在 LOG_DIR 里的文件」，风险与收益完全不成比例。
+    # 轮转清单是**点名**的，不像权限那样整树归一化：launchd.{out,err}.log 由 launchd
+    # 持有句柄，mv 走之后它继续往旧 inode 写，输出就悄悄消失在副本里（比日志长更糟）。
+    # runs/ 与 system-meta/ 有自己的留存策略（prune_run_jsons / 每轮覆写），preflight-latest.json
+    # 是每轮重写的快照，都不该按尺寸切。
+    local lf
+    for lf in "$LOG_DIR/backup.log" "$LOG_DIR/rclone.log" "$LOG_DIR/sem.log" "$LOG_DIR/drill.log"; do
+        rotate_log_if_oversized "$lf"
+    done
+    if [[ "$LOG" != "$LOG_DIR/backup.log" ]]; then
+        info "[log] LOG 被 config 指到 LOG_DIR 之外（${LOG}），该文件不做轮转（只归一化权限）"
+    fi
+    trap 'log_run_boundary "$?"' EXIT
     # umask 只影响「新建」，已存在的得就地修。这里**不按文件名列举**：10-01 一夜实测漏过
     # 两次——先漏 runs/run-*.json（渲染前的**全量文件名清单**，真机单个 22 MB）与
     # system-meta/（mounts/crontab 转储），补齐清单后又漏 $CONF_DIR/age 子目录本身：
