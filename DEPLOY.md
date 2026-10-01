@@ -55,6 +55,11 @@ echo 'export SEM_NTFY_URL="https://<你的-ntfy>/backguard-<设备名>"' >> ~/.c
 echo 'export BORG_PASSCOMMAND="rbw get backguard-仓库口令"' >> ~/.config/partiverse-backup/config.sh
 # 本地 timeline 暂存快照保留份数（默认 14；云端是全量历史，本地保 N 份供云端丢失时重建，0=不清理）：
 echo 'export SEM_TIMELINE_KEEP=14' >> ~/.config/partiverse-backup/config.sh
+# 运行日志轮转（backup.log 单轮约 10 KB，一轮一行 `run 边界: sha=… rc=… dur=…s` 写在日志末尾）：
+# 现役日志超 SEM_LOG_MAX_BYTES 才切一份带时间戳的副本，副本按 mtime 留最近 SEM_LOG_KEEP 份。
+# 只切 $LOG_DIR 下点名的四份（backup/rclone/sem/drill）；launchd.{out,err}.log 由 launchd 持句柄，不动。
+echo 'export SEM_LOG_MAX_BYTES=4194304' >> ~/.config/partiverse-backup/config.sh
+echo 'export SEM_LOG_KEEP=7' >> ~/.config/partiverse-backup/config.sh
 
 # ③ 救援身份的密文另存第二处（第二台设备 / 加密 U 盘）
 #    云端副本里**没有** age/ 目录：recovery-identity.enc 从不推送，所以「干净机器 +

@@ -110,6 +110,24 @@
   `rclone copy -I <本地> <目标> --include <那个文件>`，判平用 `rclone cat … | shasum`
   对比本地——**别拿「copy 退出 0」当云端有新版**。新 remote 接入先跑 `test_remote_caps.sh`
   并登记能力台账（research/05 §1.5，本地），台账里要记「比较依据是 size 还是 hash」。
+- **`ls -1t "$f".*` 对目录操作数打印的是「目录的内容」，不是目录本身**——想按 mtime 排「这些
+  路径」必须加 `-d`（`ls -1dt`）。10-01 日志轮转的守卫因此没被测到：同名目录压根没进删除候选，
+  摘掉「必须是普通文件」那道变异**E2E 全绿**。更阴的是两个 bug 互相掩盖：不加 `-d` 时 ls 给
+  目录内容带上路径前缀，形态白名单把它挡在删除之外，看着正像「守卫在起作用」。**凡是
+  「列候选 → 逐个判定 → 删除/移动」的清单，变异验证要连清单一起摘一次**（本轮把 `ls -1dt`
+  改回 `ls -1t` 作独立变异，才咬住）。
+- **`info/warn` 只写 stdout**（`backup.sh:14-17`），`$LOG` 里只有引擎 `tee -a` 的输出和
+  `run 边界` 行。所以断言「某条告警真的运作过」要取夹具的 `out.log`；取 `backup.log` 会断言
+  一个恒为假的字符串（launchd 侧对应 `StandardOutPath` → `launchd.out.log`，见 §4 plist 段）。
+- **日志轮转与 run 边界行**（10-01 落地，roadmap A4）：`backup.sh` 每次运行对
+  `$LOG_DIR/{backup,rclone,sem,drill}.log` 按 `SEM_LOG_MAX_BYTES`（默认 4 MiB）超阈值才切，
+  副本按 mtime 留 `SEM_LOG_KEEP`（默认 7）份；`launchd.*.log` 由 launchd 持句柄**不在名单内**。
+  删除候选一律走「宽 glob + 形态正则 + 必须是普通文件」两道守卫并逐行 `read -r`，
+  `rm -f` 对目录是 rc=1，set -e 下会把整次备份带走（旁路没资格终止本体，§1.3 同一条哲学）。
+  一轮一行的 `[时间] run 边界: sha=… rc=… dur=…s` 由 EXIT trap 写，取不到 git HEAD 就退化成
+  `sha=nogit`。**写这个夹具的规矩**：KEEP 窗口的种子 mtime 必须 `touch -t` 写死（同秒并列会让
+  「留哪几份」变成运气），前一阶段切出的真副本要先 `rm -f` 掉（它们占名额）。守卫见
+  `test_log_rotation.sh`（linux + macos 双 CI，6 条变异）。
 - **age 密封**：age 只读 /dev/tty 不吃管道——密钥初始化必须 expect 驱动
   （`init-keys.exp`）；passphrase stanza 独占，双恢复路径用双 X25519 recipient 实现。
 - **权限面**：备份产物没有任何需要同机可读的东西——入口脚本（`backup.sh` / `init.sh` /
@@ -159,15 +177,16 @@
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（49 项全绿，
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（51 项全绿，
    3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
    semantic/semantic.sh drill.sh rescue.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
    `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）/
    `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）/
-   `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）。九个都已挂 CI
-   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init），
+   `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）/
+   `test_log_rotation.sh`（日志轮转 + run 边界行）。十套都已挂 CI
+   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init/log_rotation），
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
