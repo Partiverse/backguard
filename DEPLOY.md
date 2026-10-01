@@ -175,4 +175,54 @@ git -C "$DEPLOY_DIR" rev-parse --short HEAD
 - **只允许 ff**：部署树出现本地改动就是有人在上面开发，先查 `git -C "$DEPLOY_DIR" status`
   弄清来源再动，别 `reset --hard` 抹掉。
 - 追平后跑一次 `./drill.sh --force`（macOS/Linux）确认新代码的恢复链路仍通。
-- 观察期内的节奏：CI 全绿 → 部署树追平 → 验收次日自动备份产物（AGENTS.md §4.5）。
+- 观察期内的节奏：CI 全绿 → 部署树追平 → 当晚 nightly 就是免费的验收场。追平前先确认
+  没有备份在跑（`pgrep -fl "backup.sh|borg|restic|rclone"`）——09-30 那次「部署点落后 14 个
+  提交、观察期数据作废」是漏了追平，不是代码问题。
+
+## 7. Borg 口令轮换（真机 2026-10-01 走过一次，三类仓库各一次）
+
+**先认清爆炸半径**：仓库是 `repokey-blake2`（`key-type = 3`），密钥 blob 就存在每个仓库自己的
+`config` 里，口令只是它的包裹。所以：
+
+- 轮换 = **每个仓库各跑一次** `borg key change-passphrase`（config/files/system 三次；restic 侧另是一套）；
+- borg 自己声明：**换口令不改底层加密/MAC 密钥，也不改 chunker seed**——它防的是「口令被猜到」，
+  不防「key blob 已泄露」。要连密钥一起走得新建仓库重灌，那是另一量级的操作；
+- `change-passphrase` **没有** `--new-passphrase` 选项，但认 `BORG_NEW_PASSPHRASE` 环境变量
+  （免交互，别拿 expect 硬塞）。
+
+```bash
+CFG=~/.config/partiverse-backup
+ROLL="$CFG/keyrot-$(date +%Y%m%d)"   # 回滚对：旧口令 + 旧 key blob，验证通过前是唯一退路
+mkdir -p "$ROLL" && chmod 700 "$ROLL"
+cp -p "$CFG/secrets.env" "$ROLL/secrets.env.old"
+for c in config files system; do
+    cp -p "$HOME/PartiverseBackup/borg-$c/config" "$ROLL/config.$c"
+    set -a; source "$CFG/secrets.env"; set +a
+    BORG_NEW_PASSPHRASE=<新口令> borg key change-passphrase "$HOME/PartiverseBackup/borg-$c"
+done
+# 双向验证：新口令开得动 + 旧口令开不动（后半句才算真轮换成功）
+for c in config files system; do
+    borg list "$HOME/PartiverseBackup/borg-$c" >/dev/null && echo "$c 新口令 OK"
+done
+```
+
+**云端要逐项对平，不能只看「同步完成」**：这条 WebDAV 取不到 modtime/hash，rclone 退化成
+**只比大小**（日志 `Sizes identical` → `Unchanged, skipping`）。而 `borg key change` 重写
+`config` 是**原地同长度替换**（700 B 换 700 B），云端于是静悄悄留着轮换前那份 key——真机
+10-01 就是 nightly 报了同步完成、云端三个 `config` 却全是旧的：
+
+```bash
+for c in config files system; do
+    d="Backguard:<设备目录>/$c"
+    rclone copy -I "$HOME/PartiverseBackup/borg-$c/" "$d/" --include config   # -I = 无视大小比较
+done
+# 对平证据 = 本地与云端的 config 逐类同哈希（哈希先算进变量再拼 echo，见下）
+```
+
+取哈希别写成 `echo "local=$(sha256sum f | awk '{print $1}')"` 这种嵌套——`awk '{print $1}'`
+套在 `"$( … )"` 里是 bash **解析错误**（不是运行期报错，`bash -n` 才抓得住），
+先把 `$(…)` 的结果收进变量再拼字符串。
+
+跑完接一遍完整备份（含云端）确认口令面没伤到本体，然后**回滚对必须退役**：
+`$ROLL` 里旧口令与旧 key blob 成对存在，等于旧口令仍能开仓库，留着就把轮换的价值抹掉了。
+删它不可逆，先过用户确认；同时提醒用户把新口令抄进密码管理器/纸上，旧记录作废。
