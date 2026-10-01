@@ -90,6 +90,19 @@ prune_run_jsons "$runs" 10
 left="$(count_valid "$runs")"
 [[ "$left" == 10 ]] || fail "keep=10 应剩 10 份，实际 $left"
 [[ -f "$runs/run-20260101;000000.json" ]] || fail "keep=10 时非留档形态被误删"
+# 2b) SEM_RUN_JSON_KEEP 旋钮：不传第二参时按 config 的环境变量收——这批 run json 是
+#     渲染前的**全量文件名清单**（真机单个 22 MB），保留数就是本地长期存着多少份未密封
+#     名单，收紧它不该要求改代码
+SEM_RUN_JSON_KEEP=8 prune_run_jsons "$runs"
+left="$(count_valid "$runs")"
+[[ "$left" == 8 ]] || fail "SEM_RUN_JSON_KEEP=8 应剩 8 份，实际 $left"
+# 显式第二参必须顶赢环境变量（现有调用点与测试都靠这个优先级）
+SEM_RUN_JSON_KEEP=1 prune_run_jsons "$runs" 7
+left="$(count_valid "$runs")"
+[[ "$left" == 7 ]] || fail "显式 keep=7 应顶赢 SEM_RUN_JSON_KEEP=1，实际 $left"
+# 非数字回落默认 60：架上只有 7 份，一条都不该被删
+SEM_RUN_JSON_KEEP=abc prune_run_jsons "$runs"
+[[ "$(count_valid "$runs")" == 7 ]] || fail "SEM_RUN_JSON_KEEP=abc 应回落 60 而不清理，实际 $(count_valid "$runs")"
 # 3) 路径含空格（BACKUP_BASE 落在 “My Documents” 这类目录是真实配置）：
 #    不带 -0 的 xargs 会把 ls 输出的路径按空白二次拆词，旧实现下一个也删不掉。
 space_runs="$tmp/My Docs/runs"

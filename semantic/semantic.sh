@@ -147,7 +147,10 @@ prune_local_timeline() {
 # 逐行 + basename 白名单，只放行 run-YYYYMMDD-HHMMSS.json，宁可漏删不可误删。
 prune_run_jsons() {
     local runs_dir="$1"
-    local keep="${2:-60}"
+    # 显式第二参优先（测试与调用点用它指定），否则读 config 的 SEM_RUN_JSON_KEEP，
+    # 都没有才回落 60。这批文件是渲染前的全量文件名清单（真机单个 22 MB），保留数
+    # 直接决定本地盘上长期存着多少份未密封的完整名单——所以给旋钮，别让人改代码。
+    local keep="${2:-${SEM_RUN_JSON_KEEP:-60}}"
     [[ "$keep" =~ ^[0-9]+$ ]] || keep=60
     (( keep >= 1 )) || return 0
     [[ -d "$runs_dir" ]] || return 0

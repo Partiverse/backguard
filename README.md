@@ -153,6 +153,7 @@ backup/
 | `SEM_KEYS_DIR` | 密钥目录（默认 `~/.config/partiverse-backup/age` / `%APPDATA%\PartiverseBackup\age`） |
 | `SEM_PREFLIGHT` | 设 `0` 关闭备份前预检（默认开；预检 error 中止备份，warning 继续并留日志） |
 | `SEM_TIMELINE_KEEP` | 本地 timeline 暂存保留最近 N 份快照（默认 14，`0`=不清理；云端全量历史不受影响） |
+| `SEM_RUN_JSON_KEEP` | 本地 `runs/run-*.json` 保留最近 N 份（默认 60）。这些是渲染前的**全量文件名清单**（真机单个约 20 MB），也是唯一未密封的名单副本，嫌盘上留太多就调小 |
 | `SEM_DRILL` | 设 `0` 关闭夜间恢复演练（默认开；结论写在 `<设备>/rescue-test.txt`，30 天节流） |
 | `SEM_DRILL_COUNT` | 每轮演练的抽样条数（默认 5；`test_drill_e2e.sh` 拉满以求确定性） |
 
