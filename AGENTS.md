@@ -148,9 +148,13 @@
   它是本仓库的**纯部署 checkout**（不在上面开发）。提交进 main 后必须
   `git -C <部署目录> fetch && merge --ff-only origin/main` 才会被 nightly 用到——
   2026-09-30 就是漏了这步导致部署点落后 14 个提交、观察期数据一度无效（HANDOVER §4.1）。
-- 云端：rclone remote `Backguard:`（123Pan WebDAV），体量 2026-09-30 记「约 8–10GB」，
-  10-01 05:25 实测 `rclone size` = 329 objects / **30.79 GiB**（增长来源本会话未查，
-  记体量以云端实测为准；本地 `~/PartiverseBackup` 同时刻 7.6 GB）。实测目录形状
+- 云端：rclone remote `Backguard:`（123Pan WebDAV）。**记体量要按前缀记，别按 remote 记**：
+  10-01 05:25 `rclone size Backguard:` = 329 objects / 30.79 GiB，但其中 **24.8 GiB 是本仓库无关的
+  既有文件**（remote 根下两个 2026-08-17 的 Acronis 镜像 `Windows11_Initialization_*.tibx` 15.89 GiB、
+  `Ubuntu_Jammy_for_Dev_Initialization_*.tibx` 8.94 GiB）；backguard 自己（`Backguard:particloud-macos/`）
+  实测 7.6 GiB / 327 objects，与本地 `~/PartiverseBackup` 逐项对平（config 71 MiB / files 7.5 GiB /
+  system 327 KiB / timeline 69 MiB）——也就是说 09-30 记的「约 8–10GB」量级没错，
+  是 `rclone size` 整仓口径把它读成了增长。实测目录形状
   `Backguard:/<SYSTEM_ID>/{config,files,system,timeline}`，timeline 下即
   `<dev>/YYYY/MM/DD/HHMM-标签/`（与 `rescue.sh --base <云端目录>` 认的布局一致）。
   云端**没有** `age/`——`recovery-identity.enc` 从不推送，盲恢复目前要求密钥目录另有副本
