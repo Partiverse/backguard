@@ -492,6 +492,10 @@ jobs:
         shell: pwsh
         run: |
           # semantic.ps1 在 backup 内已执行；此处断言产物存在（windows runner 预装 python）
+          # 已知弱守卫：-Recurse 找 MANIFEST.txt 对新旧两种形状都命中，所以 Windows 侧**没有**
+          # 锁住形状。故意不加 PowerShell 断言——本机无 pwsh，写进去就是未经变异验证的守卫
+          # （假绿比缺守卫更坏）；形状由 semantic 三平台的 demo 路径 + linux/macos 的
+          # maxdepth 1 两处锁住。补这条的前提是 CI 里有能跑 pwsh 的验证位。
           $manifest = Get-ChildItem "$env:RUNNER_TEMP\repos\timeline" -Recurse -Filter "MANIFEST.txt" |
               Select-Object -First 1
           if (-not $manifest) { Write-Host "::error::timeline 无 MANIFEST.txt"; throw "no MANIFEST.txt" }
