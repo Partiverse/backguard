@@ -141,4 +141,29 @@ bash "$T/guide.sh" >"$T/guide.log" 2>&1 || fail "断言 6b：照抄 restore.md �
 find "$BASE/timeline" -maxdepth 4 -type d -name '*-partial' | grep -q . \
     || fail "断言 6c：降级后仍应产出快照（partial 标签目录不存在）"
 
-echo "E2E-OK: restore.sh 四条路径（--list / --archive --list / --latest / --id）+ 语义层 prev 归档选取 + restore.md 命令照抄可执行 + 缺数组时语义层不杀备份，均真实可用"
+# 断言 7：STORY 的两个「基线」口径必须分开（10-01 真机缺陷）。
+# parent_time 来自引擎里尚未被 prune 裁掉的上一份归档（本 fixture 是 09-29），
+# 「上一次备份」来自时间轴上的上一份快照（这里种成 10-02）。borg prune 把中间几次
+# 备份裁掉后两者能差几天：增量数字是跨这几天合计的，不断说明就是「冻住的数字」；
+# 更糟的是断档提醒若按 parent 算，保留策略会**伪造出**停摆告警。
+# 时间轴形状是 timeline/YYYY/MM/DD/HHMM-标签（深度 4，AGENTS §2 去设备层那条）
+mkdir -p "$BASE/timeline/2026/10/02/0234-night"
+SEM_TIME="2026-10-03T02:34:00" SEM_LABEL=pruned \
+    generate_semantic "config:$REPO:$newest" >"$T/gen3.log" 2>&1 \
+    || fail "断言 7：generate_semantic 失败：$(tail -5 "$T/gen3.log")"
+s7="$(find "$BASE/timeline" -mindepth 4 -maxdepth 4 -type d -name '*-pruned')"
+s7="${s7%%$'\n'*}"
+[ -n "$s7" ] || fail "断言 7：没生成 pruned 快照"
+grep -qF '上一次备份是 2026-10-02 02:34' "$s7/STORY.md" \
+    || fail "断言 7：STORY 没写时间轴口径的上一次备份（--prev-run-time 没传进 convert？）：$(cat "$s7/STORY.md")"
+grep -qF '能回到的上一份归档是 2026-09-29 02:34' "$s7/STORY.md" \
+    || fail "断言 7：STORY 没写引擎口径的上一份归档：$(cat "$s7/STORY.md")"
+grep -qF '上一次备份: 2026-10-02 02:34' "$s7/MANIFEST.txt" \
+    || fail "断言 7：MANIFEST 卡片仍用引擎口径当「上一次」（应优先时间轴口径）"
+# 距上一次备份只有 24h：不得因为 parent 归档是 4 天前就报断档
+# （`grep && fail` 在 set -e 下 grep 不命中就等于脚本退出，用 if 形式）
+if grep -qF '断档' "$s7/STORY.md"; then
+    fail "断言 7：prune 裁掉的间隔被当成断档（告警应由上一次备份触发，不是 parent 归档）"
+fi
+
+echo "E2E-OK: restore.sh 四条路径（--list / --archive --list / --latest / --id）+ 语义层 prev 归档选取 + restore.md 命令照抄可执行 + 缺数组时语义层不杀备份 + STORY 基线双口径分离，均真实可用"

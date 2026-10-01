@@ -261,7 +261,26 @@ generate_semantic() {
     fi
     label="${SEM_LABEL:-$label}"
 
+    # 「上一次备份」口径：时间轴上的上一份快照。引擎里的上一份归档（--parent-time）
+    # 可能被 borg prune 裁掉过，两者相差一天时增量数字会冻住重复——STORY 需要分开说。
+    # 布局 timeline/YYYY/MM/DD/HHMM-标签（10-01 去设备层后深度仍为 4，见 AGENTS §2）。
+    local -a prev_run_args=()
+    local p_snap p_rest p_tag p_year p_mon p_day
+    p_snap="$(find "$stage" -mindepth 4 -maxdepth 4 -type d 2>/dev/null | LC_ALL=C sort | tail -1 || true)"
+    if [[ -n "$p_snap" ]]; then
+        p_tag="${p_snap##*/}"
+        p_rest="${p_snap%/*}"
+        p_day="${p_rest##*/}"; p_rest="${p_rest%/*}"
+        p_mon="${p_rest##*/}"; p_rest="${p_rest%/*}"
+        p_year="${p_rest##*/}"
+        if [[ "$p_year" =~ ^[0-9]{4}$ && "$p_mon" =~ ^[0-9]{2}$ && "$p_day" =~ ^[0-9]{2}$ \
+              && "$p_tag" =~ ^[0-9]{4}- ]]; then
+            prev_run_args=(--prev-run-time "${p_year}-${p_mon}-${p_day}T${p_tag:0:2}:${p_tag:2:2}:00")
+        fi
+    fi
+
     if ! semantic_bg convert --engine borg "${class_args[@]}" "${prev_args[@]}" "${parent_args[@]}" \
+            "${prev_run_args[@]}" \
             --device "$DEVICE_ID" \
             --time "${SEM_TIME:-$(t="$(date +"%Y-%m-%dT%H:%M:%S%z")"; echo "${t%??}:${t: -2}")}" \
             --label "$label" --auto-strip --out "$tmp/run.json" >>"$LOG" 2>&1; then

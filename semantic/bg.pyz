@@ -461,25 +461,49 @@ def local_naive(dt: datetime | None) -> datetime | None:
     return dt
 
 
+def prev_run_time(run: dict, t: datetime | None) -> datetime | None:
+    """时间轴上上一份快照的时间（「上一次备份」口径）。
+
+    不早于本次快照的一律不认：--time 可被 SEM_TIME 覆盖（demo/补录），那种情况下
+    时间轴里的「最后一份」其实是未来，写进 STORY 会变成「上一次备份在明天」。
+    """
+    p = local_naive(parse_iso(run.get("prev_run_time")))
+    if p is None or (t is not None and p >= t):
+        return None
+    return p
+
+
 def build_story(run: dict, per_class: dict[str, DiffResult], clusters: list[Cluster],
                 streak: int) -> str:
     t = local_naive(parse_iso(run["time"]))
     parent_t = local_naive(parse_iso(run.get("parent_time")))
+    # 两个口径必须分开说（10-01 真机 9 份快照实测）：
+    #   parent_time   = 引擎里上一份**还活着**的归档——增量数字是相对它算的
+    #   prev_run_time = 时间轴上上一份快照——用户读「相比」时心里想的是这个
+    # borg prune 把当天 7 个归档裁成 1 个时，两者能差一天，数字会「冻住」重复 7 遍。
+    prev_run_t = prev_run_time(run, t)
     privacy = run.get("privacy", "standard")
     label = run.get("label", "")
     head = f"# {t.strftime('%Y-%m-%d %H:%M')} · {label}".rstrip(" ·") + "\n\n"
 
     if run.get("parent_time"):
         intro = f"这次备份相比 {parent_t.strftime('%Y-%m-%d %H:%M')}：\n\n"
+        if (prev_run_t and parent_t
+                and abs((prev_run_t - parent_t).total_seconds()) > 90):
+            intro += (f"> 口径说明：上一次备份是 {prev_run_t.strftime('%Y-%m-%d %H:%M')}，"
+                      f"但引擎里能回到的上一份归档是 {parent_t.strftime('%Y-%m-%d %H:%M')}"
+                      f"（更早的已被保留策略裁掉）——下面的增量是跨这中间几次备份的合计。\n\n")
     elif run.get("has_prev"):
         intro = "这次备份相比上一份快照：\n\n"
     else:
         intro = "这是这个仓库的第一份快照：\n\n"
 
     # 断档提醒（research/08 T1.5）：距上次备份 >48h 时置顶提示，
-    # 对抗「默默停摆」——让异常空窗在恢复的第一时间被看见
-    if parent_t and t:
-        gap_h = (t - parent_t).total_seconds() / 3600
+    # 对抗「默默停摆」——让异常空窗在恢复的第一时间被看见。
+    # 量的是「上一次备份」而不是「上一个未被裁的归档」，否则 prune 会伪造出断档。
+    gap_src = prev_run_t or parent_t
+    if gap_src and t:
+        gap_h = (t - gap_src).total_seconds() / 3600
         if gap_h > 48:
             intro += (f"> ⚠️ 距上次备份已约 {gap_h / 24:.0f} 天——中间出现了断档，"
                       f"请留意定时任务是否正常。\n\n")
@@ -586,6 +610,8 @@ def _class_stat_block(cls: str, entries: list[Entry], d: DiffResult, privacy: st
 
 def build_manifest(run: dict, per_class: dict[str, tuple[list[Entry], DiffResult]]) -> str:
     t = local_naive(parse_iso(run["time"]))
+    parent_t = local_naive(parse_iso(run.get("parent_time")))
+    prev_run_t = prev_run_time(run, t)
     privacy = run.get("privacy", "standard")
     date_line = f"{t.strftime('%Y-%m-%d')}（{WEEKDAYS[t.weekday()]}）{t.strftime('%H:%M')}"
     classes_line = "+".join(per_class.keys())
@@ -598,9 +624,10 @@ def build_manifest(run: dict, per_class: dict[str, tuple[list[Entry], DiffResult
     content.append(sub)
     sid = run.get("snapshot_id") or "(未指定)"
     line = f"快照 ID: {sid}"
-    if run.get("parent_time"):
-        pt = local_naive(parse_iso(run["parent_time"]))
-        line += f" · 上一次: {pt.strftime('%Y-%m-%d %H:%M')}"
+    if prev_run_t:
+        line += f" · 上一次备份: {prev_run_t.strftime('%Y-%m-%d %H:%M')}"
+    elif run.get("parent_time"):
+        line += f" · 上一次: {parent_t.strftime('%Y-%m-%d %H:%M')}"
     content.append(line)
     content.append(f"类别: {classes_line}" + (" · 隐私模式: 严格" if privacy == "strict" else ""))
     content.append("SEP")
@@ -725,6 +752,7 @@ def build_manifest_json(run: dict) -> bytes:
         "format": MANIFEST_FORMAT,
         "snapshot": {"id": run.get("snapshot_id"), "parent": run.get("parent_id"),
                      "time": run.get("time"), "parent_time": run.get("parent_time"),
+                     "prev_run_time": run.get("prev_run_time"),
                      "label": run.get("label")},
         "device": {"id": run.get("device"), "os": run.get("os")},
         "engine": run.get("engine"),
@@ -1136,6 +1164,8 @@ def cmd_convert(args: argparse.Namespace) -> None:
         run["parent_time"] = args.parent_time
     elif has_prev:
         run["has_prev"] = True  # 有上一代但时间未知：叙事退化为「相比上一份快照」
+    if args.prev_run_time:
+        run["prev_run_time"] = args.prev_run_time
     meta_path = Path(args.meta) if args.meta else None
     if meta_path:
         text = _read_text(meta_path)
@@ -1302,7 +1332,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="自动剥离公共路径前缀（推荐：borg/restic 绝对路径无需数段数）")
     p_conv.add_argument("--device", help="设备标识（缺省由 --meta 或 derive 提供）")
     p_conv.add_argument("--time", help="快照时间（ISO 8601；建议本地时间）")
-    p_conv.add_argument("--parent-time", help="上一代快照时间（ISO 8601，可选）")
+    p_conv.add_argument("--parent-time", help="引擎侧上一份可回到的归档时间（ISO 8601，增量口径）")
+    p_conv.add_argument("--prev-run-time",
+                        help="时间轴上上一份快照的时间（ISO 8601，「上一次备份」口径；与 --parent-time 不同即说明中间被 prune 裁过）")
     p_conv.add_argument("--label")
     p_conv.add_argument("--out", default="run.json")
     p_conv.set_defaults(func=cmd_convert)

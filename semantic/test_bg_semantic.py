@@ -283,6 +283,34 @@ class TestRendering(unittest.TestCase):
         out = bg.render_snapshot(run)
         self.assertIn("第一份快照", out["STORY.md"])
 
+    def test_story_separates_prune_baseline_from_last_backup(self):
+        # 两个口径（10-01 真机实测缺陷）：parent_time 是引擎里尚未被 prune 裁掉的上一份
+        # 归档，prev_run_time 是时间轴上的上一份快照。prune 把当天几次备份裁成 1 次后
+        # 两者能差一天，增量数字会「冻住」重复——STORY 必须把差异说出来。
+        run = bg.make_demo_run()
+        run["prev_run_time"] = "2026-09-28T02:34:00"   # 今晨那次（已被裁，不在引擎里）
+        s = bg.render_snapshot(run)["STORY.md"]
+        self.assertIn("口径说明", s)
+        self.assertIn("上一次备份是 2026-09-28 02:34", s)
+        self.assertIn("能回到的上一份归档是 2026-09-27 22:10", s)
+        # MANIFEST 卡片用「上一次备份」口径
+        self.assertIn("上一次备份: 2026-09-28 02:34", bg.render_snapshot(run)["MANIFEST.txt"])
+        # 两者一致（正常夜间节奏）时不打扰用户
+        same = bg.make_demo_run()
+        same["prev_run_time"] = same["parent_time"]
+        self.assertNotIn("口径说明", bg.render_snapshot(same)["STORY.md"])
+        # 缺 prev_run_time（老 run.json、Windows 侧还没接）→ 退化回单口径，不报错
+        self.assertNotIn("口径说明", bg.render_snapshot(bg.make_demo_run())["STORY.md"])
+
+    def test_story_gap_not_fabricated_by_prune(self):
+        # 断档提醒量的是「上一次备份」：parent 是 5 天前但昨天刚备份过，就不算断档。
+        # 若仍以 parent 为准，保留策略裁掉中间归档会伪造出停摆告警。
+        run = bg.make_demo_run()
+        run["time"] = "2026-10-02T21:00:00"
+        self.assertIn("断档", bg.render_snapshot(run)["STORY.md"])
+        run["prev_run_time"] = "2026-10-01T21:00:00"
+        self.assertNotIn("断档", bg.render_snapshot(run)["STORY.md"])
+
 
 class TestAutoStrip(unittest.TestCase):
     def test_common_prefix_depth(self):
