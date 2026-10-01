@@ -155,6 +155,7 @@ backup/
 | `SEM_RUN_JSON_KEEP` | 本地 `runs/run-*.json` 保留最近 N 份（默认 60）。这些是渲染前的**全量文件名清单**（真机单个约 20 MB），也是唯一未密封的名单副本，嫌盘上留太多就调小 |
 | `SEM_DRILL` | 设 `0` 关闭夜间恢复演练（默认开；结论写在 `<设备>/rescue-test.txt`，30 天节流） |
 | `SEM_DRILL_COUNT` | 每轮演练的抽样条数（默认 5；`test_drill_e2e.sh` 拉满以求确定性） |
+| `SEM_CLOUD_VERIFY` | 设 `0` 关闭每轮的**云端副本自证**（默认开）。推送全报成功后，再按「本地对象是否都在云端且尺寸一致 + 仓库 `config` 内容哈希」复核一次，结论写 `timeline/CLOUD-VERIFY.txt`。存在的理由：某些网盘（WebDAV）上 rclone 的比较退化成只比大小，原地同长度重写永远推不上云而 copy 照样退出 0——`rclone 没报错` 不等于 `云端有新版` |
 
 备份前预检（`bg preflight`）会检查：include 路径有效性、iCloud/OneDrive 占位文件
 （未真正落盘的"半真文件"）、.git 被静默排除、磁盘空间、引擎版本下限、

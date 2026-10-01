@@ -29,6 +29,11 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # run 边界行的耗时起点：从脚本入口算，不含「config 加载花了多久」这段日志里看不见的空白
 RUN_START_TS="$(date +%s)"
+# 本轮的代码基：部署树是纯 checkout，「哪一轮跑的什么代码」只能靠这个 SHA 回答
+# （run 边界行与 CLOUD-VERIFY.txt 共用；取不到就是 nogit，不报错）
+RUN_GIT_SHA="$( { git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true; } )"
+RUN_GIT_SHA="${RUN_GIT_SHA%%$'\n'*}"
+[[ "${RUN_GIT_SHA}" =~ ^[0-9a-f]{7,40}$ ]] || RUN_GIT_SHA=nogit
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/partiverse-backup"
 LOG_DIR="$HOME/.local/share/partiverse-backup"
 # 全程 umask 077：本次运行新建的每个文件（backup.log / sem.log / drill.log /
@@ -216,6 +221,201 @@ resolve_targets() {
     fi
 }
 
+# ---------- 云端可信副本的清单级自证（research/11 A6 L1） ----------
+# 为什么「copy 退出 0」不算证据：123Pan 这条 remote 上 rclone 拿不到 modtime/hash，比较
+# 退化成**只比大小**（AGENTS §2）。10-01 实测过后果——borg 换口令后三个 `config` 从 700 B
+# 变成 700 B，nightly 报告「同步完成」，云端躺着的仍是轮换前那份。所以每轮备份后自己
+# 对平一次：本地每个对象都必须在云端存在且尺寸一致（**单向包含**——云端只增不减，
+# 本地 prune 掉的历史副本仍留在云上，多出来不算失败）。
+# 分层：L1 清单级（这里，零提取流量）抓「没上去 / 少一份 / 云端被改动」；
+# 「同长度不同内容」L1 天生抓不住，由仓库 `config` 的**内容哈希**（几百字节，key blob
+# 就在里面，正是 10-01 那次没传播的东西）单独一档，再加 L2 月度逐文件哈希、L3 异机盲恢复。
+# 网盘抖动记 UNKNOWN：既不改退出码也不算证成——把 flake 报成 FAIL 会让告警通道失去信任。
+# 不一致里有一类是**已知能当场修好**的（仓库 config 的同长度重写）：先 forcing 补传再复核，
+# 修好了记 HEALED（本轮结论依旧可信，但「云端刚躺着一份陈旧的 key blob」必须留痕）。
+verify_failed=0
+verify_unknown=0
+verify_healed=0
+VERIFY_LINES=()
+CLOUD_VERIFY_REPORT=""
+
+note_verify() {   # $1=检查名 $2=PASS|FAIL|SKIP|UNKNOWN|HEALED $3=详情
+    VERIFY_LINES+=("$(printf '%-8s %-30s %s\n' "$2" "$1" "$3")")
+    case "$2" in
+        FAIL) verify_failed=$((verify_failed + 1)) ;;
+        UNKNOWN) verify_unknown=$((verify_unknown + 1)) ;;
+        HEALED) verify_healed=$((verify_healed + 1)) ;;
+    esac
+}
+
+# macOS 无 sha256sum、Linux 无 shasum；launchd 的受限 PATH 里两者都在 /usr/bin。
+SHA256_CMD=""
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA256_CMD="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA256_CMD="shasum -a 256"
+fi
+sha256_stdin() {
+    [[ -n "$SHA256_CMD" ]] || return 1
+    # shellcheck disable=SC2086  # 两个词是命令本身，分词是有意的
+    $SHA256_CMD | cut -d' ' -f1
+}
+
+# 本地清单：`<相对路径>\t<字节>`，按路径排序。`rescue-test.txt` 从对平里摘掉——红线 §1.1
+# 规定它只留本地（它在云端出现另有专门一条 FAIL 检查），本地有、云端没有才是对的形状。
+# 报告自己不用摘：run_cloud_verify 是**先比对、后落笔**，比对那一刻躺着的还是上一轮那份，
+# 它已经随这一轮的时间轴推送上云了，两端同尺寸。
+local_listing() {   # $1=root
+    local root="$1" f sz out=""
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+        [[ -n "$sz" ]] || continue
+        out+="${f#"$root"/}"$'\t'"$sz"$'\n'
+    done < <(find "$root" -type f ! -name 'rescue-test.txt' 2>/dev/null)
+    printf '%s' "$out" | LC_ALL=C sort
+}
+
+# `rclone lsl` 每行是「size 日期 时间 路径」；路径可能含空格，所以摘掉前三个字段而不是
+# 按空格切——输出统一成和本地一样的 `<路径>\t<size>` 并排序。
+cloud_listing_from_lsl() {
+    awk '{ sz=$1; p=$0;
+            sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", p);
+            printf "%s\t%s\n", p, sz }' | LC_ALL=C sort
+}
+
+# 差异样本只到**目录**：这份报告是明文产物且随时间轴上云，红线 §1.1 的例外只有
+# rescue-test.txt 那一个。定位到目录已经够用——要补传的是那一棵子树，不是一个神秘文件名。
+dir_sample() {   # $1=相对路径清单（换行分隔）→ 前 3 条所在目录，去重后空格连接
+    local p
+    { printf '%s\n' "$1" | sed -n '1,3p'; } | {
+        while IFS= read -r p; do
+            [[ -n "$p" ]] || continue
+            if [[ "$p" == */* ]]; then printf '%s\n' "${p%/*}"; else printf '（根级）\n'; fi
+        done
+    } | LC_ALL=C sort -u | tr '\n' ' '
+}
+
+# 单个前缀的清单对平：$1=本地目录 $2=云端前缀 $3=检查名 $4=是否查隐私残留（1=是）
+verify_one_prefix() {
+    local root="$1" dest="$2" label="$3" privacy="${4:-}"
+    local lstd cstd rc=0 missing bad extra miss_paths bad_paths
+    [[ -d "$root" ]] || { note_verify "$label" "SKIP" "本地没有这一棵树（该类别没备份或路径变了）"; return 0; }
+    lstd="$(local_listing "$root")"
+    cstd="$( { "$RCLONE" lsl "$dest" 2>>"$RCLONE_LOG" | cloud_listing_from_lsl; } )" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        note_verify "$label" "UNKNOWN" "rclone lsl rc=${rc}（网盘抖动或该前缀读不出），这一项既没证成也没证败"
+        return 0
+    fi
+    # 红线 §1.1 的自证面：`rescue-test.txt` 逐条写着抽样文件的完整路径，规定只留本地。
+    # 推送环节的 --exclude 只挡**新**副本——10-01 真机上那条老副本就是这么一直躺在云端的。
+    # 所以云端清单里只要出现这个名字就是违例，无论它是怎么上去的。
+    # 只对时间轴前缀查：引擎仓库是 borg 自己的对象存储，同名文件不可能由我们推上去，
+    # 逐类别查只会把报告灌满永远 PASS 的行。
+    if [[ "$privacy" == "1" ]]; then
+        if printf '%s\n' "$cstd" | cut -f1 | grep -qE '(^|/)rescue-test\.txt$'; then
+            note_verify "privacy @ ${label#* @ }" "FAIL" "云端时间轴里有 rescue-test.txt（红线 §1.1：它带完整文件名，只准留本地；--exclude 挡不住历史副本，得手工删）"
+        else
+            note_verify "privacy @ ${label#* @ }" "PASS" "云端时间轴没有 rescue-test.txt"
+        fi
+    fi
+    # 三条计数都走 `|| true`：grep -c 命中 0 行时 rc=1，pipefail 下会把这轮自证自己炸掉
+    miss_paths="$( { comm -23 <(printf '%s\n' "$lstd" | cut -f1) <(printf '%s\n' "$cstd" | cut -f1); } || true )"
+    bad_paths="$( { join -t$'\t' <(printf '%s\n' "$lstd") <(printf '%s\n' "$cstd") \
+        | awk -F'\t' '$2!=$3 { print $1 }'; } || true )"
+    missing="$(printf '%s\n' "$miss_paths" | grep -c . || true)"
+    bad="$(printf '%s\n' "$bad_paths" | grep -c . || true)"
+    extra="$( { comm -13 <(printf '%s\n' "$lstd" | cut -f1) <(printf '%s\n' "$cstd" | cut -f1) | grep -c .; } || true )"
+    if [[ "${missing:-0}" == "0" && "${bad:-0}" == "0" ]]; then
+        note_verify "$label" "PASS" "本地 $(printf '%s\n' "$lstd" | grep -c . || true) 个对象云端全在且尺寸一致（云端另有 ${extra:-0} 份本地已裁的历史副本，按只增不减不计失败）"
+        return 0
+    fi
+    # 差异样本**只到目录**，不带文件名：这份报告是明文产物且随时间轴上云，红线 §1.1 说得很
+    # 死——例外只有 rescue-test.txt 那一个，而它只留本地。今天被校验的两棵树（时间轴产物 /
+    # 引擎 chunk）名字都是系统生成的，看着无害，但「反正调用点选的是我们自己的目录」不是一道
+    # 闸门：校验面哪天扩到 system-meta/（mounts/crontab 转储，里面全是用户路径）就会顺着这里漏。
+    # 定位到目录已经够用——要补传的是那一棵子树，不是一个神秘文件名。
+    note_verify "$label" "FAIL" "云端缺 ${missing:-0} 个 / 尺寸不符 ${bad:-0} 个；缺失所在目录：$(dir_sample "$miss_paths")；尺寸不符所在目录：$(dir_sample "$bad_paths")"
+}
+
+# 仓库 config 的内容哈希：这是 10-01 那次「同长度重写永远推不上云」的正面对策。
+# 发现不一致不能只一报了事——在这条 remote 上它永远不会自己修好（尺寸相同 → rclone 直接
+# 跳过），所以按 AGENTS §2 的办法**显式 forcing 补传那一个文件**再复核：修好了记 HEALED，
+# 修不好才是 FAIL。判平只认内容哈希，「copy 退出 0」在这条 remote 上什么都没证明。
+verify_config_hash() {   # $1=本地仓库目录 $2=云端仓库前缀 $3=检查名
+    local repo="$1" dest="$2" label="$3"
+    local lhash="" chash="" stale_cloud="" rc=0 heal_rc=0
+    [[ -f "$repo/config" ]] || { note_verify "$label" "SKIP" "本地仓库没有 config"; return 0; }
+    [[ -n "$SHA256_CMD" ]] || { note_verify "$label" "SKIP" "本机既无 sha256sum 也无 shasum"; return 0; }
+    lhash="$(sha256_stdin < "$repo/config")"
+    [[ -n "$lhash" ]] || { note_verify "$label" "UNKNOWN" "本地 config 哈希失败"; return 0; }
+    chash="$( { "$RCLONE" cat "$dest/config" 2>>"$RCLONE_LOG" | sha256_stdin; } )" || rc=$?
+    if [[ $rc -ne 0 || -z "$chash" ]]; then
+        note_verify "$label" "UNKNOWN" "云端 config 读取失败 (rc=${rc})"
+        return 0
+    fi
+    if [[ "$chash" == "$lhash" ]]; then
+        note_verify "$label" "PASS" "sha256 ${lhash:0:12}… 两端一致（key blob 云端有新版）"
+        return 0
+    fi
+    # 先把云端那份陈旧证据留下来（报告里要能看出它躺了多久），再补传
+    stale_cloud="$chash"
+    "$RCLONE" copy -I "$repo" "$dest" --include "config" >>"$RCLONE_LOG" 2>&1
+    heal_rc=$?
+    rc=0
+    chash="$( { "$RCLONE" cat "$dest/config" 2>>"$RCLONE_LOG" | sha256_stdin; } )" || rc=$?
+    if [[ $rc -ne 0 || -z "$chash" ]]; then
+        note_verify "$label" "UNKNOWN" "强制补传 (rc=${heal_rc}) 之后云端 config 反而读不到了"
+    elif [[ "$chash" == "$lhash" ]]; then
+        note_verify "$label" "HEALED" "云端原是 ${stale_cloud:0:12}…（同长度重写正是被「只比大小」静默丢掉的那类），已强制补传成 ${lhash:0:12}…"
+    else
+        note_verify "$label" "FAIL" "强制补传 (rc=${heal_rc}) 后仍 本地 ${lhash:0:12}… ≠ 云端 ${chash:0:12}…——云端副本不可信"
+    fi
+}
+
+# 全量自证：每个目标 × 时间轴 + 每个类别仓库，结论写进时间轴根级 CLOUD-VERIFY.txt。
+# repo_pairs 由 main 维护（元素 `类别:本地仓库路径`）——bash 的动态作用域让被调函数看得见
+# main 的 local，这里不另设全局；用全局变量而不是 nameref 传数组，是为了不额外抬高对
+# bash 4.3 的版本要求（AGENTS §2 的 3.2/5 双轨）。
+run_cloud_verify() {
+    local tgt dest pair cls repo
+    VERIFY_LINES=()
+    verify_failed=0
+    verify_unknown=0
+    verify_healed=0
+    for tgt in "${BACKUP_TARGETS[@]}"; do
+        dest="$(sed 's|:/*|:|g' <<< "${tgt}/${SYSTEM_ID}")"
+        verify_one_prefix "$BACKUP_BASE/timeline" "$dest/timeline" "timeline @ ${tgt}" 1
+        for pair in ${repo_pairs[@]+"${repo_pairs[@]}"}; do
+            cls="${pair%%:*}"
+            repo="${pair#*:}"
+            verify_one_prefix "$repo" "$dest/$cls" "repo:$cls @ ${tgt}"
+            verify_config_hash "$repo" "$dest/$cls" "config:$cls @ ${tgt}"
+        done
+    done
+
+    CLOUD_VERIFY_REPORT="$BACKUP_BASE/timeline/CLOUD-VERIFY.txt"
+    {
+        printf '# 云端副本自证（A6 L1）——每轮备份后跑一次，零提取流量\n'
+        printf '# 生成时间: %s   代码基: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${RUN_GIT_SHA:-nogit}"
+        printf '# 判定口径: 单向包含。本地每个对象都必须在云端且尺寸一致；云端多出来的是本地\n'
+        printf '#   已被保留策略裁掉的历史副本（云端只增不减，AGENTS §1.4），不计失败。\n'
+        printf '#   同长度不同内容这一档 L1 抓不住，所以仓库 config 单独走内容哈希（下面\n'
+        printf '#   config: 那几条）：不一致就当场 forcing 补传那一个文件再复核——修好了记\n'
+        printf '#   HEALED（云端曾躺着陈旧 key blob，得留痕），修不好才是 FAIL。其余文件由\n'
+        printf '#   L2 月度逐文件哈希与 L3 异机盲恢复覆盖。\n'
+        printf '# 本文件随**下一轮**时间轴推送上云：比对发生在落笔之前，所以它比的是上一轮那份。\n'
+        printf '# 汇总: checks=%d FAIL=%d UNKNOWN=%d HEALED=%d\n' \
+            "${#VERIFY_LINES[@]}" "$verify_failed" "$verify_unknown" "$verify_healed"
+        local vline
+        for vline in ${VERIFY_LINES[@]+"${VERIFY_LINES[@]}"}; do printf '%s\n' "$vline"; done
+    } > "$CLOUD_VERIFY_REPORT" 2>/dev/null || {
+        warn "[verify] CLOUD-VERIFY.txt 写入失败（不阻断备份）"
+        CLOUD_VERIFY_REPORT=""
+    }
+    chmod 600 "$CLOUD_VERIFY_REPORT" 2>/dev/null || true
+}
+
 # ---------- 语义层（research/06：MANIFEST.txt/STORY.md/restore.md） ----------
 # 非致命：语义层任何失败只告警，不影响备份结论
 if [[ -f "$SCRIPT_DIR/semantic/semantic.sh" ]]; then
@@ -260,7 +460,8 @@ collect_meta() {
 # 2) run 边界行。一轮一行写明「哪个代码基、退出码、跑了多久」——夜间出问题时，
 #    「这条错误属于哪一轮、那轮部署点是什么 SHA」现在全靠翻提交时间猜。
 rotate_log_if_oversized() {
-    local f="$1" size max keep base stale g
+    local f="$1"
+    local size max keep base stale g
     [[ -f "$f" ]] || return 0
     size="$(wc -c < "$f" 2>/dev/null || true)"
     size="${size//[^0-9]/}"
@@ -298,16 +499,13 @@ rotate_log_if_oversized() {
 }
 
 log_run_boundary() {
-    local rc="$1" sha dur
+    local rc="$1" dur
     # LOG 在 main 里才定稿（config 可覆盖），早退的轮次没有落点就整条跳过——
     # 边界行本身属于旁路，绝不反过来把备份拖进 set -u 的致命变量错误
     [[ -n "${LOG:-}" ]] || return 0
-    sha="$( { git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || true; } )"
-    sha="${sha%%$'\n'*}"
-    [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]] || sha=nogit
     dur=$(( $(date +%s) - ${RUN_START_TS:-$(date +%s)} ))
     printf '[%s] run 边界: sha=%s rc=%s dur=%ss\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')" "$sha" "$rc" "$dur" >> "$LOG" || true
+        "$(date '+%Y-%m-%d %H:%M:%S')" "${RUN_GIT_SHA:-nogit}" "$rc" "$dur" >> "$LOG" || true
 }
 
 # ---------- 主流程 ----------
@@ -452,6 +650,8 @@ main() {
 
     local failed=0
     local -a sem_archives=()
+    # 云端自证要拿「本地仓库在哪」当输入，两个引擎分支各登记一次（类别:路径）
+    local -a repo_pairs=()
     # 带时区，与 --parent-time 口径一致（bg 统一转本地显示）；
     # %z 产 ±HHMM，py<3.11 的 fromisoformat 不认——补冒号为 ±HH:MM
     SEM_TIME="$(date +"%Y-%m-%dT%H:%M:%S%z")"
@@ -465,6 +665,7 @@ main() {
             # restic-under-MSYS 路径：语义层由 backup.ps1（semantic.ps1）提供，M0 不在此覆盖
             local repo_path="$BACKUP_BASE/restic-$cls"
             backup_restic_class "$cls" "$repo_path" "$archive_name" || { failed=$((failed+1)); continue; }
+            repo_pairs+=("$cls:$repo_path")
             if [[ "${SKIP_WEBDAV:-0}" != "1" ]]; then
                 local tgt
                 for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$repo_path" "${tgt}/${SYSTEM_ID}/${cls}"; done
@@ -473,6 +674,7 @@ main() {
             local repo="$BACKUP_BASE/borg-$cls"
             backup_borg_class "$cls" "$repo" "$archive_name" || { failed=$((failed+1)); continue; }
             sem_archives+=("$cls:$repo:$archive_name")
+            repo_pairs+=("$cls:$repo")
             if [[ "${SKIP_WEBDAV:-0}" != "1" ]]; then
                 local tgt
                 for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$repo" "${tgt}/${SYSTEM_ID}/${cls}"; done
@@ -501,6 +703,23 @@ main() {
     if [[ $cloud_failed -gt 0 ]]; then
         error "=== 本地完成，云端同步失败 $cloud_failed/$cloud_total 次——云端可能没有本次备份（详见 ${RCLONE_LOG}） ==="
         notify_alert "云端同步失败 $cloud_failed/$cloud_total 次（设备 ${DEVICE_ID}），云端可能没有本次备份。详见 $RCLONE_LOG"
+        exit 1
+    fi
+    # A6 L1：上面两条只回答「rclone 没报错」。这一步才回答「云端到底有没有」——
+    # 只在一切自称成功之后跑（本地失败或推送失败时结论已经定了，再花几分钟列云端没意义）。
+    if [[ "${SKIP_WEBDAV:-0}" != "1" && "${SEM_CLOUD_VERIFY:-1}" == "1" \
+          && ${#BACKUP_TARGETS[@]} -gt 0 && -n "${RCLONE:-}" ]]; then
+        run_cloud_verify || warn "[verify] 自证流程异常退出（少一份证据，不改备份结论）"
+        if [[ $verify_healed -gt 0 ]]; then
+            warn "[verify] ${verify_healed} 个仓库 config 与云端不一致，已当场强制补传修好——这类不一致推送永远不会自己带走（详见 ${CLOUD_VERIFY_REPORT}）"
+        fi
+        if [[ $verify_unknown -gt 0 ]]; then
+            warn "[verify] $verify_unknown 项 UNKNOWN：网盘读不出清单，这一轮没证成也没证败"
+        fi
+    fi
+    if [[ $verify_failed -gt 0 ]]; then
+        error "=== 推送都报成功，但云端副本自证 $verify_failed 项不一致——云端副本不可信（详见 ${CLOUD_VERIFY_REPORT}） ==="
+        notify_alert "云端副本自证失败 $verify_failed 项（设备 ${DEVICE_ID}）：本地有的对象在云端缺失、尺寸不符，或强制补传后仍不同步。详见 ${CLOUD_VERIFY_REPORT}"
         exit 1
     fi
     success "=== Backup FULLY COMPLETE ($(date '+%Y-%m-%d %H:%M:%S')) ==="

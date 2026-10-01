@@ -238,6 +238,15 @@ jobs:
           # （宽 glob + 两道守卫）；run 边界行一轮一行并如实带失败轮的 rc
           bash test_log_rotation.sh
 
+      - name: E2E cloud copy self-proof
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          # A6 L1：推送报成功之后按「清单单向包含 + 仓库 config 内容哈希」自证云端副本。
+          # 同长度改写（rclone 只比大小看不见的那类）须被当场 forcing 补传并记 HEALED，
+          # 网盘读不出记 UNKNOWN 且不改退出码，补传后复核仍不符才是 FAIL
+          bash test_cloud_verify.sh
+
   macos:
     runs-on: macos-latest
     # 实测 macos job 76 分钟（dd4de89 那轮：runner 派工 18:36 → 完成 19:52）——

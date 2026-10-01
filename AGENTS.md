@@ -18,7 +18,11 @@
    路径，天生带文件名，所以它**只留本地、不随时间轴上云**，由 `backup.sh` 推 timeline
    时的 `SYNC_EXCLUDES` 挡住，`test_multi_target.sh` 锁行为——10-01 真机演练后才暴露）（一级目录名之外的任何细化都必须命中 known_dirs 目录证据——
    纯文件清单里二级/三级的最后一段可能就是文件名，无证据退回一级；凭据类
-   目录只写数量；根级散文件聚类不显示名称）。unittest 有测试锁定，改渲染逻辑先跑测试。
+   目录只写数量；根级散文件聚类不显示名称）。**任何新写的、会随时间轴上云的明文产物同受这条
+   约束，包括机器报告**：`CLOUD-VERIFY.txt` 的差异样本因此只到**目录**为止（`dir_sample`），
+   哪怕今天被校验的两棵树都是系统生成的名字也不行——「反正调用点选的是我们自己的目录」不是一道
+   闸门，将来校验面扩到 `system-meta/` 那天它就漏了；守卫见 `test_cloud_verify.sh` 第 6 段。
+   unittest 有测试锁定，改渲染逻辑先跑测试。
 2. **凭据纪律**：口令/密钥/恢复码/token 只进 `secrets.env`（600）或 age 密钥目录，
    永不入库、不进日志、不进 issue/截图；文档示例一律占位符。
    **第三方服务的响应体也算凭据**：公共 `ntfy.sh` 的回执 JSON 里有 `"topic"`，而 topic
@@ -110,6 +114,20 @@
   `rclone copy -I <本地> <目标> --include <那个文件>`，判平用 `rclone cat … | shasum`
   对比本地——**别拿「copy 退出 0」当云端有新版**。新 remote 接入先跑 `test_remote_caps.sh`
   并登记能力台账（research/05 §1.5，本地），台账里要记「比较依据是 size 还是 hash」。
+- **云端副本自证（`SEM_CLOUD_VERIFY`，默认开，10-01 落地，roadmap A6 L1）判平只认内容**：
+  上一条的产品化对策。推送全报成功之后，`run_cloud_verify` 按两件事复核——①清单**单向包含**
+  （本地每个对象云端都在且同尺寸；云端多出来的是本地已裁的历史副本，按红线 §1.4 只增不减
+  **不计失败**，写成双向相等就每晚假报）；②仓库 `config` 的 sha256（`rclone cat … | sha256`）
+  ——结论写 `$BACKUP_BASE/timeline/CLOUD-VERIFY.txt`（**先比对后落笔**，所以它随下一轮时间轴
+  推送才上云，从不自指；本地那份 `rescue-test.txt` 必须在清单里摘掉，否则每晚假报云端少一份）。
+  状态四档：`PASS` / `HEALED`（发现云端是陈旧那份，当场 `-I --include config` forcing 补传
+  **并重新读回核对**过）/ `UNKNOWN`（网盘读不出，没证成也没证败，**不改退出码**——把抖动报成
+  失败会让告警通道失去信任）/ `FAIL`（补传后仍不符，或云端缺对象/尺寸不符 → 非零退出 + 告警）。
+  **`HEALED` 只能由重新读过的内容换来，`rclone copy` 退出 0 在这条 remote 上什么都没证明。**
+  守卫 `test_cloud_verify.sh`（rclone 桩只伪造 `lsl`/`cat`，其余子命令转发真实二进制；15 条变异）。
+  **别拿 `chmod 444` 造「云端那个文件写不进去」**：rclone 默认**非原地写**（目标目录建临时文件
+  再 rename），只读的小文件本身挡不住替换，实测反而把不一致修好了 → 假 FAIL 断言踩空；要造
+  「补传后仍不一致」就让桩在 `cat` 上撒谎。
 - **`ls -1t "$f".*` 对目录操作数打印的是「目录的内容」，不是目录本身**——想按 mtime 排「这些
   路径」必须加 `-d`（`ls -1dt`）。10-01 日志轮转的守卫因此没被测到：同名目录压根没进删除候选，
   摘掉「必须是普通文件」那道变异**E2E 全绿**。更阴的是两个 bug 互相掩盖：不加 `-d` 时 ls 给
@@ -185,8 +203,10 @@
    `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）/
    `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）/
    `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）/
-   `test_log_rotation.sh`（日志轮转 + run 边界行）。十套都已挂 CI
-   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init/log_rotation），
+   `test_log_rotation.sh`（日志轮转 + run 边界行）/
+   `test_cloud_verify.sh`（云端副本自证：单向包含 + config 内容哈希 + HEALED/UNKNOWN 分档）。
+   十一套都已挂 CI
+   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init/log_rotation/cloud_verify），
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
@@ -195,7 +215,7 @@
    的跨类别取回错配正是藏在这层遮罩下。**「CI 绿」≠「跑过」，先确认守卫那条 step 真的执行了。**
    新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；`test_portable_stat.sh` 的断言 4
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
-   **改目录形状时 `.github/workflows/ci.yml` 里那些硬编码路径也是被测面**——本机九条 E2E
+   **改目录形状时 `.github/workflows/ci.yml` 里那些硬编码路径也是被测面**——本机 E2E
    全绿也看不见它：10-01 时间轴去设备层那一改，`semantic (linux/macos/windows)` 三条一起红在
    `base=demo_output/<dev>/YYYY/…` 这行。改完先 `grep -n 'timeline\|demo_output' .github/workflows/ci.yml`
    把所有形状相关断言找齐，再逐字节复刻那条 step 的命令跑一次（**日期路径在转录里会被显示成连字符**，
@@ -213,6 +233,13 @@
    （`grep -q <变异标记>`）：10-01 迁移驱动的变异用整段字符串匹配，没匹配上时 python 抛
    AssertionError，而 runner 没 `set -e` 就继续拿**未变异的驱动**跑完夹具，得出「新断言
    咬不住」的假结论；改成按行号替换 + 落上校验后，同一条断言当场报错。
+   **一条主张配一个专属变异，断言的先后顺序就是诊断本身**：同一轮里「某条检查没判 FAIL」
+   和「FAIL 不改退出码」是两种坏法，若退出码那条写在前面，两种坏法会撞成同一句报错，读的人
+   分不清坏在哪一步——A6 首轮变异 m2/m10/m11 三个都报「仍宣布 FULLY COMPLETE」，把
+   **「哪条检查抓到了它」挪到「它改了退出码」之前**才各自报对自己的原因（`test_cloud_verify.sh`
+   §4/§5a/§7 的注释记着这条规矩）。同理，**新增一类校验对象要先确认它真进了清单**：自证第一版
+   borg 分支漏登记 `repo_pairs`，三类仓库根本没被校验，而 E2E 全绿——是报告头部的
+   `checks=2` 暴露的，所以**汇总计数行值得单独断言**，别只看「有没有 FAIL」。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、

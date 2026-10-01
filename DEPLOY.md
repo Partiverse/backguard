@@ -60,6 +60,9 @@ echo 'export SEM_TIMELINE_KEEP=14' >> ~/.config/partiverse-backup/config.sh
 # 只切 $LOG_DIR 下点名的四份（backup/rclone/sem/drill）；launchd.{out,err}.log 由 launchd 持句柄，不动。
 echo 'export SEM_LOG_MAX_BYTES=4194304' >> ~/.config/partiverse-backup/config.sh
 echo 'export SEM_LOG_KEEP=7' >> ~/.config/partiverse-backup/config.sh
+# 云端副本自证（默认开，`SEM_CLOUD_VERIFY=0` 关）：推送全报成功之后，再按「本地对象是否
+# 都在云端且尺寸一致 + 仓库 config 内容哈希」复核一次，结论写 timeline/CLOUD-VERIFY.txt。
+# 判读口径见下面「再跑完整链路」那段
 
 # ③ 救援身份的密文另存第二处（第二台设备 / 加密 U 盘）
 #    云端副本里**没有** age/ 目录：recovery-identity.enc 从不推送，所以「干净机器 +
@@ -89,6 +92,17 @@ SKIP_WEBDAV=1 ./backup.sh        # 先本地验证，不触云（备份前会自
 #      单个几十 MB 级）与 system-meta/ 转储仍是 0644。backup.sh 每次运行幂等地整树收紧，
 #      老设备跑到新提交即自动修好，无需改 plist（日志里是引擎输出的完整路径，同机用户不该可读）。
 ./backup.sh                      # 再跑完整链路（含 WebDAV）
+# 云端副本自证（A6 L1）判读：$BACKUP_BASE/timeline/CLOUD-VERIFY.txt 每轮重写一次，汇总行
+# `# 汇总: checks=N FAIL=0 UNKNOWN=0 HEALED=0`。四种状态：
+#   PASS    —— 本地每个对象云端都在且尺寸一致；仓库 config 的内容哈希两端相同
+#   HEALED  —— 发现云端那份是陈旧的，已当场 forcing 补传那一个文件并**重新读回核对**过。
+#             这类不一致推送永远不会自己带走（网盘只比大小，原地同长度重写被判「已同步」），
+#             出现一次是对的，天天出现说明推送清单有问题
+#   UNKNOWN —— 这一轮网盘读不出清单/内容：没证成也没证败，**不改退出码**（把抖动报成失败
+#             会让告警通道失去信任）
+#   FAIL    —— 补传之后仍对不上，或云端缺对象/尺寸不符 → 整轮非零退出 + ntfy 告警
+# 这份报告自己也随下一轮时间轴推送上云（比对发生在落笔之前，所以它从不自指），
+# 异机排查时云端就能看到上一轮的结论。
 launchctl list | grep partiverse # 调度在位（init.sh 已注册，每日 02:34）
 # launchd 那一次的现场在 ~/.local/share/partiverse-backup/launchd.{out,err}.log
 # （plist 的 StandardOut/ErrorPath 指过去；不配的话 stdout 落进 os_log，跑挂只剩退出码）
