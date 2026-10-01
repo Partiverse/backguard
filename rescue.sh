@@ -5,9 +5,9 @@
 # bash + borg/restic + age，就能只凭「备份目录副本 + 恢复材料」取回文件。
 # 目标：30 分钟内盲恢复任一路径。
 #
-# 两种目录布局都认：
-#   本机      <base>/borg-<cls>/     + <base>/timeline/<设备>/YYYY/MM/DD/HHMM-标签/
-#   云端副本  <base>/<cls>/          + <base>/timeline/<设备>/…（<base> = 挂载点/<系统标识>/）
+# 两种目录布局都认（时间轴自 10-01 起不带设备层，两种布局下同形）：
+#   本机      <base>/borg-<cls>/     + <base>/timeline/YYYY/MM/DD/HHMM-标签/
+#   云端副本  <base>/<cls>/          + <base>/timeline/…（<base> = 挂载点/<系统标识>/）
 
 set -euo pipefail
 
@@ -28,14 +28,15 @@ usage() {
 rescue.sh — 只凭备份目录副本 + 恢复材料取回文件
 
   ./rescue.sh --guide                                     先读这个：目录结构与恢复步骤
-  ./rescue.sh --base <目录> --list                         列档案 / 归档（快照）/ 设备目录
+  ./rescue.sh --base <目录> --list                         列档案 / 归档 / 时间轴快照
   ./rescue.sh --base <目录> --class files --find <模式>     在归档内按字面量搜路径
   ./rescue.sh --base <目录> --class files --get <路径> --to <目录>    取回（默认最新归档）
   ./rescue.sh --base <目录> --ledger --find <模式>          解封账本后跨档案搜（含大小）
 
 参数
   --base <目录>      备份根，默认 ~/PartiverseBackup；云端副本请指向 <挂载>/<系统标识>
-  --device <设备名>  时间轴下多于一个设备时必须指定（--list 会列出来）
+  --device <设备名>  只用于归档名前缀过滤（borg 归档名 = <设备>-<类别>-<日期>）；
+                     默认从 timeline/profile.json 的 device_id 推断，认不出就全量取最新
   --class <类别>     config | files | system
   --archive <名称>   borg 归档名 / restic 快照 ID；默认取该档案最新一个
   --to <目录>        取回目标目录（不存在则创建）
@@ -59,13 +60,15 @@ guide() {
    borg-config/  或  config/    配置文件档案（引擎仓库）
    borg-files/   或  files/      个人文件档案
    borg-system/  或  system/     系统状态档案
-   timeline/<设备>/YYYY/MM/DD/HHMM-标签/
+   timeline/YYYY/MM/DD/HHMM-标签/
         MANIFEST.txt        明文摘要（只有目录级证据，永不含完整文件名）
         STORY.md            这次备份变了什么（自然语言）
         restore.md          恢复步骤
         manifest.json.enc   完整文件清单（age 密封，含路径与大小）
         exclusions.json     排除规则
-   timeline/<设备>/rescue-test.txt   最近一次恢复演练的结果与日期
+   timeline/profile.json           设备档案（品牌原名与 device_id）
+   timeline/rescue-test.txt        最近一次恢复演练的结果与日期
+   （10-01 前的旧副本在 timeline 下多一层 <设备> 目录，本脚本两种形状都认）
 
 2) 定位文件（两条路，任选）
 
@@ -189,21 +192,40 @@ need_engine() {
     esac
 }
 
-# 时间轴下只有一个设备目录时直接用它；多于一个返回空，让调用方决定报不报错
-detect_device() {
-    [[ -n "$DEVICE" ]] && { echo "$DEVICE"; return 0; }
-    [[ -d "$BASE/timeline" ]] || return 0
-    local dirs
-    dirs="$( (cd "$BASE/timeline" && find . -mindepth 1 -maxdepth 1 -type d | sed 's|^\./||' | sort; true) )"
-    [[ "$(count_lines "$dirs")" == "1" ]] || return 0
-    printf '%s\n' "$dirs" | head -1
+# 时间轴根解析。两种形状都认，因为**这是最后一道逃生工具，它必须能读迁移前的旧副本**：
+#   新形（10-01 起）  <base>/timeline/YYYY/MM/DD/HHMM-标签/
+#   旧形             <base>/timeline/<设备>/YYYY/MM/DD/HHMM-标签/
+# 判据是第一层像不像年份（四位数字）：像就按新形，不像且只有一个子目录就退回旧形。
+# 设备名不再从目录反推——改读 profile.json 的 device_id（旧形里它就在设备目录下）。
+timeline_base() {
+    [[ -d "$BASE/timeline" ]] || { printf '\n'; return 0; }
+    local year sub
+    year="$(find "$BASE/timeline" -mindepth 1 -maxdepth 1 -type d \
+                -name '[0-9][0-9][0-9][0-9]' -print 2>/dev/null | head -1)"
+    if [[ -n "$year" ]]; then
+        printf '%s\n' "$BASE/timeline"
+        return 0
+    fi
+    sub="$( (cd "$BASE/timeline" && find . -mindepth 1 -maxdepth 1 -type d | sed 's|^\./||' | sort; true) )"
+    [[ "$(count_lines "$sub")" == "1" ]] || { printf '\n'; return 0; }
+    printf '%s/%s\n' "$BASE/timeline" "$(printf '%s\n' "$sub" | head -1)"
 }
 
+# 供 borg 归档名前缀用（归档名 = <设备>-<类别>-<日期>）；拿不到就返回空 = 全量列
+detect_device() {
+    [[ -n "$DEVICE" ]] && { echo "$DEVICE"; return 0; }
+    local base prof
+    base="$(timeline_base || true)"
+    [[ -n "$base" && -f "$base/profile.json" ]] || return 0
+    prof="$(sed -n 's/^ *"device_id": *"\([^"]*\)".*/\1/p' "$base/profile.json" | head -1)"
+    [[ -n "$prof" ]] && printf '%s\n' "$prof"
+}
+
+# 设备名只是归档前缀过滤器，缺它一样能取（仓库本身就是单设备的），所以不再 error 出去
 resolve_device() {
-    [[ -n "$DEVICE" ]] && return 0
     local d
+    [[ -n "$DEVICE" ]] && return 0
     d="$(detect_device || true)"
-    [[ -n "$d" ]] || error "无法确定设备：请用 --device 指定（--list 会列出时间轴下的设备目录）"
     DEVICE="$d"
 }
 
@@ -225,9 +247,14 @@ restic_archives() {  # $1=repo
         | grep -E '^[0-9a-f]{8,}[[:space:]]' | awk '{print $1}'; true )
 }
 
-archives_for() {  # $1=repo $2=engine $3=class（borg 前缀 = <设备>-<类别>-，缺谁就少筛一层）
+archives_for() {  # $1=repo $2=engine $3=class（borg 前缀 = <设备>-<类别>-）
     case "$2" in
-        borg)   borg_archives "$1" "${DEVICE:+$DEVICE-}${3:+$3-}";;
+        # 设备名未知时连类别段一起放弃：归档名是 <设备>-<类别>-<时间>，只留 "files-"
+        # 这种半截前缀永远匹配不到，列出来是空的却说「无归档可取（--device 给对？）」——
+        # 时间轴去掉设备层后 profile.json 也不在设备目录里了，这条路现在真会走到。
+        # 全量列不会串类：仓库路径本身就按类别分（borg-<cls>）。
+        borg)   [[ -n "$DEVICE" ]] || { borg_archives "$1" ""; return; }
+                borg_archives "$1" "$DEVICE-${3:+$3-}";;
         restic) restic_archives "$1";;
     esac
 }
@@ -254,30 +281,31 @@ list_mode() {
         [[ -z "$all" ]] || printf '%s\n' "$all" | sed 's/^/    /'
     done
     [[ -d "$BASE/timeline" ]] || { info "无时间轴目录（$BASE/timeline）"; return 0; }
-    info "时间轴设备目录（其下 YYYY/MM/DD/HHMM-标签 即可读层）:"
-    local d snap_dirs
-    for d in "$BASE"/timeline/*/; do
-        [[ -d "$d" ]] || continue
-        printf '  %s\n' "$(basename "$d")"
-        # cd 进去取相对路径：变量拼进 sed 模式会被当正则读（路径里的 [ ] + 同理）
-        # 快照目录名是 YYYY/MM/DD/HHMM-标签（4 层），排序按名字不按 ls 的 mtime
-        # 这里不能用 (; true) 抹平失败：set -e 下裸赋值的管道若炸掉，整个 --list
-        # 会无声退出，用户看到的是「没有输出」而不是「这个设备目录读不了」
-        if ! snap_dirs="$(cd "$d" && find . -mindepth 4 -maxdepth 4 -type d | sed 's|^\./||' | sort -r | head -5)"; then
-            warn "  无法列出快照目录（${d}）——权限或磁盘问题？继续看下一个设备"
-            continue
-        fi
-        [[ -z "$snap_dirs" ]] || printf '%s\n' "$snap_dirs" | sed 's/^/    /'
-    done
+    local base snap_dirs
+    base="$(timeline_base || true)"
+    if [[ -z "$base" ]]; then
+        warn "时间轴结构认不出（$BASE/timeline 第一层既不是年份，也不是唯一设备目录）"
+        return 0
+    fi
+    info "时间轴快照（$base 下 YYYY/MM/DD/HHMM-标签，最新 5 个）:"
+    # cd 进去取相对路径：变量拼进 sed 模式会被当正则读（路径里的 [ ] + 同理）
+    # 排序按名字不按 ls 的 mtime；这里不能用 (; true) 抹平失败——set -e 下裸赋值的
+    # 管道若炸掉，整个 --list 会无声退出，用户看到的是「没有输出」而不是「读不了」
+    if ! snap_dirs="$(cd "$base" && find . -mindepth 4 -maxdepth 4 -type d | sed 's|^\./||' | sort -r | head -5)"; then
+        warn "  无法列出快照目录（${base}）——权限或磁盘问题？"
+        return 0
+    fi
+    [[ -z "$snap_dirs" ]] || printf '%s\n' "$snap_dirs" | sed 's/^/    /'
 }
 
-# 设备目录 → 最新快照目录（YYYY/MM/DD/HHMM-标签，字典序即时间序）
+# 时间轴根 → 最新快照目录（YYYY/MM/DD/HHMM-标签，字典序即时间序）
 latest_snapshot() {
-    resolve_device
-    local s
-    s="$( (find "$BASE/timeline/$DEVICE" -mindepth 4 -maxdepth 4 -type d 2>/dev/null \
+    local base s
+    base="$(timeline_base || true)"
+    [[ -n "$base" ]] || error "认不出时间轴结构: $BASE/timeline（既没有年份目录，也没有唯一设备目录）"
+    s="$( (find "$base" -mindepth 4 -maxdepth 4 -type d 2>/dev/null \
             | sort | tail -1; true) )"
-    [[ -n "$s" ]] || error "无时间轴快照: $BASE/timeline/$DEVICE"
+    [[ -n "$s" ]] || error "无时间轴快照: $base"
     echo "$s"
 }
 
@@ -328,7 +356,7 @@ pick_target() {
     [[ -n "$TARGET_REPO" ]] || error "找不到 ${CLASS} 档案仓库（${BASE}/borg-${CLASS} 或 ${BASE}/${CLASS}）"
     TARGET_ENG="$(engine_of "$TARGET_REPO")"
     need_engine "$TARGET_ENG"
-    [[ "$TARGET_ENG" == restic ]] || resolve_device   # restic 快照 ID 不含设备名
+    [[ "$TARGET_ENG" == restic ]] || resolve_device   # borg 归档名带设备前缀；restic 快照 ID 不带
     if [[ -z "$ARCHIVE" ]]; then
         ARCHIVE="$(latest_archive "$TARGET_REPO" "$TARGET_ENG" "$CLASS" || true)"
         [[ -n "$ARCHIVE" ]] || error "[$CLASS] 无归档可取（--device 是否给对？）"

@@ -78,8 +78,18 @@
 - **Python 兼容**：语义层纯 stdlib，兼容系统 python3 3.9+（launchd 受限 PATH 无
   homebrew；3.9 的 `fromisoformat` 拒绝 `+0800`——`parse_iso` 需容错 ±HHMM/Z）。
 - **设备标识**：`<设备名>-<系统>` 全小写、不含 OS 版本（大小写不敏感网盘的安全交集；
-  系统升级不分裂备份历史；品牌原名进 `timeline/<设备>/profile.json`；点转连字符）。
+  系统升级不分裂备份历史；品牌原名进时间轴根的 `timeline/profile.json`；点转连字符）。
   命名体系变更 = 破坏性变更，先与用户确认。
+- **时间轴没有设备层**（2026-10-01 起，此前是 `timeline/<设备>/YYYY/…`）：快照就是
+  `timeline/YYYY/MM/DD/HHMM-标签/`，`profile.json` 与 `rescue-test.txt` 落在 `timeline` 根。
+  理由是本地暂存根与云端目标**各自都已经带设备名**（`<BACKUP_BASE>/timeline`、
+  `<remote>/<SYSTEM_ID>/timeline`），旧形状在真机落成 `particloud-macos/timeline/particloud-macos/…`
+  ——设备名在一条路径上出现两次。改的是**根参数**不是深度：快照相对暂存根仍是 4 层
+  （`find -mindepth 4 -maxdepth 4`、`rescue-test.txt` 相对快照仍是上 4 层），两侧一起上移，
+  谁单独改一层谁炸。`rescue.sh` 是逃生工具，**两种形状都得认**（`timeline_base()`：
+  第一层是四位数年份走新形，否则退回唯一设备目录），迁移前的旧副本要能读。
+  守卫：`test_init_e2e.sh` 断言 3（层级 + 根下无「非年份目录」+ 根级 profile.json）、
+  `test_rescue_e2e.sh` 断言 2.5/2.6、`test_timeline_retention.sh`。
 - **macOS 撞名**：系统自带 `/usr/bin/bg`，接入层只用 `$BG` 或 vendored 路径，不做 PATH 查找。
 - **WebDAV/123Pan 特性**：大小写不敏感；DirMove 500（目录迁移 = copy 逐文件 + 验证 +
   purge）；大文件偶发 500。**这条 remote 上 rclone 拿不到 modtime/hash，比较退化成「只比
@@ -133,7 +143,7 @@
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
-   `timeline/<dev>/rescue-test.txt` 存在且结论为「≥1 PASS / 0 FAIL」：没有密钥时
+   `timeline/rescue-test.txt` 存在且结论为「≥1 PASS / 0 FAIL」：没有密钥时
    `run_drill` 走 rc=20 静默跳过、产物根本不存在，演练这条生产面就等于没测——10-01
    的跨类别取回错配正是藏在这层遮罩下。**「CI 绿」≠「跑过」，先确认守卫那条 step 真的执行了。**
    新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；`test_portable_stat.sh` 的断言 4
@@ -185,8 +195,9 @@
   实测 7.6 GiB / 327 objects，与本地 `~/PartiverseBackup` 逐项对平（config 71 MiB / files 7.5 GiB /
   system 327 KiB / timeline 69 MiB）——也就是说 09-30 记的「约 8–10GB」量级没错，
   是 `rclone size` 整仓口径把它读成了增长。实测目录形状
-  `Backguard:/<SYSTEM_ID>/{config,files,system,timeline}`，timeline 下即
-  `<dev>/YYYY/MM/DD/HHMM-标签/`（与 `rescue.sh --base <云端目录>` 认的布局一致）。
+  `Backguard:/<SYSTEM_ID>/{config,files,system,timeline}`，timeline 下**直接是日期树**
+  `YYYY/MM/DD/HHMM-标签/`（10-01 去掉设备层；迁移前留下的 `timeline/<dev>/…` 旧副本仍躺在云上，
+  由 `rescue.sh` 的 `timeline_base()` 两种形状都认）。
   云端**没有** `age/`——**已定（2026-10-01 用户拍板）：`recovery-identity.enc` 不上云**，凭据
   纪律优先，这不是缺口而是设计。所以「干净机器 + 云端目录 + 纸质恢复码」的盲恢复**硬性要求**
   密钥目录另有第二处离线副本（`DEPLOY.md` 步骤 ③ + `rescue.sh --guide` §4）；将来若要改主意，

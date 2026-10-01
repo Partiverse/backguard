@@ -1036,11 +1036,19 @@ def snapshot_dirname(run: dict) -> Path:
                 f"{t.strftime('%H%M')}-{label}")
 
 
+def snapshot_target(run: dict, out_root: Path) -> Path:
+    """快照目录 = <out_root>/YYYY/MM/DD/HHMM-标签。
+
+    这里**刻意不再放设备名一层**：本地暂存根是 <BACKUP_BASE>/timeline，云端目标已经是
+    <remote>/<SYSTEM_ID>/timeline，设备名在路径上已经出现过一次，再叠一层就变成
+    `particloud-macos/timeline/particloud-macos/2026/…`（10-01 真机正是这个形状）。
+    设备名照旧进正文（MANIFEST/STORY 标题、profile.json），只是不再当目录层。
+    """
+    return out_root / snapshot_dirname(run)
+
+
 def write_outputs(run: dict, out_root: Path, files: dict[str, str]) -> Path:
-    device = sanitize_component(run.get("device", "unknown"))
-    # 设备目录下直接是时间树（2026/09/29/...）——早期版本的额外 timeline 层已去除，
-    # 避免与外层收集目录名（timeline/）叠成「timeline/<设备>/timeline/」
-    target = out_root / device / snapshot_dirname(run)
+    target = snapshot_target(run, out_root)
     target.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
         (target / name).write_text(text, encoding="utf-8")
@@ -1076,8 +1084,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         run["prev_exclusions_path"] = args.prev_exclusions
     if args.preflight:
         run["preflight_path"] = args.preflight
-    target_dir = (Path(args.out) / sanitize_component(run.get("device", "unknown"))
-                 / snapshot_dirname(run))
+    target_dir = snapshot_target(run, Path(args.out))
     files = render_snapshot(run, target_dir)
     target = write_outputs(run, Path(args.out), files)
     print(f"已生成快照目录: {target}")

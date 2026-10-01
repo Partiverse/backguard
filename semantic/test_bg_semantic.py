@@ -526,9 +526,18 @@ class TestE2E(unittest.TestCase):
             out = Path(tmp) / "demo_output"
             rc = bg.main(["demo", "--out", str(out)])
             self.assertIsNone(rc)
-            target = out / "macbook-pro-macos15" / "2026" / "09" / "28" / "2100-evening"
+            # 快照直接落时间树：--out 那个目录（本地=timeline 根，云端=<SYSTEM_ID>/timeline）
+            # 下就是 YYYY/MM/DD/HHMM-标签。设备名曾在这里多叠一层，而本地根与云端目标
+            # 各自都已带设备名，云端于是长成 <sys>/timeline/<sys>/2026/…（10-01 真机）。
+            demo = bg.make_demo_run()
+            target = bg.snapshot_target(demo, out)
+            self.assertEqual(4, len(target.relative_to(out).parts),
+                             f"快照目录应为 YYYY/MM/DD/HHMM-标签 四层: {target.relative_to(out)}")
             for name in ("MANIFEST.txt", "STORY.md", "restore.md"):
                 self.assertTrue((target / name).exists(), f"缺少 {name}")
+            self.assertEqual([], sorted(p.name for p in out.iterdir()
+                                        if p.is_dir() and not p.name.isdigit()),
+                             "时间树根下出现非年份目录（设备层又回来了？）")
 
     def test_convert_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

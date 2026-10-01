@@ -68,7 +68,7 @@ cp ~/.config/partiverse-backup/age/recovery-identity.enc <第二处目录>/
 SKIP_WEBDAV=1 ./backup.sh        # 先本地验证，不触云（备份前会自动跑 preflight 预检）
 # 验收 checklist：
 #  [ ] preflight 无 ✗（error 会中止备份；⚠ 警告按提示处理或确认忽略）
-#  [ ] $BACKUP_BASE/timeline/<设备>/timeline/.../ 四件套齐全
+#  [ ] $BACKUP_BASE/timeline/<年>/<月>/<日>/<时分-标签>/ 四件套齐全（时间轴根下没有设备层）
 #  [ ] MANIFEST.txt 用「文本编辑/手机文件 App」打开不乱版（CJK 对齐）
 #  [ ] STORY.md 说的和你知道的最近改动对得上
 #  [ ] ntfy 手机收到推送（配置了 SEM_NTFY_URL 时）

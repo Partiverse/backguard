@@ -14,11 +14,20 @@ command -v borg >/dev/null 2>&1 || { echo "E2E-SKIP: 需要 borgbackup"; exit 0;
 command -v age >/dev/null 2>&1 || { echo "E2E-SKIP: 需要 age"; exit 0; }
 
 DEV='web[01]-macos'          # 设备名带正则元字符：前缀匹配必须按字面量
-BASE="$T/local"              # 本机布局：<base>/borg-<cls> + <base>/timeline/<dev>/…
-# 真实布局是 4 层：<dev>/YYYY/MM/DD/HHMM-标签（写成 2026-09-30 会让 --ledger 找不到快照）
-SNAP="$BASE/timeline/$DEV/2026/09/30/0948-morning"
+BASE="$T/local"              # 本机布局：<base>/borg-<cls> + <base>/timeline/YYYY/MM/DD/…
+# 10-01 起时间轴不再放设备层：快照 = <base>/timeline/YYYY/MM/DD/HHMM-标签（4 层），
+# profile.json 落在时间轴根（rescue 的归档前缀就从它的 device_id 取）
+SNAP="$BASE/timeline/2026/09/30/0948-morning"
+LEGACY="$T/legacy"           # 迁移前的旧形：<base>/timeline/<dev>/YYYY/MM/DD/…，必须照样能读
+LEG_SNAP="$LEGACY/timeline/$DEV/2026/09/29/0800-night"
 KEYS="$T/keys"
-mkdir -p "$BASE" "$SNAP" "$KEYS" "$T/src/Documents" "$T/src/Pictures"
+mkdir -p "$BASE" "$SNAP" "$LEG_SNAP" "$KEYS" "$T/src/Documents" "$T/src/Pictures"
+cat > "$BASE/timeline/profile.json" <<PROF
+{
+  "device_id": "$DEV"
+}
+PROF
+cp "$BASE/timeline/profile.json" "$LEGACY/timeline/$DEV/profile.json"
 export BORG_BASE_DIR="$T/.borg" BORG_PASSPHRASE='rescue-e2e-pass'
 bpb() { borg "$@"; }
 
@@ -44,6 +53,8 @@ python3 "$BG" convert --engine borg --class files="$T/files.jsonl" --auto-strip 
     || fail "bg convert 失败"
 python3 "$BG" manifest --run "$T/run.json" | age -R "$KEYS/recipients.txt" -o "$SNAP/manifest.json.enc" \
     || fail "age 密封失败"
+# 旧形时间轴里也放一份密封账本（迁移前的真实副本长这样）
+cp "$SNAP/manifest.json.enc" "$LEG_SNAP/manifest.json.enc" || fail "旧形账本放置失败"
 
 rescue() { HOME="$T/home" bash "$V0_DIR/rescue.sh" "$@"; }
 mkdir -p "$T/home"
@@ -52,13 +63,33 @@ mkdir -p "$T/home"
 out="$(HOME="$T/home" bash "$V0_DIR/rescue.sh" --guide)" || fail "--guide 退出非零"
 printf '%s' "$out" | grep -q "recovery-identity.enc" || fail "--guide 未交代恢复材料: $out"
 
-# 断言 2：--list 认出本机布局的两个归档 + 时间轴设备目录
+# 断言 2：--list 认出本机布局的两个归档 + 时间轴快照（无设备层）
 out="$(rescue --base "$BASE" --list)" || fail "--list 退出非零：$out"
 # 设备名带 [01]：断言一律字面量匹配（同 rescue.sh 内部的 awk index 口径）
 printf '%s' "$out" | grep -qF -- "$DEV-files-20260930-023400" || fail "--list 未列最新归档：$out"
 printf '%s' "$out" | grep -qF -- "$DEV-files-20260929-023400" || fail "--list 未列历史归档：$out"
 printf '%s' "$out" | grep -q "\[files\].*2 个归档" || fail "--list 归档计数不对：$out"
-printf '%s' "$out" | grep -qF -- "  $DEV" || fail "--list 未列时间轴设备目录：$out"
+printf '%s' "$out" | grep -qF -- "  2026/09/30/0948-morning" || fail "--list 未列时间轴快照：$out"
+# 快照行里不该再出现设备名（旧的 `<dev>/` 目录层）：设备名只该在归档名前缀里
+printf '%s' "$out" | grep -qF -- "$DEV/" && fail "--list 的时间轴路径里还有设备层：$out"
+
+# 断言 2.5：迁移前的旧形时间轴（timeline/<dev>/YYYY/MM/DD/…）必须照样能读——
+# 逃生工具面向的是历史副本，新形状落地不等于旧副本作废
+out="$(rescue --base "$LEGACY" --list)" || fail "旧形 --list 退出非零：$out"
+printf '%s' "$out" | grep -qF -- "  2026/09/29/0800-night" || fail "旧形 --list 未列快照：$out"
+out="$(rescue --base "$LEGACY" --ledger --identity "$KEYS/identity.txt")" \
+    || fail "旧形 --ledger 失败（latest_snapshot 没认出设备层）：$out"
+printf '%s' "$out" | grep -q "photo.bin" || fail "旧形账本未解出内容：$out"
+
+# 断言 2.6：认不出设备名（时间轴根没有 profile.json）时，取回链路必须照样工作。
+# 归档名前缀是 <设备>-<类别>-<时间>，只拼半截 "files-" 永远匹配不到，
+# 于是「备份在、取不回」还反过来质问用户 --device 给没给对。
+# 设备层删掉后这条路径是常态（云端旧副本、或 profile 丢失），不能只在有 profile 时能取。
+mv "$BASE/timeline/profile.json" "$T/profile.hold"
+out="$(rescue --base "$BASE" --class files --find Documents 2>&1)" \
+    || fail "缺 profile.json 时 --find 退出非零（前缀拼成了半截）：$out"
+printf '%s' "$out" | grep -qF -- "Documents/note.txt" || fail "缺 profile.json 时 --find 没命中：$out"
+mv "$T/profile.hold" "$BASE/timeline/profile.json"
 
 # 断言 3：--find 字面量匹配（空格/中文名必须原样列出，供 --get 复制）
 find_out="$(rescue --base "$BASE" --class files --find Documents)" || fail "--find 退出非零：$find_out"

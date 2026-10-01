@@ -115,29 +115,31 @@ notify_alert() { notify_push "backguard 告警" "warning_sign" "$1"; }
 # 本地 timeline 暂存保留（2026-09-30 云端删除事件教训：快照历史此前只在云端存一份，
 # 云端被删即永久丢失）。rclone copy 只增不删、云端是全量历史；本地保留最近 N 份
 # （默认 14，SEM_TIMELINE_KEEP 可调，<=0 跳过清理、非数字回落默认）供云端丢失时重建。
-# 只清理 <设备>/YYYY/MM/DD/HHMM-标签 快照目录；profile.json / rescue-test.txt 不动。
+# 只清理 YYYY/MM/DD/HHMM-标签 快照目录；同根的 profile.json / rescue-test.txt 不动。
 prune_local_timeline() {
-    local dev_dir="$1"
+    local stage_dir="$1"
     local keep="${SEM_TIMELINE_KEEP:-14}"
     [[ "$keep" =~ ^[0-9]+$ ]] || keep=14
     (( keep >= 1 )) || return 0
-    [[ -d "$dev_dir" ]] || return 0
+    [[ -d "$stage_dir" ]] || return 0
     local old
     # 滑窗 awk 取「除最后 keep 份外」的全部（BSD head 不支持负数 -n，tail 方向是反的）
-    old="$( { find "$dev_dir" -mindepth 4 -maxdepth 4 -type d 2>/dev/null || true; } \
+    # 相对 stage 根仍是 4 层 = YYYY/MM/DD/HHMM-标签：去掉设备层的同时，调用点传进来的根
+    # 也从 <stage>/<dev> 上移到了 <stage>，两边一起少一层
+    old="$( { find "$stage_dir" -mindepth 4 -maxdepth 4 -type d 2>/dev/null || true; } \
         | LC_ALL=C sort | awk -v k="$keep" 'NR>k{print a[NR-k]} {a[NR]=$0}' )"
     if [[ -n "$old" ]]; then
         local s
         while IFS= read -r s; do
             [[ -n "$s" ]] || continue
             # rm -rf 白名单守卫：只放行 basename 为 HHMM-标签 形态的快照目录，
-            # dev_dir 意外解析错时宁可漏删不可误删
+            # stage_dir 意外解析错时宁可漏删不可误删
             [[ "${s##*/}" =~ ^[0-9]{4}-[a-z0-9-]+$ ]] || {
                 warn "[semantic] 跳过非快照形态路径: $s"; continue; }
-            rm -rf -- "$s" && info "[semantic] 本地暂存保留最近 $keep 份，清理: ${s#"$dev_dir"/}"
+            rm -rf -- "$s" && info "[semantic] 本地暂存保留最近 $keep 份，清理: ${s#"$stage_dir"/}"
         done <<< "$old"
         # 快照清走后腾出的空日期目录一并收掉（-delete 自 deepest-first，空壳级联消除）
-        { find "$dev_dir" -mindepth 1 -maxdepth 3 -type d -empty -delete 2>/dev/null || true; }
+        { find "$stage_dir" -mindepth 1 -maxdepth 3 -type d -empty -delete 2>/dev/null || true; }
     fi
 }
 
@@ -303,7 +305,7 @@ generate_semantic() {
     prune_run_jsons "$runs_dir"
     rm -rf "$tmp"
 
-    prune_local_timeline "$stage/$DEVICE_ID"
+    prune_local_timeline "$stage"
 
     success "[semantic] 时间轴已生成: $stage"
 }
@@ -323,7 +325,8 @@ run_drill() {
     [[ "${SEM_DRILL:-1}" == "1" ]] || return 20
     local -a items=("$@")
     [[ ${#items[@]} -gt 0 ]] || { info "[drill] 本轮没有可演练的归档，跳过"; return 20; }
-    # 设备级文件：sdir（…/<dev>/YYYY/MM/DD/HHMM-标签）上 4 层到 <dev>
+    # 演练结果落在时间轴根：<stage>/YYYY/MM/DD/HHMM-标签 上 4 层即 <stage>。
+    # 去掉设备层时快照目录与这个文件一起上移了一层，所以相对距离仍是 4，别改小。
     local rt="$sdir/../../../../rescue-test.txt"
     # 30 天节流（人工演练经 drill.sh --force 置 SEM_DRILL_FORCE=1 绕开）
     if [[ -f "$rt" && "${SEM_DRILL_FORCE:-0}" != "1" ]]; then

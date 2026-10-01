@@ -73,6 +73,14 @@ for cls in config files system; do
 done
 [ -n "$(find "$T/repos/timeline" -name STORY.md 2>/dev/null)" ] || fail "timeline 无 STORY.md"
 [ -n "$(find "$T/repos/timeline" -name MANIFEST.txt 2>/dev/null)" ] || fail "timeline 无 MANIFEST.txt"
+# 形状守卫（10-01 去掉设备层）：快照直接挂在 timeline 根下的日期树里，profile.json 也在根。
+# 判据用层级而不是 -name：`find -name STORY.md` 在旧的 timeline/<设备>/YYYY/… 下照样 PASS，
+# 而设备层一旦回来，云端就成了 <remote>/<dev>/timeline/<dev>/YYYY/…（设备名两次）
+[ -n "$(find "$T/repos/timeline" -mindepth 4 -maxdepth 4 -type d 2>/dev/null)" ] \
+    || fail "timeline 根下没有 YYYY/MM/DD/HHMM-标签 快照目录（层级变了？）"
+[ -z "$(find "$T/repos/timeline" -mindepth 1 -maxdepth 1 -type d ! -name '[0-9][0-9][0-9][0-9]' 2>/dev/null)" ] \
+    || fail "timeline 根下出现非年份目录（设备层又回来了）"
+[ -f "$T/repos/timeline/profile.json" ] || fail "profile.json 未落在 timeline 根"
 
 # 断言 4：云端收到备份与 timeline。local 后端忽略 remote 名（"Backguard:x" 即 "x"），
 # 真实 WebDAV/S3 remote 才有 remote 层——断言按 local 语义写在 cwd（=向导执行时 cwd）下
@@ -81,6 +89,9 @@ for cls in config files system; do
     [ -d "$T/dest/$DEV_ID/$cls" ] || fail "云端未收到 $cls"
 done
 [ -d "$T/dest/$DEV_ID/timeline" ] || fail "云端未收到 timeline"
+# 云端形状同守卫：remote 已经带设备段，timeline 下再套一层设备目录就是重复
+[ -n "$(find "$T/dest/$DEV_ID/timeline" -mindepth 4 -maxdepth 4 -type d 2>/dev/null)" ] \
+    || fail "云端 timeline 下没有 YYYY/MM/DD/HHMM-标签 快照（多了一层设备目录？）"
 
 # 断言 5：调度模板渲染产物——明文口令必须只活在 secrets.env(600) 里。
 # launchd 的 plist 落在 ~/Library/LaunchAgents 且没有 600 保护，一旦把口令写进去

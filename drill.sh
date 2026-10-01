@@ -7,7 +7,7 @@
 # 用法:
 #   ./drill.sh                          # 本设备最新快照，节流仍生效
 #   ./drill.sh --force                  # 人工演练：绕过 30 天节流
-#   ./drill.sh --snapshot <快照目录>     # 指定快照（…/timeline/<dev>/YYYY/MM/DD/HHMM-标签）
+#   ./drill.sh --snapshot <快照目录>     # 指定快照（…/timeline/YYYY/MM/DD/HHMM-标签）
 
 set -euo pipefail
 
@@ -50,9 +50,9 @@ source "$SCRIPT_DIR/semantic/semantic.sh"
 if [[ -z "$SNAP" ]]; then
     # (; true) 中和 pipefail：设备还没有任何快照时，find 的 rc≠0 会炸掉整个赋值，
     # 用户看到的就是静默退出而不是「先跑一次备份」这句人话
-    SNAP="$( (find "$BACKUP_BASE/timeline/$DEVICE_ID" -mindepth 4 -maxdepth 4 -type d 2>/dev/null \
+    SNAP="$( (find "$BACKUP_BASE/timeline" -mindepth 4 -maxdepth 4 -type d 2>/dev/null \
               | sort | tail -1; true) )"
-    [[ -n "$SNAP" ]] || error "无时间轴快照（$BACKUP_BASE/timeline/${DEVICE_ID}），先跑一次备份"
+    [[ -n "$SNAP" ]] || error "无时间轴快照（$BACKUP_BASE/timeline），先跑一次备份"
 fi
 [[ -d "$SNAP" ]] || error "快照目录不存在: $SNAP"
 
@@ -75,7 +75,7 @@ for it in "${ITEMS[@]}"; do
     info "演练归档 [${it%%:*}] ${it#*:}"
 done
 
-# run_drill 把结果写到设备目录（快照目录上 4 层：<dev>/YYYY/MM/DD/HHMM-标签）
+# run_drill 把结果写到时间轴根（快照目录上 4 层：<stage>/YYYY/MM/DD/HHMM-标签）
 rt="$(cd "$SNAP/../../../.." && pwd)/rescue-test.txt"
 
 # 按 run_drill 的退出码分支，不从结果文件反推「本轮跑过没有」：

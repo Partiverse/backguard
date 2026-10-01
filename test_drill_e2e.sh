@@ -21,8 +21,9 @@ BASE="$T/repos"
 REPO="$BASE/borg-files"
 REPO_CONFIG="$BASE/borg-config"
 REPO_SYSTEM="$BASE/borg-system"
-# 真实布局是 <dev>/YYYY/MM/DD/HHMM-标签（4 层），设备级 rescue-test.txt 在其上 4 层
-SNAP="$BASE/timeline/$DEV/2026/09/30/0948-morning"
+# 时间轴根下直接是日期树（10-01 去掉设备层）：YYYY/MM/DD/HHMM-标签 共 4 层，
+# rescue-test.txt 落在时间轴根，即快照目录上 4 层
+SNAP="$BASE/timeline/2026/09/30/0948-morning"
 mkdir -p "$KEYS" "$BASE" "$T/home" "$SNAP" \
     "$T/src/Documents" "$T/src/Pictures" "$T/src/config" "$T/src/system-meta"
 export BORG_BASE_DIR="$T/.borg"
@@ -91,7 +92,10 @@ python3 "$BG" manifest --run "$T/run.json" | age -R "$KEYS/recipients.txt" -o "$
 # 而不是「当天日期那个种子碰巧抽到了它」（默认抽样数按日期种子变，测试不能跟着抖）
 run_drill_sh() { HOME="$T/home" XDG_CONFIG_HOME="$T/conf" SEM_DRILL_COUNT=99 \
     bash "$V0_DIR/drill.sh" "$@"; }
-RT="$BASE/timeline/$DEV/rescue-test.txt"
+RT="$BASE/timeline/rescue-test.txt"
+# drill.sh 打印的是 cd+pwd 解析后的**物理**路径（macOS 上 /tmp 是 /private/tmp 的软链），
+# 夹具同口径归一化，否则「结果见 …」这条断言拿软链去比物理路径，永远差一层
+RT="$(cd "$(dirname "$RT")" && pwd)/rescue-test.txt"
 
 # 断言 1：缺主身份时，drill 必须失败可见——不能静默「跳过」后还报成功
 mv "$KEYS/identity.txt" "$KEYS/identity.hold"
@@ -111,7 +115,10 @@ printf '%s' "$out" | grep -q "\[drill\] 上次演练不足 30 天" \
 
 # 断言 2：真实演练——主身份解封 → 抽样 → borg 实取 → 大小校验，全部 PASS
 out="$(run_drill_sh --force 2>&1)" || fail "drill.sh --force 退出非零：$out"
-[[ -f "$RT" ]] || fail "rescue-test.txt 未落在设备目录（rt 路径算错）: $RT"
+[[ -f "$RT" ]] || fail "rescue-test.txt 未落在时间轴根（rt 路径算错）: $RT"
+# drill.sh 自己算的 rt（快照上 4 层）必须和夹具期望的根是同一个文件：
+# 去掉设备层时两边一起上移，相对距离不变——少一层就写到 2026/09/ 里去了
+printf '%s' "$out" | grep -qF "结果见 $RT" || fail "drill.sh 的 rt 解析不是时间轴根：$out"
 grep -q "^RESULT: 0 PASS" "$RT" && fail "一项都没取回：$RT"
 res="$(grep -o '^RESULT: [0-9]* PASS / [0-9]* FAIL' "$RT")" || fail "无 RESULT 行：$(cat "$RT")"
 [[ "$res" == *"PASS / 0 FAIL"* ]] || fail "演练有失败项: $res"
@@ -149,7 +156,7 @@ printf '%s' "$out" | grep -q "演练未执行" || fail "陈旧结果被当成通
 
 # 断言 4：指定 --snapshot 时不需要自动发现；快照不存在必须报错而非静默
 out="$(run_drill_sh --snapshot "$SNAP" --force 2>&1)" || fail "--snapshot 显式路径失败：$out"
-out="$(run_drill_sh --snapshot "$BASE/timeline/$DEV/1999/01/01/0000-night" 2>&1)" \
+out="$(run_drill_sh --snapshot "$BASE/timeline/1999/01/01/0000-night" 2>&1)" \
     && fail "不存在的快照目录却成功了"
 printf '%s' "$out" | grep -q "快照目录不存在" || fail "快照不存在的报错不具体：$out"
 

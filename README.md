@@ -56,7 +56,7 @@ particloud-windows   # Windows
 partiverse-kubuntu   # Linux（/etc/os-release 的 ID）
 ```
 
-品牌原名（macOS / Windows / 发行版全名）记录在 `timeline/<设备>/profile.json`；
+品牌原名（macOS / Windows / 发行版全名）记录在 `timeline/profile.json`；
 路径中的点统一转连字符。
 
 归档格式：`<device-id>-<class>-<YYYYMMDD-HHMMSS>`
@@ -65,17 +65,16 @@ partiverse-kubuntu   # Linux（/etc/os-release 的 ID）
 
 ```
 <remote:子路径>/              ← BACKUP_TARGETS 可配多个 remote，结构一致
-  particloud-macos/
+  particloud-macos/           ← 设备段 = SYSTEM_ID，一台设备一个目录
     config/     ← borg/restic repo
     files/      ← borg/restic repo
     system/     ← borg/restic repo
-  partiverse-kubuntu/
-    config/  files/  system/
-  timeline/                   ← 语义层，只增不减
-    particloud-macos/
+    timeline/                 ← 语义层，只增不减
       profile.json            ← 设备品牌原名等元数据
       2026/09/30/0234-morning/
         MANIFEST.txt · STORY.md · restore.md · COVERAGE.txt · exclusions.json · manifest.json.enc
+  partiverse-kubuntu/
+    config/  files/  system/  timeline/...
 ```
 
 ---
@@ -133,8 +132,8 @@ backup/
 
 ## 语义层配置（可选，全部非致命：缺依赖只跳过不影响备份）
 
-备份成功后自动生成语义快照（本地暂存 `<BACKUP_BASE>/timeline/<设备>/年/月/日/时分-标签/`，
-随内容池上传到每个 `BACKUP_TARGETS` 的 `timeline/<设备>/` 下）：
+备份成功后自动生成语义快照（本地暂存 `<BACKUP_BASE>/timeline/年/月/日/时分-标签/`，
+随内容池上传到每个 `BACKUP_TARGETS` 的 `<设备标识>/timeline/年/月/日/…`——设备名在路径上只出现一次）：
 
 | 文件 | 说明 |
 |---|---|
