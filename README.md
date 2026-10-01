@@ -156,6 +156,8 @@ backup/
 | `SEM_DRILL` | 设 `0` 关闭夜间恢复演练（默认开；结论写在 `<设备>/rescue-test.txt`，30 天节流） |
 | `SEM_DRILL_COUNT` | 每轮演练的抽样条数（默认 5；`test_drill_e2e.sh` 拉满以求确定性） |
 | `SEM_CLOUD_VERIFY` | 设 `0` 关闭每轮的**云端副本自证**（默认开）。推送全报成功后，再按「本地对象是否都在云端且尺寸一致 + 仓库 `config` 内容哈希」复核一次，结论写 `timeline/CLOUD-VERIFY.txt`。存在的理由：某些网盘（WebDAV）上 rclone 的比较退化成只比大小，原地同长度重写永远推不上云而 copy 照样退出 0——`rclone 没报错` 不等于 `云端有新版` |
+| `INTEGRITY_VERIFY` | 设 `0` 关闭**存储完整性校验**（默认开，按月）。对每个引擎仓库跑一次 `borg check --verify-data`（整仓逐块解密校验），结论写 `timeline/INTEGRITY.txt`。存在的理由：仓库里的字节腐化**不会**让 `borg create` 失败，也不影响恢复演练取回的那几个文件——不主动整仓读一遍就永远不会发现 |
+| `INTEGRITY_DAYS` | 存储完整性校验的窗口天数（默认 30；`INTEGRITY_DAYS=0` 是「现在立刻跑一遍」的人工入口） |
 
 备份前预检（`bg preflight`）会检查：include 路径有效性、iCloud/OneDrive 占位文件
 （未真正落盘的"半真文件"）、.git 被静默排除、磁盘空间、引擎版本下限、

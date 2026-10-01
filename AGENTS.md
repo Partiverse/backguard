@@ -146,6 +146,24 @@
   `sha=nogit`。**写这个夹具的规矩**：KEEP 窗口的种子 mtime 必须 `touch -t` 写死（同秒并列会让
   「留哪几份」变成运气），前一阶段切出的真副本要先 `rm -f` 掉（它们占名额）。守卫见
   `test_log_rotation.sh`（linux + macos 双 CI，6 条变异）。
+- **存储完整性校验走编排层，判定分三档**（10-01 夜落地，roadmap A2a）：`backup.sh` 每
+  `INTEGRITY_DAYS`（默认 30）天对每个 borg 仓库跑一次 `borg check --verify-data`，结论写
+  `timeline/INTEGRITY.txt`。**为什么必须有**：仓库里某个 chunk 腐化**不会**让 `borg create`
+  失败（10-01 实测：翻掉数据段中间一个字节，备份全绿、演练照样取回），也就是说现有全部守卫
+  对这类问题恒为绿——只有主动整仓读一遍才看得见。**引擎调用不进语义层、不进 `bg preflight`**
+  （§1.3：Python 侧只做纯文件系统检查）。三档：rc=0 PASS；rc=1 FAIL（逐块校验真发现坏数据）；
+  **rc>=2 不能一刀切判 FAIL 也不能判 UNKNOWN**——borg 把「仓库可能已毁」「用法错误」「拿不到锁」
+  塞在同一档（实测并发持锁 + `BORG_LOCK_WAIT=0` 就是 rc=2），只有错误原文命中锁的才记 UNKNOWN
+  且不改退出码（否则一次手工 `drill.sh --force` 就能把 nightly 报成腐化），其余按最坏情况 FAIL。
+  匹配锁的 pattern 必须逐字照抄引擎原文（`lock timeout` / `failed to create/acquire the lock`）：
+  写成 `failed to (create|acquire) the lock` 看着等价，实际真消息是 `create/acquire` 连着的，
+  **一条都不命中**——夹具第 4 段当场把这条变异出来的假 UNKNOWN 报成 FAIL。**报告只记类别/rc/耗时，
+  引擎原文一个字节都不抄**：borg 的锁错误行里带仓库绝对路径，而这份文件随时间轴上云（§1.1 同一条
+  口径，`test_integrity.sh` 第 1 段按「报告里不许出现 `$BACKUP_BASE`/源码树路径/任何文件名」锁住）。
+  窗口节流用**产物自身的 mtime**当标记（与 `rescue-test.txt` 同一条机制，不另养状态文件）；
+  低频路径的节流本身要被测，否则「月度」只是文档里的形容词。`INTEGRITY_DAYS=0` 是人工立刻跑的入口；
+  没登记任何仓库时**不写报告**（一份 checks=0 的「完整性通过」比没有更坏）。守卫 `test_integrity.sh`
+  （linux + macos 双 CI；restic 侧未接入，与 `backup.ps1` 的自证同批欠账）。
 - **age 密封**：age 只读 /dev/tty 不吃管道——密钥初始化必须 expect 驱动
   （`init-keys.exp`）；passphrase stanza 独占，双恢复路径用双 X25519 recipient 实现。
 - **权限面**：备份产物没有任何需要同机可读的东西——入口脚本（`backup.sh` / `init.sh` /
@@ -204,16 +222,20 @@
    `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）/
    `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）/
    `test_log_rotation.sh`（日志轮转 + run 边界行）/
-   `test_cloud_verify.sh`（云端副本自证：单向包含 + config 内容哈希 + HEALED/UNKNOWN 分档）。
-   十一套都已挂 CI
-   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init/log_rotation/cloud_verify），
+   `test_cloud_verify.sh`（云端副本自证：单向包含 + config 内容哈希 + HEALED/UNKNOWN 分档）/
+   `test_integrity.sh`（存储完整性：窗口节流 + 锁 flake 记 UNKNOWN / 非锁 fatal 判 FAIL / 真损坏）。
+   十二套都已挂 CI
+   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init/log_rotation/cloud_verify/integrity），
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
    `timeline/rescue-test.txt` 存在且结论为「≥1 PASS / 0 FAIL」：没有密钥时
    `run_drill` 走 rc=20 静默跳过、产物根本不存在，演练这条生产面就等于没测——10-01
    的跨类别取回错配正是藏在这层遮罩下。**「CI 绿」≠「跑过」，先确认守卫那条 step 真的执行了。**
-   新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；`test_portable_stat.sh` 的断言 4
+   新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；**写文档说「已挂 CI（linux + macos
+   各一步）」之前必须 `grep -n <脚本名> .github/workflows/ci.yml` 核对**——10-01 那条就是这么
+   写串的：macos 一步从没加过，而 HANDOVER 已经把它记成既成事实；
+   `test_portable_stat.sh` 的断言 4
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
    **改目录形状时 `.github/workflows/ci.yml` 里那些硬编码路径也是被测面**——本机 E2E
    全绿也看不见它：10-01 时间轴去设备层那一改，`semantic (linux/macos/windows)` 三条一起红在

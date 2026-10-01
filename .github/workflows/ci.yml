@@ -247,11 +247,21 @@ jobs:
           # 网盘读不出记 UNKNOWN 且不改退出码，补传后复核仍不符才是 FAIL
           bash test_cloud_verify.sh
 
+      - name: E2E repository integrity check
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          # A2a：按月把引擎仓库整仓读一遍（borg check --verify-data）。这类损坏不会让
+          # borg create 失败——现有守卫全绿也看不见它，所以必须单独有一步
+          bash test_integrity.sh
+
   macos:
     runs-on: macos-latest
-    # 实测 macos job 76 分钟（dd4de89 那轮：runner 派工 18:36 → 完成 19:52）——
-    # 免费 macOS runner 比本机慢一个量级，预算照本机时长写必然误杀
-    timeout-minutes: 100
+    # 实测 macos job 76 分钟（dd4de89 那轮：runner 派工 18:36 → 完成 19:52），88 分钟也见过
+    # （20:31:49Z→21:59:14Z）——免费 macOS runner 比本机慢一个量级，预算照本机时长写必然误杀。
+    # 10-01 夜里 E2E 从六套增至八套（integrity + cloud_verify 补上 BSD 覆盖），预算跟着抬一档；
+    # 这不是「越慢越好」，而是别让它**因为预算**红——红一轮就等于今晚没有可部署的 HEAD
+    timeout-minutes: 120
     # macOS 自带 bash 3.2 不支持 declare -A / nameref，脚本需要 bash 5
     defaults:
       run:
@@ -369,6 +379,17 @@ jobs:
       - name: E2E log rotation + run boundary line
         timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_log_rotation.sh
+
+      # BSD 上 date -r 的 mtime 语义、borg with-lock 的报错原文都可能与 GNU 不同：
+      # 窗口节流与「锁 vs fatal」的分流在 macos 上得同样跑一次
+      - name: E2E repository integrity check
+        timeout-minutes: 40
+        run: /opt/homebrew/bin/bash test_integrity.sh
+
+      # 云端自证的报告行解析（awk/grep 取列）与 rclone local 后端在 BSD 上同形才算覆盖
+      - name: E2E cloud copy self-proof
+        timeout-minutes: 40
+        run: /opt/homebrew/bin/bash test_cloud_verify.sh
 
   windows:
     runs-on: windows-latest

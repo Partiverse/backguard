@@ -416,6 +416,109 @@ run_cloud_verify() {
     chmod 600 "$CLOUD_VERIFY_REPORT" 2>/dev/null || true
 }
 
+# ---------- A2a：引擎仓库的存储完整性校验（roadmap 11 章 §2）----------
+# 与恢复演练是两个不互相替代的问题：drill 证明「取回路径可用」，这一步证明「存着的字节
+# 没腐化、还能解密解压缩」——3-2-1-1-0 末位那个 0 指的是后者。腐化只在**读取**时暴露，
+# 所以按月主动把整仓读一遍（10-01 实测：真机 7.6 GB 是分钟级，且只跑月度窗口）。
+# 引擎调用一律留在编排层：语义层是旁路、bg preflight 只做纯文件系统检查（红线 §1.3）。
+integrity_failed=0
+INTEGRITY_LINES=()
+INTEGRITY_REPORT=""
+
+note_integrity() {   # $1=检查名 $2=PASS|FAIL|SKIP|UNKNOWN $3=详情
+    INTEGRITY_LINES+=("$(printf '%-8s %-14s %s\n' "$2" "$1" "$3")")
+    if [[ "$2" == "FAIL" ]]; then
+        integrity_failed=$((integrity_failed + 1))
+    fi
+    return 0
+}
+
+# 窗口判据用**产物自身的 mtime**当标记，与 rescue-test.txt 同一条机制（不用再养一个状态文件）。
+# INTEGRITY_DAYS=0 就是「现在立刻跑一遍」的人工入口。
+integrity_due() {
+    [[ "${INTEGRITY_VERIFY:-1}" == "1" ]] || return 1
+    [[ -f "$INTEGRITY_REPORT" ]] || return 0
+    # 语义层缺失时 backup.sh 仍要能跑完（上面那组桩就是为这一刻），别去依赖它的 helper
+    declare -F file_mtime >/dev/null || return 0
+    local days="${INTEGRITY_DAYS:-30}" last now
+    last="$(file_mtime "$INTEGRITY_REPORT")"
+    now="$(date +%s)"
+    [[ -n "$last" ]] || return 0
+    (( now - last >= days * 86400 ))
+}
+
+# integrity_pairs 由 main 登记（元素 `类别:本地仓库路径`）。规矩与 repo_pairs 完全一样：
+# 忘了登记＝这一类根本没跑，而整轮结论照样全绿（A6 第一版就是这么把缺陷藏过去的）。
+run_integrity_check() {
+    local pair cls repo rc out dur t0
+    INTEGRITY_REPORT="$BACKUP_BASE/timeline/INTEGRITY.txt"
+    integrity_due || {
+        info "[integrity] 未到校验窗口（${INTEGRITY_DAYS:-30} 天内已跑过，或 INTEGRITY_VERIFY=0），跳过"
+        return 0
+    }
+    INTEGRITY_LINES=()
+    integrity_failed=0
+    if [[ ${#integrity_pairs[@]} -eq 0 ]]; then
+        # restic 侧（Windows）没有接：backup.ps1 连自证层都还没有（AGENTS §6 的 Windows 欠账
+        # 同批）。这里**不写报告**——一份 checks=0 的「完整性通过」比没有更坏，它会被下一个人读成绿。
+        warn "[integrity] 本轮没有可校验的 borg 仓库（restic 侧尚未接入），未做存储完整性校验"
+        INTEGRITY_REPORT=""
+        return 0
+    fi
+    for pair in ${integrity_pairs[@]+"${integrity_pairs[@]}"}; do
+        cls="${pair%%:*}"
+        repo="${pair#*:}"
+        [[ -d "$repo" ]] || { note_integrity "borg:$cls" "UNKNOWN" "本地仓库目录读不到，这一项没证成也没证败"; continue; }
+        t0="$(date +%s)"
+        rc=0
+        out="$("$BORG" check --verify-data "$repo" 2>&1)" || rc=$?
+        dur=$(( $(date +%s) - t0 ))
+        # 引擎原文只进本地日志（600、不上云）。明文报告一个字节都不抄：10-01 实测那类
+        # 锁错误里带着**仓库绝对路径**，而这份文件随时间轴推上网盘。
+        {
+            printf '%s\n' "$out"
+            printf '[integrity] borg check --verify-data %s -> rc=%s (%ss)\n' "$cls" "$rc" "$dur"
+        } >>"$LOG"
+        case "$rc" in
+            0) note_integrity "borg:$cls" "PASS" "${dur}s 逐块解密校验通过（存储没腐化）" ;;
+            1) note_integrity "borg:$cls" "FAIL" "${dur}s 后 rc=1：逐块校验发现坏数据，详见 ${LOG}" ;;
+            *)
+                # borg 把「仓库可能已毁」「用法错误」「拿不到锁」放在同一个 rc=2 档里（10-01 实测
+                # 持锁即 rc=2）。只有明确报锁的才是 flake——并发的手工演练不该把用户叫醒；
+                # 其余按最坏情况算，因为「potentially destroyed」正属于宁可误报的一档。
+                # borg 1.4 的两条原文（10-01 实测）："Lock timeout 10000 ms exceeded" 与
+                # "Failed to create/acquire the lock <仓库>/lock.exclusive (timeout)."。
+                # 别把模式写松成 'lock.*timeout'——那会把任何同时含这两个词的真错误也放过去。
+                if printf '%s\n' "$out" | grep -qiE 'lock timeout|failed to create/acquire the lock'; then
+                    note_integrity "borg:$cls" "UNKNOWN" "${dur}s 拿不到仓库锁（有别的 borg 在跑，多半是手工演练），这一项没证成也没证败"
+                else
+                    note_integrity "borg:$cls" "FAIL" "${dur}s 后 rc=${rc}：不是锁问题，按「仓库可能已毁」处理，详见 ${LOG}"
+                fi
+                ;;
+        esac
+    done
+    {
+        printf '# 存储完整性校验（A2a）——按月把每个引擎仓库整仓读一遍\n'
+        printf '# 生成时间: %s   代码基: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${RUN_GIT_SHA}"
+        printf '# 它证明的是「存着的字节没坏、还能解密解压缩」；「取回路径可用」由 rescue-test.txt\n'
+        printf '#   那条恢复演练负责，两者不互相替代。\n'
+        printf '# 判据: rc=0 通过；rc=1 逐块校验发现坏数据＝FAIL（会告警）；rc>=2 是 borg 的\n'
+        printf '#   fatal/用法/拿不到锁共用档，其中明确报 Lock timeout 的记 UNKNOWN（并发手工\n'
+        printf '#   演练不该改变本轮结论），其余按最坏情况判 FAIL。\n'
+        printf '# 引擎原文**不抄进本文件**：它是随时间轴上云的明文产物，而 borg 的错误行里会带\n'
+        printf '#   仓库绝对路径。细节看本地日志（600、不上云）。\n'
+        local line
+        for line in ${INTEGRITY_LINES[@]+"${INTEGRITY_LINES[@]}"}; do printf '%s\n' "$line"; done
+        printf '# 汇总: checks=%d FAIL=%d UNKNOWN=%d\n' \
+            "${#INTEGRITY_LINES[@]}" "$integrity_failed" \
+            "$( { printf '%s\n' ${INTEGRITY_LINES[@]+"${INTEGRITY_LINES[@]}"} | grep -c '^UNKNOWN' || true; } )"
+    } > "$INTEGRITY_REPORT" 2>/dev/null || {
+        warn "[integrity] INTEGRITY.txt 写入失败（不阻断备份）"
+        INTEGRITY_REPORT=""
+    }
+    [[ -n "$INTEGRITY_REPORT" ]] && chmod 600 "$INTEGRITY_REPORT" 2>/dev/null || true
+}
+
 # ---------- 语义层（research/06：MANIFEST.txt/STORY.md/restore.md） ----------
 # 非致命：语义层任何失败只告警，不影响备份结论
 if [[ -f "$SCRIPT_DIR/semantic/semantic.sh" ]]; then
@@ -652,6 +755,9 @@ main() {
     local -a sem_archives=()
     # 云端自证要拿「本地仓库在哪」当输入，两个引擎分支各登记一次（类别:路径）
     local -a repo_pairs=()
+    # 存储完整性校验的清单（A2a）。和 repo_pairs 分开、各自登记：一个查云端有没有，
+    # 一个查本地仓库里的字节还在不在——同一批仓库，两个不相干的判据。
+    local -a integrity_pairs=()
     # 带时区，与 --parent-time 口径一致（bg 统一转本地显示）；
     # %z 产 ±HHMM，py<3.11 的 fromisoformat 不认——补冒号为 ±HH:MM
     SEM_TIME="$(date +"%Y-%m-%dT%H:%M:%S%z")"
@@ -675,6 +781,7 @@ main() {
             backup_borg_class "$cls" "$repo" "$archive_name" || { failed=$((failed+1)); continue; }
             sem_archives+=("$cls:$repo:$archive_name")
             repo_pairs+=("$cls:$repo")
+            integrity_pairs+=("$cls:$repo")
             if [[ "${SKIP_WEBDAV:-0}" != "1" ]]; then
                 local tgt
                 for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$repo" "${tgt}/${SYSTEM_ID}/${cls}"; done
@@ -720,6 +827,15 @@ main() {
     if [[ $verify_failed -gt 0 ]]; then
         error "=== 推送都报成功，但云端副本自证 $verify_failed 项不一致——云端副本不可信（详见 ${CLOUD_VERIFY_REPORT}） ==="
         notify_alert "云端副本自证失败 $verify_failed 项（设备 ${DEVICE_ID}）：本地有的对象在云端缺失、尺寸不符，或强制补传后仍不同步。详见 ${CLOUD_VERIFY_REPORT}"
+        exit 1
+    fi
+    # A2a：本地字节层的完整性。「云端有一致的副本」和「副本本身没腐化」是两个问题，
+    # 后者只有把整仓读一遍才暴露，所以按月主动跑（窗口见 integrity_due）。
+    # 它不碰网盘，所以 CI 的 SKIP_WEBDAV=1 那两 job 照样跑到——这是这条生产面的被测来源。
+    run_integrity_check || warn "[integrity] 存储完整性校验流程异常退出（少一份证据，不改备份结论）"
+    if [[ $integrity_failed -gt 0 ]]; then
+        error "=== 存储完整性校验 $integrity_failed 项失败——仓库里有解密/校验不过的数据（详见 ${LOG}） ==="
+        notify_alert "存储完整性校验失败 ${integrity_failed} 项（设备 ${DEVICE_ID}）：borg check --verify-data 在本地仓库发现坏数据。详见 ${LOG}"
         exit 1
     fi
     success "=== Backup FULLY COMPLETE ($(date '+%Y-%m-%d %H:%M:%S')) ==="

@@ -103,6 +103,17 @@ SKIP_WEBDAV=1 ./backup.sh        # 先本地验证，不触云（备份前会自
 #   FAIL    —— 补传之后仍对不上，或云端缺对象/尺寸不符 → 整轮非零退出 + ntfy 告警
 # 这份报告自己也随下一轮时间轴推送上云（比对发生在落笔之前，所以它从不自指），
 # 异机排查时云端就能看到上一轮的结论。
+# 存储完整性校验（A2a）判读：$BACKUP_BASE/timeline/INTEGRITY.txt 每 **30 天**重写一次
+# （`INTEGRITY_DAYS=0` 立刻跑一遍），汇总行 `# 汇总: checks=N FAIL=0 UNKNOWN=0`。
+# 它跑的是 `borg check --verify-data`——把整仓每个 chunk 解密+解压+校验一遍，所以：
+#   PASS    —— 这一类仓库的字节全都读得出来、解得开（7.6 GB 量级是分钟级）
+#   UNKNOWN —— 拿不到仓库锁（多半是你同时在手工跑 drill），或本地仓库目录读不到；不改退出码
+#   FAIL    —— rc=1 是真发现坏数据；rc>=2 且错误里没提锁的按最坏情况算（borg 把「仓库可能
+#             已毁」和用法错误塞在同一档）。→ 整轮非零退出 + ntfy 告警，**别再等下一次演练**：
+#             损坏不会自己修好，取回路径也永远碰不到那几个块
+# 为什么单列：仓库里某个 chunk 腐化**不会**让 borg create 失败（10-01 实测翻掉一个字节后
+# 备份全绿），恢复演练也只抽样取回几个文件——不主动整仓读一遍，这类问题可以躺几年。
+# 引擎原文只在本地 backup.log（600、不上云），报告里一个字节都不抄：那是明文产物。
 launchctl list | grep partiverse # 调度在位（init.sh 已注册，每日 02:34）
 # launchd 那一次的现场在 ~/.local/share/partiverse-backup/launchd.{out,err}.log
 # （plist 的 StandardOut/ErrorPath 指过去；不配的话 stdout 落进 os_log，跑挂只剩退出码）
