@@ -19,8 +19,10 @@ concurrency:
 
 # 每个 job 与每个 E2E step 都设 timeout-minutes：默认 360 分钟意味着一步卡住（等 tty
 # 提示、borg 锁、下载挂起）能白烧 6 小时 macOS 额度，而且 step 只有结束才上传日志——
-# 卡住时什么都读不到，`gh run cancel` 也要等 runner 自己检查。预算按 10-01 实测写：
-# macos job 76 分钟、其中单个 E2E step 最长约 28 分钟，所以 step 级给 35 分钟余量。
+# 卡住时什么都读不到，`gh run cancel` 也要等 runner 自己检查。预算按 10-01 CI 实测写：
+# macos job 88 分钟（20:31:49Z→21:59:14Z），单步最长是 drill E2E 的 28m22s，
+# 所以 step 级预算 40 分钟——35 分钟只剩 23% 余量，免费 runner 抖一下就把「慢」判成
+# 「假失败」，白烧一轮 90 分钟；抬到 40 的代价只在真卡住时多等 5 分钟/步。
 
 jobs:
   semantic:
@@ -158,7 +160,7 @@ jobs:
             || { echo "::error::演练结论行缺失或抽样为 0"; exit 1; }
 
       - name: E2E multi-target (rclone local backend)
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # 脚本自带隔离的 rclone.conf（local 后端假 remote），不触网不碰真实配置
@@ -170,21 +172,21 @@ jobs:
           bash test_timeline_retention.sh
 
       - name: E2E redline cloud append-only
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # 静态守卫：全仓脚本不得出现 rclone sync（云端只增不减）
           bash test_cloud_copy_only.sh
 
       - name: E2E portable file attrs
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # GNU 语义 stat shim 顶在 PATH 前：Linux 上文件属性探测必须仍然正确
           bash test_portable_stat.sh
 
       - name: E2E init wizard + scheduler templates
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # 装机向导在隔离 HOME 跑完整首备，并断言调度模板（systemd unit / launchd
@@ -192,14 +194,14 @@ jobs:
           bash test_init_e2e.sh
 
       - name: E2E restore recovery paths
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # 真实 borg 仓库：--list / --archive --list / --latest / --id 四条路径实取回
           bash test_restore_e2e.sh
 
       - name: E2E cloud push failure visible
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # 只读目标使 rclone copy 失败：必须非零退出 + 告警，解除后恢复 FULLY COMPLETE
@@ -207,14 +209,14 @@ jobs:
           bash test_cloud_failure.sh
 
       - name: E2E standalone drill entry
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # 真实 borg 仓库 + 真实 age 密封：解封 → 抽样 → 实取 → 结论判定不得误报
           bash test_drill_e2e.sh
 
       - name: E2E standalone rescue entry
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           # 单文件逃生恢复：两种目录布局 / borg+restic 搜与取 / age 双路径（expect 驱动 tty）
@@ -314,25 +316,25 @@ jobs:
 
       # BSD 平台专属回归：borg extract 的 cwd 相对语义 + 只读云端目标的失败可见性
       - name: E2E restore recovery paths
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_restore_e2e.sh
 
       - name: E2E cloud push failure visibility
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_cloud_failure.sh
 
       - name: E2E standalone drill entry
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_drill_e2e.sh
 
       # 系统自带 /usr/bin/expect：恢复码（路径 B）的 tty 交互分支在 BSD 上同样要跑
       - name: E2E standalone rescue entry
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_rescue_e2e.sh
 
       # BSD 上 plist 模板才是主角：口令不落 LaunchAgents、日志路径在位
       - name: E2E init wizard + scheduler templates
-        timeout-minutes: 35
+        timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_init_e2e.sh
 
   windows:
