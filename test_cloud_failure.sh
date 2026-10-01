@@ -114,7 +114,7 @@ cp "$T/out.log" "$T/out.round2.log"
 export CURL_STUB_RC=22
 rc=0; run_backup || rc=$?
 unset CURL_STUB_RC
-[[ $rc -eq 0 ]] || fail "第 3 轮：ntfy 失败拖垮了备份退出码（rc=$rc，非致命分层破了）"
+[[ $rc -eq 0 ]] || fail "第 3 轮：ntfy 失败拖垮了备份退出码（rc=${rc}，非致命分层破了）"
 grep -q 'FULLY COMPLETE' "$T/out.log" || fail "第 3 轮：健康运行未打 FULLY COMPLETE"
 grep -q '推送失败' "$T/out.log" || fail "第 3 轮：curl 退出 22 却没走推送失败分支（-f 口径没生效？）"
 
