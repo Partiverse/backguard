@@ -20,12 +20,17 @@ mkdir -p "$T/src" "$T/conf/partiverse-backup" "$T/home" "$T/bin" "$T/dest"
 echo hello > "$T/src/a.txt"
 printf '[pftarget]\ntype = local\n' > "$T/rclone.conf"
 
-# stub curl：记录 ntfy 推送调用（备份链路本身不用 curl）
+# stub curl：记录推送调用，并**像真 ntfy 那样**把 JSON 回执打到 stdout 与 stderr——
+# 回执里的 topic 就是要验的对象，生产代码一旦把回执落日志，下面的断言当场抓到
 : > "$T/curl.log"
 cat > "$T/bin/curl" <<CURL
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$T/curl.log"
-exit 0
+printf '{"id":"e2eid","time":1,"expires":2,"event":"message","topic":"e2e-topic","title":"x"}\n'
+printf 'curl: (22) e2e-topic rejected\n' >&2
+# 注意转义：heredoc 没加引号，写成 ${CURL_STUB_RC:-0} 会在**生成桩的那一刻**展开成
+# 常量 0，第 3 轮改环境变量就再也切不动退出码了（10-01 就这么假通过过一次）
+exit \${CURL_STUB_RC:-0}
 CURL
 chmod +x "$T/bin/curl"
 
@@ -99,5 +104,41 @@ rc=0; run_backup || rc=$?
 grep -q "FULLY COMPLETE" "$T/out.log" || fail "第 2 轮未打 FULLY COMPLETE"
 if grep -q "云端" "$T/curl.log"; then fail "健康运行仍推送告警（常驻误报）"; fi
 [[ -d "$T/dest/ro-mac/E2E-Mac/files" ]] || fail "补传后 ro-mac 仍无备份（云端只增不减应可重试）"
+# 第 3 轮会覆写 out.log，健康那轮的「已推送」证据先存下来
+cp "$T/out.log" "$T/out.round2.log"
 
-echo "E2E-OK: 云端失败可见（退出非零 + 明确标记 + ntfy 告警），恢复后无残留误报"
+# ---------- 第 3 轮：让推送本身失败（桩退出 22 = ntfy 返回 4xx） ----------
+# 锁两件事：① curl -f 下 4xx 走「推送失败」分支而不是假装成功；
+# ② 推送失败仍不得影响备份本体退出码（AGENTS §1.3 非致命分层），且失败也不许把
+#    回执/错误串写进日志（桩在 stderr 里同样吐了 topic）
+export CURL_STUB_RC=22
+rc=0; run_backup || rc=$?
+unset CURL_STUB_RC
+[[ $rc -eq 0 ]] || fail "第 3 轮：ntfy 失败拖垮了备份退出码（rc=$rc，非致命分层破了）"
+grep -q 'FULLY COMPLETE' "$T/out.log" || fail "第 3 轮：健康运行未打 FULLY COMPLETE"
+grep -q '推送失败' "$T/out.log" || fail "第 3 轮：curl 退出 22 却没走推送失败分支（-f 口径没生效？）"
+
+# ---------- 凭据纪律：ntfy 回执（含 topic）绝不落任何日志 ----------
+# 真机 10-01 在 backup.log 里发现了整份回执 JSON，而 topic 就是订阅密码（AGENTS §1.2）。
+# 桩把回执打进 stdout/stderr，生产代码若再 >>"$LOG" 就会把 e2e-topic 写进日志面。
+# 三轮全扫（成功分支 + 失败分支都可能有回执），日志面 = 运行日志、配置目录、
+# 明文时间轴、测试自己的 stdout 两份
+# || true：find|head 在 head 提前收工时给 find 发 SIGPIPE，pipefail 下整条管道 rc=141，
+# 赋值语句会被 set -e 直接炸掉（§2 的同一条陷阱）
+BGLOG_DIR="$(find "$T/home" -type d -name partiverse-backup 2>/dev/null | head -1 || true)"
+[ -n "$BGLOG_DIR" ] || fail "找不到日志目录，下面的断言会假绿"
+hits="$(grep -rlF 'e2e-topic' "$BGLOG_DIR" "$T/conf" "$T/repos/timeline" \
+        "$T/out.log" "$T/out.round2.log" 2>/dev/null || true)"
+if [ -n "$hits" ]; then
+    echo "命中文件: $hits"
+    printf '%s\n' "$hits" | while IFS= read -r hf; do
+        grep -nF 'e2e-topic' "$hf" | sed 's/^/  /' | head -3
+    done
+    fail "ntfy 回执里的 topic 落进了日志（凭据纪律 §1.2）"
+fi
+# 反向确认不是空转：桩确实被调用且确实吐出过 topic（curl.log 是测试自己的调用记录，不算日志面）
+grep -qF 'e2e-topic' "$T/curl.log" || fail "桩没被调用，topic 断言等于没测"
+# 推送的成功与失败分支各自真的走到（第 2 轮桩退出 0 → 「已推送」；第 3 轮 → 「推送失败」）
+grep -q '已推送' "$T/out.round2.log" || fail "第 2 轮没走推送成功分支（curl 判定口径变了？）"
+
+echo "E2E-OK: 云端失败可见（退出非零 + 明确标记 + ntfy 告警），恢复后无残留误报；ntfy 回执（含 topic）不落日志"

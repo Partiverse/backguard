@@ -90,11 +90,15 @@ notify_push() {
         https://*|http://*) : ;;  # 自托管局域网 http 亦允许（用户自行权衡）
         *) warn "[semantic] SEM_NTFY_URL 非法（需 http/https），跳过推送"; return 0 ;;
     esac
-    if curl -sS -m 10 -H "Title: $title" -H "Tags: $tags" \
-            --data-binary "$body" "$SEM_NTFY_URL" >>"$LOG" 2>&1; then
+    # 回执绝不落日志：公共 ntfy.sh 的 JSON 回执里有 "topic" 字段，而 topic 就是订阅
+    # 密码（凭据纪律 §1.2 的「口令不进日志」）。真机 10-01 的 backup.log 里确实躺着
+    # 整份回执，所以这里 stdout/stderr 一律丢弃、-o /dev/null 把 body 关在 curl 内部，
+    # 诊断只保留「成 / 不成」——-f 让 4xx/5xx 走非零退出。
+    if curl -fs -m 10 -o /dev/null -H "Title: $title" -H "Tags: $tags" \
+            --data-binary "$body" "$SEM_NTFY_URL" >/dev/null 2>&1; then
         success "[semantic] 已推送: $title"
     else
-        warn "[semantic] ntfy 推送失败（不影响备份）"
+        warn "[semantic] ntfy 推送失败（不影响备份；URL 与回执均不入日志）"
     fi
     return 0
 }

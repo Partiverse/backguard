@@ -21,6 +21,11 @@
    目录只写数量；根级散文件聚类不显示名称）。unittest 有测试锁定，改渲染逻辑先跑测试。
 2. **凭据纪律**：口令/密钥/恢复码/token 只进 `secrets.env`（600）或 age 密钥目录，
    永不入库、不进日志、不进 issue/截图；文档示例一律占位符。
+   **第三方服务的响应体也算凭据**：公共 `ntfy.sh` 的回执 JSON 里有 `"topic"`，而 topic
+   就是订阅密码——`notify_push` 曾把 curl 的 stdout/stderr `>>"$LOG"`，真机 10-01 的
+   `backup.log` 里因此躺着整份回执。凡调用带凭据的 HTTP 接口，一律 `curl -fs -o /dev/null`
+   并把 stdout/stderr 丢弃，诊断只保留「成 / 不成」；守卫见 `test_cloud_failure.sh`
+   的凭据纪律段（桩按真服务那样吐回执，扫描运行日志 + 配置目录 + 明文时间轴）。
 3. **非致命分层**：语义层是引擎旁路——语义层任何故障不得中断备份本体（接入点全部
    告警降级，`backup.sh` 的 `generate_semantic` 调用点也带 `|| warn` 兜底）。
    `bg preflight` 等 Python 侧只做纯文件系统检查，**不做变量子进程调用**；
@@ -54,6 +59,11 @@
   实测口径：/bin/bash 3.2 只要 **LC_CTYPE 是多字节 locale** 必炸（`LC_ALL=C` 与
   `LC_CTYPE=C LANG=en_US.UTF-8` 都正常）；CI 的 homebrew bash 5.3.15 同样炸，本机 5.3.20
   不炸——版本相关，**别拿本机行为当保证**。静态守卫见 `test_portable_stat.sh` 断言 4。
+- **测试桩里的变量要在 heredoc 中转义**：写 stub 用的 `cat > "$T/bin/curl" <<CURL`（**无引号**
+  定界符）会在生成那一刻展开 `${VAR:-0}`——退出码之类的开关被烤成常量，之后改环境变量永远
+  切不动（10-01 第 3 轮「让推送失败」因此假通过过一次）。桩内一律 `\$VAR`，或改用 `<<'CURL'`
+  再靠外部文件传值。同理：**新增一轮会覆写 `out.log`**，前一轮的证据先 `cp` 存成独立文件，
+  否则新断言踩死旧断言。
 - **文件属性跨平台**：GNU `stat -f` 是「文件系统状态」——它把跟在前面的「格式串」当文件系统名，
   coreutils 9.4 实测（ubuntu:24.04 容器）：`stat -f '%m %N' f` 打真实文件的文件系统状态块到 stdout、stderr 报
   `cannot read file system information`、**rc=1**（pipefail 下会直接带崩整条流水线，
