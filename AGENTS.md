@@ -146,6 +146,23 @@
   `sha=nogit`。**写这个夹具的规矩**：KEEP 窗口的种子 mtime 必须 `touch -t` 写死（同秒并列会让
   「留哪几份」变成运气），前一阶段切出的真副本要先 `rm -f` 掉（它们占名额）。守卫见
   `test_log_rotation.sh`（linux + macos 双 CI，6 条变异）。
+- **PowerShell 侧同形但不等价（10-02 接上，roadmap A4 的 Windows 那一半）**：轮转清单是点名的
+  `{backup,rclone}.log`（Windows 语义层不另开 sem.log，告警都进 backup.log；Task Scheduler 也
+  不像 launchd 那样持独立 stdout 句柄，没有「mv 走之后继续往旧 inode 写」要排除的对象）。
+  删除候选是「形态正则 → 去掉目录 → 跳过前 KEEP 份」，所以**合规目录不占窗口名额**（bash 那侧
+  占：宽 glob 先排序、守卫后判），差别只在删除数量上，ps1 更保守。
+  **边界行不许放 `finally`**：实测 pwsh 7 上「函数内裸 `exit`」不触发外层 finally（Windows
+  PowerShell 5.1 **会**触发）——也就是说恰恰在判失败那一轮，边界行会静默消失，而那正是最需要
+  它的一轮。改法是把结论当**值**传出来（`$script:RunRc` 在函数里先赋值再 `return`，因为
+  EAP=Stop 下 `Write-Error` 就是 throw，写在它后面的语句全执行不到），脚本末尾单点写一次、
+  四条出口（全绿／引擎失败／云端无副本／抛异常）都过这里，再 `exit $script:RunRc`。
+  标签是 ASCII `run boundary:`（同一文件由 `Tee-Object` 写，而它的默认编码在 5.1 与 7 上不同档）。
+  守卫两头发：`test_log_rotation_logic.ps1`（从 `backup.ps1` 按 `# BEGIN/END-ROTATE|BOUNDARY`
+  哨兵**原样切出**被测函数——与 `test_bsd_probe.sh` 同一条约定；7 条变异，并把「`-PathType Leaf`
+  被尺寸判定掩盖、摘掉不变红」这一支如实写成测不到）+ ci.yml windows job 三步：逻辑（pwsh 7，
+  排在产品轮**之前**，它不碰仓库不碰网络）、接线（预置超限日志 + 6 份历史副本 + 两种必须放过的
+  路径，再跑一整轮真产品脚本，按内容确认噪音是「搬进副本」而不是「被截断」）、逻辑（5.1，
+  覆盖容器里没有 git 时走不到的那条 `nogit` 退化）。
 - **存储完整性校验走编排层，判定分三档**（10-01 夜落地，roadmap A2a）：`backup.sh` 每
   `INTEGRITY_DAYS`（默认 30）天对每个 borg 仓库跑一次 `borg check --verify-data`，结论写
   `timeline/INTEGRITY.txt`。**为什么必须有**：仓库里某个 chunk 腐化**不会**让 `borg create`
@@ -334,6 +351,10 @@
    正好撞满 step 级 `timeout-minutes: 40`，那一轮 macos 跑了 126 分钟仍红，而它后面三步
    一秒没执行——**这条 runner 上没有一步是便宜的，重排清单救不了，只能分车道**。
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
+   **PowerShell 侧的 `test_log_rotation_logic.ps1` 是第一套挂进 CI 的 ps1 逻辑测试**（windows
+   job 两步：pwsh 7 排在产品轮之前、Windows PowerShell 5.1 排在最后，两档宿主语义都要过），
+   同族的 `test_prune_logic.ps1` 目前仍是手工跑——加它进 CI 的时机是下一次动 `Prune-LocalTimeline`
+   时，别现在顺手写进文档（§3 那条「写『已挂 CI』之前必须 grep ci.yml 核对」就是为这种句子立的）。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
    `timeline/rescue-test.txt` 存在且结论为「≥1 PASS / 0 FAIL」：没有密钥时
@@ -446,7 +467,9 @@
    新探针红的时候不该把同一轮「保留策略修好了没」那条结论带走（runner 一轮一小时起，
    §3「步骤顺序就是优先级」）。（另一发：云端失败守卫的子进程特意用 `pwsh.exe`，
    就是为了不把「宿主 5.1」与「被测脚本」两件事混在一起——那条不变。）
-   ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④~~没有 A2a 完整性~~ **10-02 接了 bash 侧**
+   ②~~没有 A4 日志轮转/run 边界行~~ **10-02 接了**（`Rotate-LogFile` + `Write-RunBoundary`
+   按哨兵切出来测，接线由 windows job 的行为那一步跑真产品轮验；边界行的落点是脚本末尾而
+   **非** `finally`，理由见 §2 那条宿主实测差异）、③没有 A6 云端自证、④~~没有 A2a 完整性~~ **10-02 接了 bash 侧**
    （`backup.sh` 的 windows 分支登记 `类别:restic:路径` 并按引擎跑 `restic check --read-data`，
    守卫 `test_restic_retention.sh` 第 7 段），**`backup.ps1` 那一份仍是同批欠账**（ps1 里连
    `check` 都没出现过）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、

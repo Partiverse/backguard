@@ -116,6 +116,86 @@ function Backup-ResticClass {
     }
 }
 
+# ---------- 运行史可审计（roadmap A4，与 backup.sh 同形）----------
+# BEGIN-ROTATE —— test_log_rotation_logic.ps1 靠这两行标记把本函数**原样**切进容器里跑
+# （备份轮在 Linux 容器里造不出来，而这里的形状与 backup.sh 的 rotate_log_if_oversized
+#  一模一样，逻辑面值得单独证一次；生产改这个函数时标记必须还连着它）
+function Rotate-LogFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [long]$MaxBytes = 4194304,
+        [int]$Keep = 7
+    )
+    # 只认普通文件。它的可测性说清楚，免得下一个人以为变异证过：摘掉 `-PathType Leaf` 后
+    # 场景不会变红——目录的 .Length 是 $null，`$null -le MaxBytes` 为真，照样在下一行 return。
+    # 这一道是给「日志路径被同名目录占了位」那种现场准备的第二层，真正由变异（m2）证过的
+    # 目录闸门是下面 stale 清单里的那一道。
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 0 }
+    $size = (Get-Item -LiteralPath $Path).Length
+    if ($size -le $MaxBytes) { return 0 }
+    $dir = Split-Path -Parent $Path
+    $base = Split-Path -Leaf $Path
+    $rotated = Join-Path $dir ("{0}.{1}" -f $base, (Get-Date -Format "yyyyMMdd-HHmmss"))
+    Move-Item -LiteralPath $Path -Destination $rotated
+    # 两道守卫各挡一种坏法，与 backup.sh 的注释同口径：
+    #   形态白名单挡住用户手放的 backup.log.bak / backup.log.keepme（摘掉它这两样既被删、
+    #     又占掉 KEEP 名额，把真副本挤成「超额的那几份」——变异 m1 报的就是 copies 8→9）；
+    #   「必须是普通文件」挡住同名**目录**：让它进删除名单最坏的一档是连内容一起没（这条
+    #     语句将来谁顺手加个 -Recurse 就是数据丢失）；实测 pwsh 7 落在另一档——它对非空目录
+    #     直接抛（变异摘掉这道守卫时报的就是 Object reference…），于是整次轮转被接入点降成
+    #     warning、现役日志再也切不动。两种坏法都不该靠「目录恰好不存在」赌运气。
+    # 时间戳副本一律按 mtime 排（与 bash 侧 `ls -1dt` 同一依据），新切出的那份天然最新。
+    $copies = @(Get-ChildItem -LiteralPath $dir -Force |
+        Where-Object { $_.Name -match ("^{0}\.[0-9]{{8}}-[0-9]{{6}}$" -f [regex]::Escape($base)) } |
+        Sort-Object LastWriteTime -Descending)
+    $stale = @($copies | Where-Object { -not $_.PSIsContainer } | Select-Object -Skip $Keep)
+    foreach ($f in $stale) { Remove-Item -LiteralPath $f.FullName -Force }
+    # 证据行：四种坏法在产物上长得一模一样（没被调用 / 参数没读到 / 两道守卫之一摘掉 /
+    # 函数内抛终止性异常被上层 catch 降成 warning），所以让它自己报现场。
+    # 纯 ASCII 是故意的——守卫可能在子进程 stdout 里匹配它（见 AGENTS §2 那条）。
+    Write-Host ("ROTATE {0} size={1} max={2} keep={3} copies={4} removed={5}" -f `
+        $base, $size, $MaxBytes, $Keep, $copies.Count, $stale.Count)
+    return $stale.Count
+}
+# END-ROTATE
+
+# BEGIN-BOUNDARY —— 同上一条约定：这段也被 test_log_rotation_logic.ps1 切走
+# run 边界行：一轮一行写明「哪个代码基、退出码、跑了多久」。夜间出问题时，「这条错误
+# 属于哪一轮、那轮部署点是什么 SHA」不用再去翻提交时间猜。
+function Write-RunBoundary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Sha = "nogit",
+        [int]$Rc = 0,
+        [int]$DurationSec = 0
+    )
+    try {
+        # 字段形状与 backup.sh 的 log_run_boundary 一致（sha= rc= dur=），标签用 ASCII：
+        # 同一份日志由 Tee-Object 写入，而它的默认编码在 5.1 与 pwsh 7 上不同——中文标签
+        # 混进去会糊（同一口径见 AGENTS §5 的「纯 ASCII 是故意的」那条）。守卫要的三字段
+        # 一个不少，跨平台 grep 用 `run boundary` / `run 边界` 各取其一即可。
+        "[{0}] run boundary: sha={1} rc={2} dur={3}s" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Sha, $Rc, $DurationSec |
+            Add-Content -LiteralPath $Path
+    } catch {
+        # 边界行属于旁路：写不成就少一行诊断，绝不反过来打断备份（与 backup.sh 的 `|| true` 同义）
+        Write-Host "BOUNDARY-WRITE-FAILED $($_.Exception.Message)"
+    }
+}
+
+# 代码基标记：取不到就退化成 nogit（与 backup.sh 的 `${RUN_GIT_SHA:-nogit}` 同一条）。
+# 三种取不到都得退化——没装 git、这个目录不是仓库、HEAD 还没有提交——否则边界行自己炸，
+# 而它在脚本最末尾一行，炸掉的就是整轮的退出码。
+function Get-RunGitSha {
+    param([string]$Path = $PSScriptRoot)
+    try {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return "nogit" }
+        $sha = (& git -C $Path rev-parse --short HEAD 2>$null) -join ''
+        if ($LASTEXITCODE -eq 0 -and $sha.Trim() -match '^[0-9a-f]{7,40}$') { return $sha.Trim() }
+    } catch { }
+    return "nogit"
+}
+# END-BOUNDARY
+
 # ---------- 主函数 ----------
 function Start-PartiverseBackup {
     $ErrorActionPreference = "Stop"
@@ -128,6 +208,8 @@ function Start-PartiverseBackup {
     $BACKUP_LOG = "$LOG_DIR\backup.log"
     # Backup-ResticClass 通过 $env:BACKUP_LOG 引用日志路径
     $env:BACKUP_LOG = $BACKUP_LOG
+    # 脚本末尾的边界行从这里取路径，不在那里重算一遍字面量（见 switch 后的注释）
+    $script:BackupLogPath = $BACKUP_LOG
 
     New-Item -ItemType Directory -Force -Path $CONF_DIR, $LOG_DIR, $BACKUP_BASE | Out-Null
 
@@ -135,8 +217,27 @@ function Start-PartiverseBackup {
     if (Test-Path "$CONF_DIR\config.ps1") {
         . "$CONF_DIR\config.ps1"
     } else {
+        # 先落 rc 再告警：本函数顶部 EAP=Stop，Write-Error 是**终止性**异常，写在它之后的
+        # 任何语句都执行不到——而脚本末尾的边界行只认 $script:RunRc（见 switch 后的注释）。
+        $script:RunRc = 1
         Write-Error "配置文件不存在，请先运行 .\backup.ps1 -Task Init"
-        exit 1
+        return
+    }
+
+    # 日志轮转（roadmap A4，与 backup.sh 同形）：排在配置加载之后、引擎动手之前——
+    # 阈值来自 $env:SEM_LOG_MAX_BYTES / SEM_LOG_KEEP，而这两个正是 config.ps1 能设的东西。
+    # 清单是点名的两个：语义层在 Windows 侧不另开 sem.log（它的告警都进 backup.log），而
+    # Task Scheduler 不像 launchd 那样持有独立 stdout 句柄，没有「mv 走之后继续往旧 inode
+    # 写」那种必须排除的第三方句柄。
+    # 旁路没资格终止本体（§1.3）：函数里一个 Move-Item 撞上「日志被别的进程占用」就会抛
+    # 终止性异常，这里 catch 成 warning 继续备份，而不是让一次日志超限变成一整轮失败。
+    try {
+        $rotMax = if ($env:SEM_LOG_MAX_BYTES -match '^\d+$') { [long]$env:SEM_LOG_MAX_BYTES } else { 4194304 }
+        $rotKeep = if ($env:SEM_LOG_KEEP -match '^\d+$') { [int]$env:SEM_LOG_KEEP } else { 7 }
+        Rotate-LogFile -Path $BACKUP_LOG -MaxBytes $rotMax -Keep $rotKeep | Out-Null
+        Rotate-LogFile -Path $RCLONE_LOG -MaxBytes $rotMax -Keep $rotKeep | Out-Null
+    } catch {
+        Write-Warning "[log] 轮转失败（不阻断备份）: $($_.Exception.Message)"
     }
 
     # 加载密码
@@ -229,10 +330,13 @@ function Start-PartiverseBackup {
 
     if ($failed -eq 0 -and $cloudFailed -eq 0) {
         Write-Host "=== Backup FULLY COMPLETE ==="
+        $script:RunRc = 0
     } else {
-        # 两种坏法分开计数并都写进结论行：引擎类别失败 vs 云端没有可信副本，处置完全不同
+        # 两种坏法分开计数并都写进结论行：引擎类别失败 vs 云端没有可信副本，处置完全不同。
+        # 同样先落 rc：EAP=Stop 下这行 Write-Error 就是 throw，`exit` 走不到，结论一律由
+        # 接入点（脚本末尾）用 $script:RunRc 写进边界行并以该码退出。
+        $script:RunRc = 1
         Write-Error "=== Backup FINISHED WITH ERRORS (engine=$failed cloud=$cloudFailed) ==="
-        exit 1
     }
 }
 
@@ -328,6 +432,8 @@ function Initialize-PartiverseBackup {
     Write-Host "  初始化完成！手动触发: & `"$PSCommandPath`" -Task Backup" -ForegroundColor Green
 }
 
+$script:RunStartTs = Get-Date
+$script:RunRc = 0
 switch ($Task) {
     "Init"  { Initialize-PartiverseBackup }
     "Backup" {
@@ -337,7 +443,24 @@ switch ($Task) {
             # ::error:: 注解 CI 匿名可读；本地打印完整堆栈
             Write-Error "$($_.Exception.Message) @ $($_.InvocationInfo.PositionMessage)"
             Write-Error "stack: $($_.ScriptStackTrace)"
-            exit 1
+            $script:RunRc = 1
         }
     }
+}
+
+# run 边界行落在脚本**最末尾这一处**，而不是 try/finally——实测宿主语义不同：pwsh 7 上
+# 函数内裸 `exit` 不会触发外层 finally（Windows PowerShell 5.1 会）。真机上 Task Scheduler
+# 跑的是 powershell.exe（5.1），但 CI 与开发调试跑 pwsh 7，而恰恰「这一轮判失败」是最需要
+# 边界行的那一轮，靠 finally 等于在最需要的时候让它静默消失。所以结论当**值**传出来
+# （$script:RunRc），四条出口（全绿 / 引擎类别失败 / 云端无可信副本 / 抛异常）都在同一个
+# 落点写一行，再以该码退出。
+if ($Task -eq "Backup") {
+    # 与 backup.sh 的 `[[ -n "${LOG:-}" ]] || return 0` 同一条：早退的轮次可能连日志目录
+    # 都没有（配置缺失就 return 了），边界行是旁路，不去为它新建目录、也不报错。
+    $bpath = if ($script:BackupLogPath) { $script:BackupLogPath } else { "$env:LOCALAPPDATA\PartiverseBackup\logs\backup.log" }
+    if (Test-Path -LiteralPath (Split-Path -Parent $bpath)) {
+        $dur = [int] (New-TimeSpan -Start $script:RunStartTs -End (Get-Date)).TotalSeconds
+        Write-RunBoundary -Path $bpath -Sha (Get-RunGitSha) -Rc $script:RunRc -DurationSec $dur
+    }
+    exit $script:RunRc
 }

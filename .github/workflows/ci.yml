@@ -481,6 +481,21 @@ jobs:
           "RESTIC_PASSWORD='ci-$(-join ((1..24) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) }))'" |
             Out-File "$conf\secrets.env" -Encoding utf8
 
+      - name: Log rotation + run boundary logic
+        # A4 的**逻辑**那一半：从 backup.ps1 里按哨兵标记原样切出 Rotate-LogFile /
+        # Write-RunBoundary / Get-RunGitSha 跑一遍，几秒收敛。排在产品轮之前是故意的——
+        # 它不碰仓库也不碰网络，红的话不该带走同一轮里 25 分钟的产品断言（§3「步骤顺序就是
+        # 优先级」）。**接线**（备份轮真的调用了吗、边界行落在哪个出口）由本 job 后面的
+        # 「Assert log rotation and run boundary wiring」在真 Windows 文件系统上验。
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_log_rotation_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::日志轮转/run 边界逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
       - name: Run backup and assert
         timeout-minutes: 40
         env:
@@ -843,6 +858,108 @@ jobs:
           Write-Host "=== 第二段（产品链路）OK：keep=$seenKeep snaps=$seenSnaps、合规剩 $($kept.Count) 份、不合规那份在、日期壳已收 ==="
           exit 0
 
+      - name: Assert log rotation and run boundary wiring
+        # 逻辑测试测不到「调用点接上了没有」：函数在文件里、哨兵也成对，但没人调用它，
+        # 产物上长得一模一样（与保留策略那发同样的两件事，见上一条守卫的分段说明）。
+        # 所以这一步预置**超限的现役日志 + 6 份历史副本 + 两种必须放过的路径**，再跑一发
+        # 真产品轮，验 backup.ps1 里那两处接线与脚本末尾的边界行落点。
+        # 必须走**子进程**（与云端失败可见性那条同一理由：脚本内的 `exit` 会带走宿主），
+        # 解释器同样用 pwsh.exe（5.1 那一档另有一步）。排在既有产品断言之后：它自己也要跑
+        # 一整轮，红的话不该把前面已经拿到的结论一起带走。
+        shell: pwsh
+        timeout-minutes: 20
+        env:
+          SKIP_WEBDAV: "1"
+        run: |
+          $ErrorActionPreference = "Continue"
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
+          # 阈值压到 2 KiB、窗口压到 3：真机上 4 MiB / 7 份在 CI 里永远够不着，
+          # 「低频路径的节流本身要被测」是同一口径（见 AGENTS §2 完整性那条）
+          $env:SEM_LOG_MAX_BYTES = '2048'
+          $env:SEM_LOG_KEEP = '3'
+          $logs = "$env:LOCALAPPDATA\PartiverseBackup\logs"
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          $log = Join-Path $logs 'backup.log'
+          # 上一轮的噪音：本轮该把它整份搬进副本，现役日志里一个字都不许留
+          ('PRE-EXISTING-NOISE ' * 300) | Set-Content -LiteralPath $log -Encoding ascii
+          $seeded = @()
+          for ($i = 1; $i -le 6; $i++) {
+              $n = 'backup.log.{0}-{1}' -f (Get-Date).AddDays(-400 - $i).ToString('yyyyMMdd'), '023400'
+              $p = Join-Path $logs $n
+              'x' * 10 | Set-Content -LiteralPath $p -Encoding ascii
+              # mtime 逐个写死（同秒并列会让「留哪几份」变成运气），且必须都早于本轮
+              (Get-Item -LiteralPath $p).LastWriteTime = (Get-Date).AddDays(-400 - $i)
+              $seeded += $p
+          }
+          $keepme = Join-Path $logs 'backup.log.keepme'
+          'not-a-rotation-copy' | Set-Content -LiteralPath $keepme -Encoding ascii
+          $dirOld = Join-Path $logs ('backup.log.' + (Get-Date).AddDays(-500).ToString('yyyyMMdd-HHmmss'))
+          [void][System.IO.Directory]::CreateDirectory($dirOld)
+          'marker' | Set-Content -LiteralPath (Join-Path $dirOld 'marker.txt') -Encoding ascii
+          (Get-Item -LiteralPath $dirOld).LastWriteTime = (Get-Date).AddDays(-500)
+
+          $out = & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
+          $code = $LASTEXITCODE
+          $text = $out | Out-String
+          if ($code -ne 0) {
+              Write-Host "::error::预置完日志后这一轮产品脚本没跑成（rc=$code）——下面的接线断言全是空转"
+              Write-Host (($out | Select-Object -Last 25) -join "`n")
+              exit 1
+          }
+          $now = @(Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue) -join "`n"
+          # 先证「切走了」，再证「新的落进现役日志」：反过来的话，整轮崩在别处也会让第二条绿
+          if ($now -match 'PRE-EXISTING-NOISE') {
+              Write-Host "::error::超限的现役日志没被切走，历史噪音还留在现役日志里——调用点没接上或阈值没读到"
+              exit 1
+          }
+          if ($now -notmatch 'run boundary: sha=') {
+              Write-Host "::error::现役日志里没有 run 边界行——脚本末尾那个落点没执行（pwsh 7 上函数内裸 exit 不触发 finally，这正是不用 finally 的理由）"
+              exit 1
+          }
+          $bl = @($now -split "`n" | Where-Object { $_ -match 'run boundary: sha=' })
+          if ($bl.Count -ne 1) {
+              Write-Host "::error::一轮该只有一行边界行，实得 $($bl.Count) 行：$($bl -join ' | ')"
+              exit 1
+          }
+          if ($bl[0] -notmatch 'rc=0 dur=\d+s') {
+              Write-Host "::error::这一轮 FULLY COMPLETE，边界行却记的不是 rc=0：$($bl[0])"
+              exit 1
+          }
+          $copies = @(Get-ChildItem -LiteralPath $logs -Force -File |
+              Where-Object { $_.Name -match '^backup\.log\.[0-9]{8}-[0-9]{6}$' })
+          if ($copies.Count -ne 3) {
+              Write-Host "::error::SEM_LOG_KEEP=3 没封顶住：轮转副本 $($copies.Count) 份（$($copies.Name -join ', ')）"
+              exit 1
+          }
+          # 噪音不是「没了」而是「搬进了副本」：按内容找到那份副本，比按日期前缀猜名字可靠
+          # （跨午夜跑 CI 时日期前缀那条判定会自己失效）
+          $withNoise = @($copies | Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'PRE-EXISTING-NOISE' })
+          if ($withNoise.Count -ne 1) {
+              Write-Host "::error::现役日志里的历史噪音既不在现役日志、也没有恰好一份副本带着它（找到 $($withNoise.Count) 份）——切走 = 搬家，不是截断"
+              exit 1
+          }
+          # 两道删除守卫在真 Windows 文件系统上也得各自站住（大小写不敏感 + 反斜杠路径是
+          # 容器里造不出来的那一档，所以才要在这里重跑一遍而不是只信逻辑测试）
+          if (-not (Test-Path -LiteralPath $keepme)) {
+              Write-Host "::error::形态白名单没守住：非轮转形态的 $keepme 被删了"
+              exit 1
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $dirOld 'marker.txt'))) {
+              Write-Host "::error::同名合规**目录**连内容一起被删了（$dirOld）——「必须是普通文件」那道守卫没起作用"
+              exit 1
+          }
+          if (-not (Test-Path -LiteralPath $keepme)) {
+              Write-Host "::error::形态白名单没守住：backup.log.keepme 被删了"
+              exit 1
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $dirOld 'marker.txt'))) {
+              Write-Host "::error::同名合规**目录**被当成超额副本处理了（目录里的内容都没了）"
+              exit 1
+          }
+          Write-Host "=== A4 接线 OK：现役日志已切走、边界行一行 rc=0、副本封顶 3 份、两道守卫各放过各自那种 ==="
+          exit 0
+
       - name: Windows PowerShell 5.1 host probe
         # AGENTS §5 的「①`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是在 powershell.exe
         # 5.1 下的未验证面」——Task Scheduler 注册的正是这台宿主，而本 job 其余步骤的 shell 都是
@@ -935,6 +1052,23 @@ jobs:
           }
           Write-Host "=== 5.1 宿主探针 OK：语法 0 错、JSON 类型与三种 stderr 形态的结论已上报、Format-IsoTime 交回 ISO ==="
           exit 0
+
+      - name: Log rotation logic on Windows PowerShell 5.1
+        # 同一份逻辑测试，换到 Task Scheduler 真正注册的那台宿主上再跑一遍（几秒）：
+        # Move-Item / Remove-Item / Get-ChildItem 的语义在 5.1 与 pwsh 7 之间不是保证一致的，
+        # 而这一档宿主上一发已经抓到过一次分歧（函数内裸 `exit` 在 7 上不触发 finally，5.1 会）。
+        # 顺带补齐容器测不到的那一支：windows runner 上有 git，所以 Get-RunGitSha 的
+        # 「git 在但不是仓库」那条退化路径这里才真的走到。
+        # 排在产品断言与本 job 的行为步骤**之后**：它是新覆盖，红的话不该把同一轮里已经拿到的
+        # 产品结论一起带走（免费 windows runner 一小时起，见 §3「步骤顺序就是优先级」）。
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_log_rotation_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 上这份逻辑测试 rc=$LASTEXITCODE——宿主语义分歧，见上面的 FAIL 行"
+              exit 1
+          }
 
       - name: Push debug logs
         if: failure()
