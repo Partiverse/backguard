@@ -144,10 +144,19 @@
   试过），所以「摘掉 `-I`」与「拿 `copy` 退出 0 当修好」在这里只有**静态**断言守得住
   （`test_cloud_verify_logic.ps1` 场景10 钉住源码里那两行写法），行为面的证明属于 bash 侧
   `test_cloud_verify.sh` 的撒谎桩。同理：造不出「写不进去的云端文件」——Linux 宿主上 rclone
-  非原地写 + root 无视只读位（场景8h 因此 Skip），NTFS 的 `IsReadOnly` 才真挡得住；
+  非原地写 + root 无视只读位；**NTFS 的 `IsReadOnly` 也挡不住**（10-02 windows runner 实测：
+  rclone 先建临时文件再 rename 替换，只读位管的是「改内容」不是「换条目」），所以这一支在
+  两种宿主上都只能如实 Skip + 静态断言钉住「补传后重新读回核对，仍不符才判 FAIL」那两行写法。
   `:zip,...` 这类只读连接串在 rclone 1.75.1 根本不成立。守卫
-  `test_cloud_verify_logic.ps1`（59 条断言；13 条变异**全 CAUGHT**，其中 m7/m8 靠静态那两条，
+  `test_cloud_verify_logic.ps1`（60 条断言；13 条变异**全 CAUGHT**，其中 m7/m8 靠静态那两条，
   台账里逐条写清是静态还是行为面——别把静态抓住当成网盘语义已验证）。
+- **探测命令不许与被测命令同形（探测即破坏）**（10-02 在 windows runner 上炸出来的一条）：
+  场景8h 为了判断「这台宿主能不能造出写不进去的云端文件」，自己先跑了一次
+  `rclone copy -I`——而那**正是被测产品用来修好不一致的那一条命令**。它在 NTFS 上真的替换掉了
+  只读文件，于是夹具留下的状态已经是「一致」，紧接着产品调用无从 HEAL，断言期望的 FAIL 落空、
+  整步红在 CI 上（本地容器里它是 Skip，所以这种坏法只有真宿主看得见）。口径：**探测 = 只读**，
+  要用带副作用的命令去「探」就等于把条件亲手抹掉；探完观察**结果**再分档（判 HEALED 就如实
+  Skip 并写清观察到的原因），别预设「这台宿主一定能造出来」。
 - **PowerShell 5.1 按 ANSI 代码页读没有 BOM 的 `.ps1`，而中文会因此炸掉语法面**（10-02 实测，
   代价最贵的一条）：5.1 只在文件带 UTF-8 BOM 时才按 UTF-8 解码；没 BOM 就用当前 ANSI 代码页。
   中文注释的 UTF-8 字节里 0x91-0x94 在 CP1252 上正是弯引号 `‘ ’ “ ”`，而 PowerShell 的
@@ -221,7 +230,19 @@
   10/12 与其余非零按最坏情况判 FAIL。而 `--read-data` **不是可选项**：不带它时 check 只查
   快照/树/blob 的结构，10-02 实测「翻掉某个 pack 数据段的一个字节」之后 `restic check` 仍 rc=0，
   只有 `--read-data` 看得见（对位 borg 的 `--verify-data`）。守卫 `test_restic_retention.sh` 第 7 段。
-  `backup.ps1` 侧的自证与完整性仍是同批欠账。
+- **`backup.ps1` 侧的 A2a/A6 都接上了（10-02），三条只在 PowerShell 上成立的口径**：
+  ①**登记只有一处构造点**——`$repoPairs` 在 `Start-PartiverseBackup` 里建一次，自证与完整性
+  两条旁路共用；两处各 `ForEach-Object` 一遍的话，漏登记的那一类永远没人读（A6 第一版漏
+  `repo_pairs`、A2b 抽样分家，同一课第三次）。②Windows 侧**只有 restic**（`backup.ps1` 从不碰
+  borg），所以 borg 那支「读错误原文猜是不是锁」在这里压根不该出现——照抄 bash 会多出一段
+  永不执行的代码。③**rc=11 这一档真实引擎造不出来**：10-02 实测 `restic unlock` 清的是仓库
+  内部的锁**对象**，不是文件锁，并发 `restic check` 不会返回 11——所以它只能由桩证明，
+  在守卫里如实注册成「真引擎没测到」，而不是拿一个永远绿不了的断言冒充覆盖。
+  守卫 `test_integrity_logic.ps1`（哨兵切函数 + `.sh`/`.cmd` 双形桩按宿主选 + 真 restic 只负责
+  「健康 PASS / 真损坏 FAIL」两档），windows job 两步（pwsh 7 排在产品轮之前、5.1 排在末尾）
+  再加一步**运行时接线断言**（读上一轮产品轮留下的 `timeline\INTEGRITY.txt`：`checks` 必须真
+  大于 0、报告里必须没有运行器路径，然后再跑一发验「窗口未到 → 报告 mtime 不许变」——
+  静态断言咬不住「函数在、哨兵成对、但运行时从没落笔」这种坏法）。
 - **restic 的三件事与 borg 不同，移植时逐条对表**（10-02 实测，`test_restic_retention.sh` 锁住）：
   ①`-r <repo>` 是**每条子命令各要一次**，`init` 带了不等于 `backup` 认得它，少了直接 rc=1
   「Please specify repository location」；②`forget` **只删快照对象、不删数据**——引擎帮助页原话
@@ -385,12 +406,18 @@
    正好撞满 step 级 `timeout-minutes: 40`，那一轮 macos 跑了 126 分钟仍红，而它后面三步
    一秒没执行——**这条 runner 上没有一步是便宜的，重排清单救不了，只能分车道**。
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
-   **PowerShell 侧的逻辑测试现在有两套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）与
-   `test_cloud_verify_logic.ps1`（10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、
-   Windows PowerShell 5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2
-   编码那条）。同族的 `test_prune_logic.ps1` 目前仍是手工跑——加它进 CI 的时机是下一次动 `Prune-LocalTimeline`
+   **PowerShell 侧的逻辑测试现在有三套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）、
+   `test_cloud_verify_logic.ps1` 与 `test_integrity_logic.ps1`（均 10-02），每套都是 windows job
+   两步——pwsh 7 排在产品轮之前、Windows PowerShell 5.1 排在最后，两档宿主语义都要过（5.1 那一步的
+   正文只能有 ASCII，见 §2 编码那条）。A2a 另加一步**运行时接线断言**（`Assert integrity report
+   wiring`），因为逻辑测试无论多少条静态断言都证不了「这一轮真的落笔了」。同族的
+   `test_prune_logic.ps1` 目前仍是手工跑——加它进 CI 的时机是下一次动 `Prune-LocalTimeline`
    时，别现在顺手写进文档（§3 那条「写『已挂 CI』之前必须 grep ci.yml 核对」就是为这种句子立的）。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
+   **夹具里「一份产物被多次调用」是死断言的常见来源**（10-02 实测踩进）：窗口节流用产物自己的
+   mtime 当标记，同一份夹具里第二次起的 `Invoke-*Check` 会全部被「未到窗口」挡在门外——看着像
+   「实现没判 FAIL」，其实是节流在起作用，而变异验证会把这种例当成「断言没咬住」误诊成实现问题。
+   口径：**每一个要走完整判定的用例用自己的产物路径**（`t1/`、`t2/`…），要测节流的用例才共用。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
    `timeline/rescue-test.txt` 存在且结论为「≥1 PASS / 0 FAIL」：没有密钥时
    `run_drill` 走 rc=20 静默跳过、产物根本不存在，演练这条生产面就等于没测——10-01

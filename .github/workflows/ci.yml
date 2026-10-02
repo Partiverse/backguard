@@ -419,7 +419,13 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    # 60→90（10-02）：这个 job 现在有**两**步各自要跑一整轮真产品脚本（日志轮转接线、A2a 接线），
+    # 而各步 step 级超时之和（40+20+25+20+20）早就大于 job 级 60——只要有一轮慢一点，被砍的一定是
+    # 队尾，而队尾恰好是这一轮新加的覆盖（§3 在 macos 那轮实测过同一件事：免费 runner 上被超时
+    # 砍掉的永远是清单尾部）。这里没有可引用的实测用量（HEAD 那轮的 windows job 红在第 6 步，
+    # 第 7 步之后一秒没跑），所以 90 是「按步预算推的余量」而不是测出来的数：真被砍了再按
+    # 逐 step 时间戳收窄，别拿这个数当事实读。
+    timeout-minutes: 90
     permissions:
       contents: write
     steps:
@@ -512,6 +518,22 @@ jobs:
           & "$PWD\test_cloud_verify_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::云端自证逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
+      - name: Repository integrity logic (A2a)
+        # A2a 存储完整性校验的**逻辑**那一半：从 backup.ps1 按哨兵标记切出 Test-IntegrityDue /
+        # Invoke-ResticCheck / Write-IntegrityReport / Invoke-IntegrityCheck 单独跑。排在产品轮
+        # 之前是同一条口径（上面两步一样）：它只动临时目录里的桩，红了不该把同轮产品结论带走。
+        # **这里比本地容器跑得更宽**：restic 已由 Install deps 装好进 PATH，所以场景9
+        # 「拿真 restic 建一个仓库、翻掉 pack 一个字节、要求判 FAIL」会真的执行——容器里没有
+        # restic 时它整段 Skip，而这一支正是「rc=1 只由真损坏换来」唯一的现场证据。
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_integrity_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::存储完整性逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
               exit 1
           }
 
@@ -979,6 +1001,75 @@ jobs:
           Write-Host "=== A4 接线 OK：现役日志已切走、边界行一行 rc=0、副本封顶 3 份、两道守卫各放过各自那种 ==="
           exit 0
 
+      - name: Assert integrity report wiring (A2a)
+        # 逻辑测试的场景11 只能证「调用点在源码里」，证不了「这一轮真的产出过报告」——
+        # 函数在、哨兵成对、静态断言全绿，而运行时因为一条环境变量、一次异常或一个不满足的
+        # 前置条件从未落笔，产物上与前一种长得一模一样（与保留策略/日志轮转那两发同一课）。
+        # 所以这一步直接读**上面那轮产品备份**留下的 timeline\INTEGRITY.txt：checks 必须
+        # 真大于 0（空登记还落笔是最坏的那种报告）、真 restic 的判定必须落在档位上、
+        # 而上云的明文里不许有仓库绝对路径（红线 §1.1 对机器报告的口径）。
+        # 再跑一发**窗口未到期**的产品轮，验节流在真实文件系统上站住：报告 mtime 不许变、
+        # 整轮退出码不许被「没到期」影响——月度路径没被跑过两次，「月度」只是形容词。
+        # 排在既有产品断言之后：它自己也要跑一整轮，红了不该把前面已拿到的结论带走。
+        shell: pwsh
+        timeout-minutes: 20
+        env:
+          SKIP_WEBDAV: "1"
+        run: |
+          $ErrorActionPreference = "Continue"
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
+          $rep = Join-Path $env:BACKUP_BASE 'timeline\INTEGRITY.txt'
+          if (-not (Test-Path -LiteralPath $rep -PathType Leaf)) {
+              Write-Host "::error::上面那轮产品备份没产出 timeline\INTEGRITY.txt——调用点在这台宿主上一次都没执行（逻辑测试的静态断言咬不住这种坏法）"
+              exit 1
+          }
+          $text = Get-Content -Raw -LiteralPath $rep
+          $sum = [regex]::Match($text, 'checks=(\d+) FAIL=(\d+) UNKNOWN=(\d+)')
+          if (-not $sum.Success) {
+              Write-Host "::error::报告里没有汇总计数行——读的人没法判断这轮到底校验了几个仓库`n$text"
+              exit 1
+          }
+          if ([int]$sum.Groups[1].Value -lt 1) {
+              Write-Host "::error::报告写了 checks=0 的「完整性通过」，比没有报告更坏（空登记就不该落笔）"
+              exit 1
+          }
+          if ([int]$sum.Groups[2].Value -gt 0) {
+              Write-Host "::error::真 restic 在 CI 新建的小仓库上判了 FAIL——要么仓库真腐化了，要么判定档位写错`n$text"
+              exit 1
+          }
+          if ($text -notmatch "(?m)^PASS\s+restic:") {
+              Write-Host "::error::没有一条 PASS 行，却写了 checks=$($sum.Groups[1].Value)：判定归口没接上`n$text"
+              exit 1
+          }
+          # 隐私面：报告随时间轴上云，仓库绝对路径（含备份根目录本身）一个字节都不许抄进去。
+          # 两种分隔符都查——只查一种等于给「换个写法把路径抄进明文」留门。
+          foreach ($form in @($env:RUNNER_TEMP, $env:RUNNER_TEMP.Replace('\', '/'))) {
+              if ($text -match [regex]::Escape($form)) {
+                  Write-Host "::error::报告里出现了运行器临时目录路径（$form）——引擎原文漏进了上云明文"
+                  exit 1
+              }
+          }
+          $before = (Get-Item -LiteralPath $rep).LastWriteTime
+          $out = & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
+          $code = $LASTEXITCODE
+          $text2 = $out | Out-String
+          if ($code -ne 0) {
+              Write-Host "::error::窗口未到期的这一轮产品脚本没跑成（rc=$code）——下面的节流断言全是空转"
+              Write-Host (($out | Select-Object -Last 25) -join "`n")
+              exit 1
+          }
+          if ($text2 -notmatch '未到校验窗口') {
+              Write-Host "::error::刚写过的报告没挡住第二次整仓读取——每晚把仓库读一遍，月度变成了日度`n$(($out | Select-Object -Last 15) -join "`n")"
+              exit 1
+          }
+          if ((Get-Item -LiteralPath $rep).LastWriteTime -ne $before) {
+              Write-Host "::error::未到期的这一轮仍然重写了报告——用 mtime 当窗口标记这套机制没生效"
+              exit 1
+          }
+          Write-Host "=== A2a 接线 OK：产品轮产出 checks=$($sum.Groups[1].Value) 的报告、无路径漏泄、第二发被窗口挡在门外 ==="
+          exit 0
+
       - name: Windows PowerShell 5.1 host probe
         # AGENTS §5 的「`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是在 powershell.exe
         # 5.1 下的未验证面」——Task Scheduler 注册的正是这台宿主，而本 job 其余步骤的 shell 都是
@@ -1034,6 +1125,23 @@ jobs:
           & "$PWD\test_cloud_verify_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::Windows PowerShell 5.1 cannot run cloud verify logic: rc=$LASTEXITCODE"
+              exit 1
+          }
+
+      - name: Repository integrity logic on Windows PowerShell 5.1
+        # 同一份完整性逻辑换到 Task Scheduler 真正注册的那台宿主再跑一遍。这里要探的分歧是
+        # **具体**的：Invoke-IntegrityCheck 顶部第一句是 `$ErrorActionPreference = "Continue"`，
+        # 因为 5.1 下原生二进制（restic）往 stderr 写字节会变成终止性异常——pwsh 7 不会。
+        # 那句没生效的话，一次普通的「仓库被别的进程锁住」就会把整条校验炸成异常，
+        # 而调用点对异常的处置是「少一份证据，不改备份结论」（AGENTS §1.3），也就是说
+        # 这一层在 5.1 上退化得悄无声息。场景7 就是专测这一支。
+        # 同上一条排在 job 末尾的理由：新覆盖红了不该带走这轮已经拿到的产品结论。
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_integrity_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run integrity logic: rc=$LASTEXITCODE"
               exit 1
           }
 

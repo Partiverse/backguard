@@ -479,6 +479,197 @@ function Invoke-CloudVerify {
 }
 # END-VERIFY
 
+# BEGIN-INTEGRITY —— 同一条哨兵约定：这一段被 test_integrity_logic.ps1 按标记原样切走单独跑
+# A2a 引擎仓库的存储完整性月度校验（对位 backup.sh 的 run_integrity_check）。
+# 为什么必须有：仓库里某个 pack 腐化**不会**让 backup 失败（10-01 在 borg 侧实测过同一件事），
+# 也就是说没有这一步，现有全部守卫对「存着的字节坏了」这一类恒为绿——只有主动整仓读一遍
+# 才看得见。--read-data 才是「把整仓读一遍」：不带它时 restic check 只查快照/树/blob 的**结构**
+# （引擎帮助页原话 To also verify the integrity of the actual backed-up data, use the
+# --read-data flag），与 borg 侧的 --verify-data 对位。
+#
+# 判定口径与 backup.sh 的 restic 分支逐字对齐，改任何一条前先读那边的注释：
+#   ①三档判定。restic 的退出码**本来就分档**（引擎 EXIT STATUS：0 成功 / 1 有错 / 10 仓库不存在 /
+#     11 已被锁 / 12 口令不对），所以这边不需要 borg 那套「读错误原文猜是不是锁」——Windows 侧
+#     只有 restic 一个引擎，backup.ps1 从不碰 borg。
+#   ②只有 11 记 UNKNOWN 且不改退出码：并发的手工操作不该把用户叫醒；10/12 是真问题（仓库没了、
+#     凭据不对），和发现坏数据一样按最坏情况判 FAIL。
+#   ③窗口节流用**产物自身的 mtime**当标记（与 rescue-test.txt 同一条机制，不另养状态文件）；
+#     INTEGRITY_DAYS=0 是人工立刻跑的入口。低频路径的节流本身要被测，否则「月度」只是文档里的形容词。
+#   ④引擎原文只进本地日志，一个字节都不抄进报告：报告随时间轴上云，而错误行里带仓库绝对路径
+#     （红线 §1.1 同一条口径）。
+#   ⑤没登记任何仓库时**不写报告**：一份 checks=0 的「完整性通过」比没有更坏。
+
+function Get-IntegrityWindowDays {
+    if ($env:INTEGRITY_DAYS -match '^\d+$') { return [int]$env:INTEGRITY_DAYS }
+    30
+}
+
+function Reset-IntegrityState {
+    $script:IntegrityLines = @()
+    $script:IntegrityFailed = 0
+    $script:IntegrityUnknown = 0
+}
+
+# FAIL 计数只由 Format-IntegrityNote 一处维护：调用点写错状态（把 FAIL 拼成 FATAL）就会让
+# 整轮「一项失败都没记」却仍然 FULLY COMPLETE，所以状态字符串不许在别处手拼。
+function Format-IntegrityNote {
+    param(
+        [Parameter(Mandatory = $true)][string]$Status,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$Detail
+    )
+    $script:IntegrityLines += ("{0,-8} {1,-14} {2}" -f $Status, $Label, $Detail)
+    switch ($Status) {
+        "FAIL"    { $script:IntegrityFailed = $script:IntegrityFailed + 1 }
+        "UNKNOWN" { $script:IntegrityUnknown = $script:IntegrityUnknown + 1 }
+    }
+}
+
+# 到期判据。$true 才会真的跑引擎（几分钟量级），所以这一条本身是被测面：
+# 写反了要么每晚整仓读一遍（观察期不该有的流量），要么一个月都不读（那这层证据等于没有）。
+function Test-IntegrityDue {
+    param([Parameter(Mandatory = $true)][string]$ReportPath)
+    $sw = if ($env:INTEGRITY_VERIFY) { $env:INTEGRITY_VERIFY } else { "1" }
+    if ($sw -ne "1") { return $false }
+    if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) { return $true }
+    $days = Get-IntegrityWindowDays
+    $last = $null
+    try { $last = (Get-Item -LiteralPath $ReportPath).LastWriteTime } catch { }
+    # 读不到 mtime 时按「到期」处理：宁可在同一窗口多读一遍，也不要因为一次 stat 失败把整月的
+    # 校验机会跳过去（bash 侧 file_mtime helper 缺失时同样 return 0 = 到期）
+    if (-not $last) { return $true }
+    $ageSec = (New-TimeSpan -Start $last -End (Get-Date)).TotalSeconds
+    return ($ageSec -ge ($days * 86400))
+}
+
+# 单个仓库的一次校验，返回 @{rc; durSec; out}。引擎路径走参数而不是写死 `restic`：守卫要在
+# PATH 上放一个桩来喂「拿不到锁 / 非锁类 fatal / 往 stderr 写东西」这几档，真损坏那一档才用
+# 真实二进制（与 bash 的 $RESTIC、test_integrity.sh 的borg-selflock/borg-fatal 分工同形）。
+function Invoke-ResticCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [string]$ResticBin = "restic"
+    )
+    $t0 = Get-Date
+    $invoked = $false
+    $rc = 127
+    $out = ""
+    try {
+        $out = @(& $ResticBin "-r" $Repo "check" "--read-data" 2>&1 | ForEach-Object { "$_" }) -join "`n"
+        $invoked = $true
+        if ($null -ne $LASTEXITCODE) { $rc = $LASTEXITCODE }
+    } catch {
+        $out = $_.Exception.Message
+    }
+    # 没真的调起来（二进制不在 / 路径拼错）＝ 127，绝不能沿用上一条命令留下的 $LASTEXITCODE
+    # 当本轮结论——那正是「命令没跑成却记 PASS」的形状
+    if (-not $invoked) { $rc = 127 }
+    @{
+        rc     = $rc
+        durSec = [int] (New-TimeSpan -Start $t0 -End (Get-Date)).TotalSeconds
+        out    = $out
+    }
+}
+
+function Write-IntegrityReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowEmptyCollection()][string[]]$Lines,
+        [int]$Failed = 0,
+        [int]$Unknown = 0,
+        [string]$Sha = "nogit"
+    )
+    # 字符串数组一次成形再写：逐行 Add-Content 在 5.1 上编码/换行口径读不准，而这里一旦漏行
+    # 就是报告头部少一行、汇总计数变成字符串。
+    $body = @(
+        "# 存储完整性校验（A2a）——按月把每个引擎仓库整仓读一遍",
+        ("# 生成时间: {0}   代码基: {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Sha),
+        "# 它证明的是「存着的字节没坏、还能解密解压缩」；「取回路径可用」由恢复演练",
+        "#   （rescue-test.txt / CLOUD-VERIFY 之外的那份）负责，两者不互相替代。",
+        "# 判据（restic check --read-data；引擎的 EXIT STATUS 本来就分档）: rc=0 通过；",
+        "#   rc=11（已被锁）记 UNKNOWN 且不改本轮退出码——并发的手工操作不该把用户叫醒；",
+        "#   rc=1 逐包读取发现坏数据或结构不一致；rc=10/12（仓库不存在/口令不对）与其余非零",
+        "#   按最坏情况判 FAIL。",
+        "# 引擎原文**不抄进本文件**：它是随时间轴上云的明文产物，而错误行里会带仓库绝对路径。",
+        ("# 汇总: checks={0} FAIL={1} UNKNOWN={2}" -f @($Lines).Count, $Failed, $Unknown)
+    ) + @($Lines)
+    try {
+        $body | Out-File -FilePath $Path -Encoding utf8
+        return $true
+    } catch {
+        Write-Host ("INTEGRITY-REPORT-WRITE-FAILED {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
+# $RepoPairs 元素 `类别:本地仓库路径`，由调用点登记。规矩与云端自证那条一样：忘了登记＝这一类
+# 根本没跑，而整轮结论照样全绿（A6 第一版就是这么把缺陷藏过去的）。
+# 返回 @{Failed; Unknown; Skipped; Report}——调用点只看这个值，不跨作用域读 $script: 状态。
+function Invoke-IntegrityCheck {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$RepoPairs,
+        [Parameter(Mandatory = $true)][string]$ReportPath,
+        [string]$LogPath = "",
+        [string]$Sha = "nogit",
+        [string]$ResticBin = "restic"
+    )
+    # 旁路：函数内把 EAP 收到 Continue。调用点顶部是 Stop，而 restic 的 check 全程往 stderr 打
+    # 进度，在 Windows PowerShell 5.1 上那会变成终止性异常（与自证同一颗雷，见 Invoke-CloudVerify）
+    $ErrorActionPreference = "Continue"
+    Reset-IntegrityState
+    if (-not (Test-IntegrityDue -ReportPath $ReportPath)) {
+        Write-Host ("[integrity] 未到校验窗口（{0} 天内已跑过，或 INTEGRITY_VERIFY=0），跳过" -f (Get-IntegrityWindowDays))
+        return @{ Failed = 0; Unknown = 0; Skipped = $true; Report = "" }
+    }
+    # 报告落在时间轴根。Windows 侧没有语义层替我们建这个目录的保证，没人建它就写不出来，
+    # 而「报告没落盘」在这一步的语义等于「这月的证据没了」
+    try {
+        $parent = Split-Path -Parent $ReportPath
+        if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    } catch { }
+    if (@($RepoPairs).Count -eq 0) {
+        Write-Host "[integrity] 本轮没有登记任何引擎仓库，未做存储完整性校验"
+        return @{ Failed = 0; Unknown = 0; Skipped = $false; Report = "" }
+    }
+    foreach ($pair in $RepoPairs) {
+        $idx = $pair.IndexOf(":")
+        if ($idx -lt 1) {
+            Format-IntegrityNote UNKNOWN "restic:?" ("登记串不是 `类别:路径` 形状（{0}）" -f $pair)
+            continue
+        }
+        $cls = $pair.Substring(0, $idx)
+        $repo = $pair.Substring($idx + 1)
+        if (-not (Test-Path -LiteralPath $repo -PathType Container)) {
+            Format-IntegrityNote UNKNOWN "restic:$cls" "本地仓库目录读不到，这一项没证成也没证败"
+            continue
+        }
+        $r = Invoke-ResticCheck -Repo $repo -ResticBin $ResticBin
+        if ($LogPath) {
+            try {
+                Add-Content -LiteralPath $LogPath -Value $r.out -Encoding utf8
+                Add-Content -LiteralPath $LogPath `
+                    -Value ("[integrity] restic check --read-data {0} -> rc={1} ({2}s)" -f $cls, $r.rc, $r.durSec) `
+                    -Encoding utf8
+            } catch { }
+        }
+        switch ($r.rc) {
+            0 { Format-IntegrityNote PASS "restic:$cls" ("{0}s 逐包读取校验通过（存储没腐化）" -f $r.durSec) }
+            11 { Format-IntegrityNote UNKNOWN "restic:$cls" ("{0}s 拿不到仓库锁（有别的 restic 在跑），这一项没证成也没证败" -f $r.durSec) }
+            1 { Format-IntegrityNote FAIL "restic:$cls" ("{0}s 后 rc=1：逐包读取发现坏数据或结构不一致，详见本地 backup.log" -f $r.durSec) }
+            default { Format-IntegrityNote FAIL "restic:$cls" ("{0}s 后 rc={1}：非锁类失败（10 仓库不存在 / 12 口令不对 / 引擎没跑成），详见本地 backup.log" -f $r.durSec, $r.rc) }
+        }
+    }
+    $ok = Write-IntegrityReport -Path $ReportPath -Lines $script:IntegrityLines `
+        -Failed $script:IntegrityFailed -Unknown $script:IntegrityUnknown -Sha $Sha
+    @{
+        Failed  = $script:IntegrityFailed
+        Unknown = $script:IntegrityUnknown
+        Skipped = $false
+        Report  = $(if ($ok) { $ReportPath } else { "" })
+    }
+}
+# END-INTEGRITY
+
 # ---------- 主函数 ----------
 function Start-PartiverseBackup {
     $ErrorActionPreference = "Stop"
@@ -611,6 +802,10 @@ function Start-PartiverseBackup {
     }
 
     if ($failed -eq 0 -and $cloudFailed -eq 0) {
+        # 这一轮备份成功的那些仓库，两条旁路共用同一份登记表：自证要知道「该有哪些仓库」，
+        # 完整性校验要知道「该读哪些仓库」。两处各建一遍＝其中一处漏登记，而漏的那一类永远
+        # 没人读（A6 第一版漏 repo_pairs、A2b 记哈希的抽样与 drill 抽样分家，同一课）。
+        $repoPairs = @($semDone | ForEach-Object { "{0}:{1}" -f $_.cls, $_.repo })
         # A6 L1：上面那两条只回答「rclone 没报错」，这一步才回答「云端到底有没有」。只在一切
         # 自称成功之后跑——本地失败或推送失败时结论已经定了，再花几分钟列云端没意义。
         # 开关与 backup.sh 同一条：只有显式 SEM_CLOUD_VERIFY=0 之外……照抄 bash 的「== 1 才跑」，
@@ -618,7 +813,6 @@ function Start-PartiverseBackup {
         $vsw = if ($env:SEM_CLOUD_VERIFY) { $env:SEM_CLOUD_VERIFY } else { "1" }
         $verifyFailed = 0
         if ($env:SKIP_WEBDAV -ne "1" -and $vsw -eq "1" -and $targets.Count -gt 0) {
-            $repoPairs = @($semDone | ForEach-Object { "{0}:{1}" -f $_.cls, $_.repo })
             try {
                 # 自证的是**这一轮推出去的那份**，所以报告必须落在时间轴根级、在推送之后写：
                 # 它自己随下一轮才上云（先比对、后落笔）。
@@ -643,8 +837,27 @@ function Start-PartiverseBackup {
             $script:RunRc = 1
             Write-Host "::error::=== 推送都报成功，但云端副本自证 $verifyFailed 项不一致——云端副本不可信（详见 timeline\CLOUD-VERIFY.txt） ==="
         } else {
-            Write-Host "=== Backup FULLY COMPLETE ==="
-            $script:RunRc = 0
+            # A2a：本地字节层的完整性。「云端有一致的副本」和「副本本身没腐化」是两个问题，
+            # 后者只有把整仓读一遍才暴露，所以按月主动跑（窗口见 Test-IntegrityDue）。
+            # 它不碰网盘，所以 SKIP_WEBDAV=1 的 CI job 照样跑到——这是这条生产面的被测来源
+            # （backup.sh 同一句口径）。排在自证之后：自证已经判红就先把那一条报出来，
+            # 两种坏法各有自己的结论行，不合并（合并＝读的人分不清坏在哪一步）。
+            $integrity = $null
+            try {
+                $integrity = Invoke-IntegrityCheck -RepoPairs $repoPairs `
+                    -ReportPath (Join-Path $BACKUP_BASE "timeline\INTEGRITY.txt") `
+                    -LogPath $BACKUP_LOG -Sha (Get-RunGitSha)
+            } catch {
+                # 旁路没资格终止本体（§1.3）：校验自己炸了只是少一份证据，不改备份结论
+                Write-Warning "[integrity] 存储完整性校验流程异常退出（少一份证据，不改备份结论）: $($_.Exception.Message)"
+            }
+            if ($integrity -and $integrity.Failed -gt 0) {
+                $script:RunRc = 1
+                Write-Host ("::error::=== 存储完整性校验 {0} 项失败——本地仓库里有解密/校验不过的数据（详见 timeline\INTEGRITY.txt 与本地 backup.log） ===" -f $integrity.Failed)
+            } else {
+                Write-Host "=== Backup FULLY COMPLETE ==="
+                $script:RunRc = 0
+            }
         }
     } else {
         # 两种坏法分开计数并都写进结论行：引擎类别失败 vs 云端没有可信副本，处置完全不同。

@@ -45,8 +45,11 @@
 #   已知**测不到**的一支：`Test-VerifyConfigHash` 里「强制补传之后云端 config 反而读不到了」
 #   那条 UNKNOWN——要走到它得让第一次读成功、第二次读失败，真 rclone 在两次调用之间不会自己变
 #   哑；只有让 `cat`/`copyto` 撒谎的桩能造（bash 侧 test_cloud_verify.sh 就是这么测的）。
-#   在这里注册为「真实二进制测不到」，不假装覆盖。同理场景8h（补传后仍不一致 → FAIL）在 Linux
-#   宿主上造不出「写不进去的云端文件」（rclone 非原地写 + root 无视只读位），它按探测结果如实 Skip。
+#   在这里注册为「真实二进制测不到」，不假装覆盖。同理场景8h（补传后仍不一致 → FAIL）：这一支要
+#   求「云端那个文件写不进去」，Linux 宿主上造不出（rclone 非原地写 + root 无视只读位），windows
+#   runner 上真造得出。所以 8h **按跑出来的结论**分流：判 FAIL 就断言，HEALED 就如实 Skip。
+#   别再改成「先用同一条 rclone 命令探一刀」——10-02 实测那一次探测自己就把只读那份替换掉了，
+#   探测是被探测情形的破坏者（详见 8h 段注释）。分支本身另有场景10 的静态断言守着。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
 
@@ -325,22 +328,26 @@ if (-not $script:hasRclone) {
     Chk '场景8g 补传前云端确实是另一份内容（夹具自己先证明不一致存在过）' ($preHash -ne $postHash)
 
     # ---- 8h：补传后仍不一致 → FAIL（非致命层之外的真失败） ----
-    # 让「补传」真的失败：把云端那个文件标只读。先探一刀——真跑通了说明这台宿主挡不住替换，
-    # 那就如实 Skip，绝不留一条注定判错的断言（AGENTS §3：不许把测不到写成通过）。
+    # 想走到这一支得让「补传」真的失败，办法是把云端那个文件标只读。**别先用同一条 rclone 命令
+    # 探一刀**（10-02 windows runner 实测）：探测那一次自己就把只读那份替换掉了（rclone 非原地写：
+    # 目标目录建临时件再 rename，而 rename 之前先把目标删掉），于是探测 rc=0 → 走 Skip 分支，
+    # 或像本轮那样探测 rc 非零、产品再调用一次却因「只读件已被探测删掉」而补传成功 → HEALED →
+    # 断言判红。**探测本身就是被探测情形的破坏者**，这类「先试一下行不行」在这里注定自相矛盾。
+    # 改成：直接按产品那样跑，用**跑出来的结论**判定这台宿主挡不挡得住替换——挡住就断言（真覆盖），
+    # 没挡住就按观察到的结果如实 Skip。两种结果都不是假通过。
     $stale2 = Join-Path $cld8 'config'
     [void](RC @('copy', $repo8, $cld8))          # 先让两端重新一致
     $ro = Get-Item -LiteralPath $stale2
     $ro.IsReadOnly = $true
     "local-XXX" | Set-Content -LiteralPath $cfg -NoNewline -Encoding ascii
-    $probe = RC @('copy', $repo8, $cld8, '--include', 'config', '-I')
-    if ($probe.Rc -eq 0) {
-        Skip '场景8h 补传后仍不一致 → FAIL' "这台宿主没能造出「写不进去的云端文件」（探测 rc=0）"
-        $ro.IsReadOnly = $false
+    Reset-VerifyState
+    Test-VerifyConfigHash -Repo $repo8 -Dest $cld8 -Label 'config:files @ t8h'
+    $line8h = $script:VerifyLines[0]
+    $ro.IsReadOnly = $false                       # 无论结论如何都要还原，否则夹具带着只读件留在那
+    if ($line8h -match '^HEALED') {
+        Skip '场景8h 补传后仍不一致 → FAIL' `
+            "这台宿主上 rclone 的替换写没被只读位挡住（补传真成功、结论 HEALED 是对的）——「写不进去的云端文件」造不出来，该分支由场景10 的静态断言守着"
     } else {
-        $ro.IsReadOnly = $false
-        Reset-VerifyState
-        Test-VerifyConfigHash -Repo $repo8 -Dest $cld8 -Label 'config:files @ t8h'
-        $line8h = $script:VerifyLines[0]
         Chk '场景8h 补传失败且内容仍不符 → FAIL（不是 HEALED 也不是 UNKNOWN）' `
             ($script:VerifyFailed -eq 1 -and $script:VerifyHealed -eq 0 -and $line8h -match '^FAIL') `
             "实得: $line8h"
@@ -401,6 +408,12 @@ Chk '场景10 补传命令 literally 带 -I 且只带上 config 那一个对象'
     ($srcPs1 -match '(?m)^\s*& rclone copy -I\b[^\r\n]*--include\s+config')
 Chk '场景10 HEALED 只能由补传后重新读回的内容换来（不许拿 copy 退出 0 当修好）' `
     ($srcPs1 -match '(?s)rclone copy -I.*?\$chash = Get-VerifyCloudHash.*?elseif \(\$chash -eq \$lhash\) \{\s*Format-VerifyNote HEALED')
+# 8h 那条行为断言在「替换写不会被只读位挡住」的宿主上如实 Skip（见 8h 的注释），所以补传后
+# 仍不一致 → FAIL 这一支在这个平台上只剩静态守卫：分支必须还在，且必须带着退出码与两端哈希。
+# 摘掉这一支（把 else 写成什么都算 HEALED）就是把「云端不可信」报成「云端已修好」——A6 最坏的
+# 一种错法，不能只靠一台宿主的文件系统脾气守着。
+Chk '场景10 补传后仍不一致那一支真的存在且判 FAIL' `
+    ($srcPs1 -match '(?s)elseif \(\$chash -eq \$lhash\) \{\s*Format-VerifyNote HEALED.*?else \{\s*Format-VerifyNote FAIL')
 } finally {
     Remove-Item -LiteralPath $T -Recurse -Force -ErrorAction SilentlyContinue
 }
