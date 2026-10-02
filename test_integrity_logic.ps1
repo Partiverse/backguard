@@ -20,11 +20,12 @@
 #     「引擎会不会这么答」的未知项——不写进 PASS 口径，也不假装测过。
 #
 # 变异台账（摘 backup.ps1 的实现、这份必须报 FAIL；15 条实测：**13 条 CAUGHT**，剩下两条是
-# 「同一条主张有两处实现」的登记（见 m13/m13b），不是覆盖。基线 57 ok / 2 skip，
-# windows runner 上真 restic 让场景9 再多出 6 条）。驱动先校验锚点恰好出现一次、替换真的落上，
-# 再把容器崩溃（rc=134）单独报成 UNDETERMINED——把「跑崩了」读成「没咬住」与把空 conclusion
-# 读成「CI 过了」是同一种错法（本轮 m9 就是这样被负载下的 qemu 误判过一次，机器空下来重跑
-# 当场 CAUGHT 在「场景5 汇总行的 checks 与逐条行数对得上」）。
+# 「同一条主张有两处实现」的登记（见 m13/m13b），不是覆盖。基线：容器挂上真 restic 时
+# **63 条断言 + 1 条如实 Skip**（没 restic 就退成 57/2，windows runner 上装了 restic，见 ci.yml
+# 那一步的注释）。15 刀变异逐条 CAUGHT，台账全文在下面；驱动先校验锚点恰好出现一次、替换真的
+# 落上，再把容器崩溃（rc=134）单独报成 UNDETERMINED——把「跑崩了」读成「没咬住」与把空
+# conclusion 读成「CI 过了」是同一种错法（本轮 m9 就是这样被负载下的 qemu 误判过一次，
+# 机器空下来重跑当场 CAUGHT 在「场景5 汇总行的 checks 与逐条行数对得上」）。
 #   m1 窗口判据写反（`-ge` 改 `-le`）        → 场景2「紧接着的第二轮不该重跑」
 #   m2 INTEGRITY_VERIFY 开关摘掉              → 场景2 关掉后仍到期
 #   m3 `== 1` 语义改成「非空就跑」            → 场景2 INTEGRITY_VERIFY=0 整段关掉
@@ -346,13 +347,19 @@ if (-not $realRestic) {
     [System.IO.File]::WriteAllBytes((Join-Path $src9 'b.bin'), (New-Object byte[] 8192))
     $eap9 = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & restic -r $repo9 init 2>&1 | Out-Null
+    $out9 = @(& restic -r $repo9 init 2>&1 | ForEach-Object { "$_" })
     $initRc = $LASTEXITCODE
-    & restic -q -r $repo9 backup --no-progress (Get-ChildItem -LiteralPath $src9 -File | ForEach-Object { $_.FullName }) 2>&1 | Out-Null
+    # 夹具自己怎么调引擎**不在被测面**，所以它也得被真的跑一次：10-02 这里写的
+    # `backup --no-progress` 在 restic 0.19.1 上是 `unknown flag`（那是 copy/rewrite 的开关），
+    # rc=1 却被下一行的 Skip 吞掉——一条自己坏了就默默不跑的断言，和它保护的实现同时失效。
+    # 所以 Skip 的理由里必须带引擎原文的最后几行，别让「建夹具失败」长成一句无信息的说明。
+    $out9b = @(& restic -q -r $repo9 backup (Get-ChildItem -LiteralPath $src9 -File |
+        ForEach-Object { $_.FullName }) 2>&1 | ForEach-Object { "$_" })
     $bkRc = $LASTEXITCODE
     $ErrorActionPreference = $eap9
     if ($initRc -ne 0 -or $bkRc -ne 0) {
-        Skip '场景9 真实 restic 的健康/损坏两档' "建夹具仓库失败（init rc=$initRc backup rc=$bkRc）"
+        Skip '场景9 真实 restic 的健康/损坏两档' ("建夹具仓库失败（init rc=$initRc backup rc=$bkRc）：" +
+            ((@($out9) + $out9b | Select-Object -Last 3) -join ' / '))
     } else {
         Clear-EnvSwitch
         $rep9 = Join-Path $script:root 't9/INTEGRITY.txt'

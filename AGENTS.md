@@ -368,6 +368,11 @@
 - **E2E 夹具要与生产同形**：夹具桩只返回「脚本想要的那种形状」时，会把真 bug 遮掉——
   迁移门禁的 `gh --jq` 版在本机真实 gh 上炸、在桩上却一直「通过」，因为桩直接 echo 结论字符串。
   桩要么吐原始 JSON，要么连被调对象的返回形状一起复刻。
+  **夹具自己怎么调引擎也要真跑一次**（10-02 实测）：`test_integrity_logic.ps1` 场景9 的夹具写了
+  `restic backup --no-progress`，而那是 `copy`/`rewrite` 的开关，backup 上 `unknown flag`、rc=1——
+  下一行的 `Skip` 把这个失败整个吞掉，「用真引擎证健康 PASS / 真损坏 FAIL」这一层因此一度
+  等于没测，而表面上还是 skipped=2 的绿。口径：**Skip 的理由里必须带引擎原文的最后几行**，
+  不带证据的 Skip 与假通过只差一句没人读的理由。
 - **同一处调用点喂多个分支时，每个分支都要各调一次**：`cmd_convert.load()` 用一句
   `parser(text, args.strip, known_dirs)` 喂 restic/borg/generic 三个 parser，前两个后来加过
   参数、generic 没跟——`--engine generic` 从来没有跑通过（`TypeError: takes 1 positional
