@@ -89,6 +89,10 @@ Chk '场景1 跨年种子的月份壳收掉' (-not (Test-Path -LiteralPath $farM
 Chk '场景1 跨年种子的年壳收掉' (-not (Test-Path -LiteralPath $farYear))
 Chk '场景1 仍有内容的月壳留着(08)' (Test-Path -LiteralPath (Split-Path (Split-Path $d.pBad -Parent) -Parent))
 Chk '场景1 只剩两份' (@(Get-SnapDirs $s1).Count -eq 2) "实际 $(@(Get-SnapDirs $s1).Count)"
+# CI 第二段断言的是「合规快照只剩 1 份」而不是「总共只剩两份」——两条口径不同，
+# notes 那份不合规但必须活着。把 CI 那条同形搬过来，免得 windows 那发是它唯一的读者
+$okLeaves = @(Get-SnapDirs $s1 | ForEach-Object { $_.Name } | Where-Object { $_ -match '^[0-9]{4}-[a-z0-9-]+$' })
+Chk '场景1 合规快照只剩 1 份（CI 第二段同一条）' ($okLeaves.Count -eq 1) "实剩: $($okLeaves -join ', ')"
 Chk '场景1 stage 根没被删' (Test-Path -LiteralPath $s1)
 
 # ---- 场景 2：不设 KEEP → 回落默认 14，5 份不裁 ----
