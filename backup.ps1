@@ -99,9 +99,21 @@ function Backup-ResticClass {
         throw "[$Class] restic backup 失败 (exit $LASTEXITCODE)"
     }
 
-    # 清理：本地保留 7d/4w/6m
-    & restic -r $RepoPath forget --keep-daily=7 --keep-weekly=4 --keep-monthly=6 2>&1 |
+    # 清理：本地保留 7d/4w/6m。**必须带 --prune**：restic 的 forget 只删快照对象，
+    # 引擎帮助页原话「In order to remove the unreferenced data after "forget" was run
+    # successfully, see the "prune" command」——实测 9 份日快照 forget 退出 0、快照少一份，
+    # 仓库字节数一字节没少。少了这一步，第 174 行「本地已 prune，云端保留全部历史」那句
+    # 前提就不成立，本地仓库与云端副本一起只增不减。
+    # rc 口径与 backup.sh 的 backup_restic_class 逐条对齐：3 = 部分生效（有快照没删掉，
+    # 下晚重试）只告警；其余非零判本类失败——保留策略没跑成的唯一后果是仓库无限增长，
+    # 而观察期里没人会主动去查仓库尺寸
+    & restic -r $RepoPath forget --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune 2>&1 |
         Tee-Object -FilePath $env:BACKUP_LOG -Append | Out-Null
+    if ($LASTEXITCODE -eq 3) {
+        Write-Warning "[$Class] forget/prune 部分生效 (rc=3)"
+    } elseif ($LASTEXITCODE -ne 0) {
+        throw "[$Class] restic forget/prune 失败 (exit $LASTEXITCODE)"
+    }
 }
 
 # ---------- 主函数 ----------

@@ -153,7 +153,10 @@ backup_restic_class() {
 
     set +e
     # shellcheck disable=SC2154  # exc_ref 由上方 eval 动态绑定
-    "$RESTIC" backup \
+    # -r 必须在 backup 上再写一次：restic 不记得上一条 init 用的是哪个仓库，
+    # 少了它整条命令直接 rc=1「Please specify repository location」——本分支此前
+    # 就是这样三类全红（10-02 用 PLATFORM=windows 的真 restic 夹具第一次把它跑起来才露头）
+    "$RESTIC" -r "$repo_path" backup \
         --host "$DEVICE_ID" \
         "${exc_ref[@]}" \
         "${inc_ref[@]}" \
@@ -161,14 +164,33 @@ backup_restic_class() {
     local rc=${PIPESTATUS[0]}
     set -e
 
-    if [[ $rc -ne 0 ]]; then
+    # 3 = 有源文件读不到，快照已落库但不完整——与 borg create rc=1 同一档（backup.ps1 一直
+    # 就是这么容忍的）。判成本类失败等于把已经存进去的归档白扔一晚
+    if [[ $rc -eq 3 ]]; then
+        warn "[$cls] 部分文件读不到，已存不完整快照 (rc=3)"
+    elif [[ $rc -ne 0 ]]; then
         error "[$cls] restic backup 失败 (exit $rc)"; return 1
     fi
 
-    info "[$cls] 清理旧归档..."
-    "$RESTIC" forget \
-        --keep-daily=7 --keep-weekly=4 --keep-monthly=6 \
-        -r "$repo_path" 2>&1 | tee -a "$LOG"
+    info "[$cls] 清理旧归档 (7d/4w/6m，含 prune 回收)..."
+    # forget 只删快照对象、不删数据——restic 帮助页原话「In order to remove the
+    # unreferenced data after "forget" was run successfully, see the "prune" command」。
+    # 不带 --prune 时实测（9 份日快照、每份 6 MiB 独有数据）：forget 退出 0、快照少一份，
+    # 仓库字节数一字节没少，那份快照的数据永久留在库里——「本地保留」就成了装饰。
+    # rc 口径照引擎的 EXIT STATUS 表：3 = 有快照没删掉（部分生效，下晚重试）；
+    # 其余非零（1 通用错误 / 11 仓库被锁 / 12 口令不对）判本类失败，因为保留策略没跑成
+    # 的唯一后果是仓库无限增长，观察期里没人会主动去查
+    set +e
+    "$RESTIC" -r "$repo_path" forget \
+        --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune 2>&1 | tee -a "$LOG"
+    local forget_rc=${PIPESTATUS[0]}
+    set -e
+    if [[ $forget_rc -eq 3 ]]; then
+        warn "[$cls] forget/prune 部分生效 (rc=3)"
+    elif [[ $forget_rc -ne 0 ]]; then
+        error "[$cls] restic forget/prune 失败 (exit $forget_rc)"; return 1
+    fi
+    return 0
 }
 
 # ---------- 云端同步（rclone 统一管理） ----------

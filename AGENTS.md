@@ -164,6 +164,19 @@
   低频路径的节流本身要被测，否则「月度」只是文档里的形容词。`INTEGRITY_DAYS=0` 是人工立刻跑的入口；
   没登记任何仓库时**不写报告**（一份 checks=0 的「完整性通过」比没有更坏）。守卫 `test_integrity.sh`
   （linux + macos 双 CI；restic 侧未接入，与 `backup.ps1` 的自证同批欠账）。
+- **restic 的三件事与 borg 不同，移植时逐条对表**（10-02 实测，`test_restic_retention.sh` 锁住）：
+  ①`-r <repo>` 是**每条子命令各要一次**，`init` 带了不等于 `backup` 认得它，少了直接 rc=1
+  「Please specify repository location」；②`forget` **只删快照对象、不删数据**——引擎帮助页原话
+  「In order to remove the unreferenced data after "forget" was run successfully, see the "prune"
+  command」，所以**必须 `forget --prune`**，否则「本地保留 7d/4w/6m」只是把快照藏起来（实测 9 份日
+  快照 forget 退出 0、快照少两份、仓库字节只动了索引的 4 KiB；补上 prune 才释放 6 MiB 级）——
+  而「本地已 prune、云端 copy 只增不减」这套设计的整个前提就在这一发上；③`--time` 只认
+  `"2006-01-02 15:04:05"`，RFC3339（`T` 分隔 + 时区）反而报解析失败，夹具造历史快照别用 ISO 串。
+  退出码表也要读引擎自己的：**3 = 有源文件没读到（快照已落库，不完整）**，与 borg `create` 的
+  rc=1 同档，只 warn；1/11/12（通用错 / 仓库被锁 / 口令不对）才判本类失败。两份实现（`backup.sh`
+  的 windows 分支与 `backup.ps1`）此前对 3 的判法不一致，现已按同一张表对齐。
+  **夹具的一处死法**：预置的历史快照若只往同一个目录累加文件，新快照仍引用全部旧内容，prune
+  无可回收、断言就测不出「没带 --prune」——每份独有数据必须在下一份之前从磁盘删掉。
 - **恢复演练按内容校验（roadmap A2b，10-02 落地）**：旧口径取回后**只比 size**，「同长度不同
   内容」永远 PASS——它是「rclone 只比大小」那一课在取回侧的镜像，也是 10-01 跨类别错配（取回
   了错仓库的文件）能被放过去的缘故。现在备份期 `seal_manifest` 给**当晚抽中的那几条**样本记
@@ -297,13 +310,15 @@
    `test_log_rotation.sh`（日志轮转 + run 边界行）/
    `test_cloud_verify.sh`（云端副本自证：单向包含 + config 内容哈希 + HEALED/UNKNOWN 分档）/
    `test_integrity.sh`（存储完整性：窗口节流 + 锁 flake 记 UNKNOWN / 非锁 fatal 判 FAIL / 真损坏）/
+   `test_restic_retention.sh`（restic 引擎侧：`-r` 在位 + `forget --prune` 真的回收字节 +
+   回收后 `restic check` 过 + rc=3 只告警 + rc=12 判败 + `backup.ps1` 同形）/
    `test_month_jump.sh`（把时间推过一个月：两个 30 天窗口同夜重开 + 真实保留策略裁出的云端
    单向包含 + 报告晚一轮上云 + 轮转，四条低频路径的**组合面**）/
    `test_bsd_probe.sh`（零备份轮探针：把纯函数从生产文件里**切**出来对着 python3 现算的真相
    断言——哈希轮流域 / 本地清单摘除与排序 / `rclone lsl` 含空格路径 / 目录级脱敏 / `date -r` /
    演练 fail-closed）。
-   十四套都已挂 CI，**车道按实测墙钟分，不是按「谁新谁排前面」分**
-   （linux job 全跑，23 步 ≈5 分钟；macos job 只留 backup+三条 assert / restore / rescue /
+   十五套都已挂 CI，**车道按实测墙钟分，不是按「谁新谁排前面」分**
+   （linux job 全跑，24 步；macos job 只留 backup+三条 assert / restore / rescue /
    init / log_rotation / bsd_probe，其余四套重夹具 integrity/cloud_verify/cloud_failure/drill
    退回 linux-only）。缘故写在 docs/HANDOVER §11 的 10-02 午后块：免费 macos runner 上一个整轮
    `backup.sh` 要 6–13 分钟（本机 9 秒），一个 step 里放六个整轮的 `test_integrity.sh`
@@ -440,8 +455,12 @@
    守卫同时改成两段：第一段 dot-source `semantic.ps1` 只调函数本身（先把「逻辑坏了」单独证掉），
    第二段才跑整轮产品（谈「接线」）——两段的失败面不重叠，才分得开上面那四种。**只用 `-First` 这类
    5.1 就有的写法**（没碰 6.0+ 的 `-SkipLast`），并去掉 `-Culture ''`、`StartsWith(…, [StringComparison])`
-   与 `string + [IO.Path]::DirectorySeparatorChar` 这三处 5.1 未验证面。**同一天还借 Linux 容器里的 pwsh 7 抓出发移植时真坏了的那一发**：PS 侧级联写成「先筛空、再统一删」，一趟只收掉日期壳，月份/年壳照旧留着（bash 侧 `find -empty -delete` 隐含 `-depth` 天然收干净，两侧守卫却都没测到——种子全挤在同一个月）。详见 §3「`.ps1` 的逻辑先在容器里收敛」那条）、⑦`restic forget` 不带
-   `--prune`（仓库只 compact 不了）、⑧权限面靠 NTFS 继承，bash 侧那套整树归一化没有对应实现。
+   与 `string + [IO.Path]::DirectorySeparatorChar` 这三处 5.1 未验证面。**同一天还借 Linux 容器里的 pwsh 7 抓出发移植时真坏了的那一发**：PS 侧级联写成「先筛空、再统一删」，一趟只收掉日期壳，月份/年壳照旧留着（bash 侧 `find -empty -delete` 隐含 `-depth` 天然收干净，两侧守卫却都没测到——种子全挤在同一个月）。详见 §3「`.ps1` 的逻辑先在容器里收敛」那条）、⑦~~`restic forget` 不带
+   `--prune`（仓库只 compact 不了）~~ **10-02 傍晚修掉了，顺带捞出发移植时更硬的那一发：`backup.sh` 的
+   `backup` 调用整条少了 `-r`**——restic 不记得上一条 `init` 用的哪个仓库，实测三类全红在
+   「Please specify repository location」，也就是说 windows 分支**从没跑成过一次备份**；它没露头
+   只是因为没人在 Windows 上跑 `backup.sh`（真机走 `backup.ps1`），而 CI 的 windows job 也只跑 ps1。
+   两发一起由 `test_restic_retention.sh` 钉住（真 restic，六段五发变异）、⑧权限面靠 NTFS 继承，bash 侧那套整树归一化没有对应实现。
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，
    全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认

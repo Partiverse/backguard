@@ -255,6 +255,16 @@ jobs:
           # borg create 失败——现有守卫全绿也看不见它，所以必须单独有一步
           bash test_integrity.sh
 
+      - name: E2E restic retention reclaims bytes
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          # restic 分支（backup.sh 的 windows 路径 + backup.ps1 的同一条命令）：这一发跑的是
+          # 真 restic，测「-r 在位」「forget 带 --prune 且字节真的回收」「回收后仓库还读得动」，
+          # 以及两份实现对 rc=3 / rc=12 判得不一样时的可见性。restic 只装在 linux job
+          # （apt 那行）；macos job 没装，同一条夹具在那边会打 E2E-SKIP 后如实退
+          bash test_restic_retention.sh
+
       - name: E2E month jump (low-frequency paths compose)
         timeout-minutes: 40
         run: |
