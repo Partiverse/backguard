@@ -104,6 +104,12 @@ function Invoke-SemanticLayer {
         [Parameter(Mandatory)] [string]$DeviceId,
         [Parameter(Mandatory)] [string]$TimeIso
     )
+    # 见 backup.ps1 文件头「5.1 宿主口径」：调用方 Start-PartiverseBackup 顶部是 Stop，而偏好变量
+    # 按**动态作用域**解析，所以本函数里每一次 `& restic` / `& bg` / `& age` 写 stderr 在 Windows
+    # PowerShell 5.1 上都抛终止性异常（run 37003329872 事实 3 实测三形全 THREW）。这里的形状比
+    # 备份本体更坏：调用点那句 `catch { Write-Warning "[semantic] 生成失败（不影响备份）" }` 会把它
+    # 吞成一句 warning，于是 Windows 设备整条明文层从未产出而 nightly 仍报 FULLY COMPLETE。
+    $ErrorActionPreference = "Continue"
 
     # 解析 bg 入口：$env:BG > 与本脚本同目录的 bg.pyz / bg_semantic.py。
     # 注意 dot-source 时 $PSScriptRoot 已是 semantic 目录本身（CI 实测教训）。
@@ -118,6 +124,9 @@ function Invoke-SemanticLayer {
 
     function Invoke-Bg {
         param([Parameter(ValueFromRemainingArguments)] $Rest)
+        # 每个含原生命令的作用域自己声明一档（外层的 Continue 靠动态作用域也管用，但「外层忘了」
+        # 是本发 fix 之前那九处的成因；探针事实 5 就是按作用域逐个查的）
+        $ErrorActionPreference = "Continue"
         if ($env:BG) { & $env:BG @Rest } else { & $python $bgScript @Rest }
     }
 

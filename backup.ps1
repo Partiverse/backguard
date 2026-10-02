@@ -2,8 +2,27 @@
 # 使用 restic 作为备份引擎，rclone 同步 WebDAV
 param([string]$Task = "Backup")
 
+# ---------- 5.1 宿主口径：原生命令必须在 ErrorActionPreference=Continue 的作用域里跑 ----------
+# 真机实测（run 37003329872 的 5.1 探针，`probe_windows_ps51.ps1` 事实 3，宿主
+# PS 5.1.26100.33438）：Windows PowerShell 下 `$ErrorActionPreference = "Stop"` 的作用域里，
+# 原生命令**只要往 stderr 写一行就抛终止性异常**，三种形态全抛：
+#   tee2>&1=THREW RemoteException  redirect2null=THREW RemoteException  pipeOutNull=THREW RemoteException
+# 而备份引擎的正常输出偏偏就写在 stderr（restic 的进度、rclone 的 `NOTICE: Config file ... not
+# found`）。Task Scheduler 注册的是 `powershell.exe -File backup.ps1`，正是这一档；CI 的真实备份
+# job 用 `pwsh.exe`（7 不抛，这是 5.1 与 7 的语义差别之一），所以这条在 CI 全绿的窗口里躺了
+# 整个观察期——第一次 `restic backup` 就会把整轮带走，第二次起 `restic init`（幂等分支，靠的
+# 就是「忽略报错」）也带得走。
+# 因此：**每个含原生命令的函数首句把 EAP 压回 Continue**（赋值是函数作用域的，出函数自动回到
+# 调用方的 Stop，cmdlet 那一份纪律一点没丢），主流程里的云端推送循环收进同样的函数。
+# **成败判定一律不靠异常，靠 $LASTEXITCODE 与显式 throw**——`throw` 在 Continue 下同样是终止性的，
+# 所以 try/catch 的结构一处没动。
+# 守卫：`probe_windows_ps51.ps1` 事实 5 用解析器扫 backup.ps1 的每个原生命令调用点，要求它所在
+# 作用域在调用之前有这条赋值；CI 另有一步「5.1 下真跑一轮备份」把这条钉成行为面（摘掉任一处
+# 赋值那一轮就红，不是红在静态检查而是红在退出码）。
+
 # ---------- 依赖安装 ----------
 function Install-Deps-Windows {
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
     $bins = @("restic", "rclone")
     $binDir = "$env:USERPROFILE\PartiverseBackup\bin"
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
@@ -73,6 +92,7 @@ function Setup-Scheduler-Windows {
 # ---------- 备份核心 (restic) ----------
 function Backup-ResticClass {
     param([string]$Class, [string]$RepoPath, [string]$ArcName)
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」：restic 的进度就写在 stderr
 
     Write-Host "[$Class] 归档: $ArcName"
 
@@ -99,22 +119,48 @@ function Backup-ResticClass {
         throw "[$Class] restic backup 失败 (exit $LASTEXITCODE)"
     }
 
-    # 清理：本地保留 7d/4w/6m。**必须带 --prune**：restic 的 forget 只删快照对象，
-    # 引擎帮助页原话「In order to remove the unreferenced data after "forget" was run
-    # successfully, see the "prune" command」——实测 9 份日快照 forget 退出 0、快照少一份，
-    # 仓库字节数一字节没少。少了这一步，第 174 行「本地已 prune，云端保留全部历史」那句
-    # 前提就不成立，本地仓库与云端副本一起只增不减。
-    # rc 口径与 backup.sh 的 backup_restic_class 逐条对齐：3 = 部分生效（有快照没删掉，
-    # 下晚重试）只告警；其余非零判本类失败——保留策略没跑成的唯一后果是仓库无限增长，
-    # 而观察期里没人会主动去查仓库尺寸
-    & restic -r $RepoPath forget --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune 2>&1 |
-        Tee-Object -FilePath $env:BACKUP_LOG -Append | Out-Null
-    if ($LASTEXITCODE -eq 3) {
-        Write-Warning "[$Class] forget/prune 部分生效 (rc=3)"
-    } elseif ($LASTEXITCODE -ne 0) {
-        throw "[$Class] restic forget/prune 失败 (exit $LASTEXITCODE)"
-    }
+    # 清理：本地保留 7d/4w/6m。抽成 Invoke-ResticRetention 是为了让它**能被单独跑**——
+    # CI 的 windows job 每轮新建空仓库，forget 在这里一份都裁不掉，所以「保留策略真的回收字节」
+    # 这一整段在原位等于从未被测（§4.19 留的那发）。判定与 rc 口径一个字都没动。
+    # （收进 [void]：这函数带返回值，漏进调用点的成功流就会在 stdout 里多出一坨哈希表）
+    [void](Invoke-ResticRetention -Class $Class -RepoPath $RepoPath -LogPath $env:BACKUP_LOG)
 }
+
+# BEGIN-RETENTION —— test_retention_logic.ps1 靠这两行标记把本函数**原样**切出去，对着真
+# restic 跑（预置 9 份带 `--time` 的日快照，要求快照数按口径减少**且仓库字节真的下降**）。
+# 为什么必须带 `--prune`：restic 的 forget 只删快照对象，引擎帮助页原话「In order to remove
+# the unreferenced data after "forget" was run successfully, see the "prune" command」——
+# 实测 9 份日快照 forget 退出 0、快照少两份，仓库字节数一字节没少。少了这一步，
+# 「本地已 prune，云端保留全部历史」那句前提就不成立，本地仓库与云端副本一起只增不减。
+# rc 口径与 backup.sh 的 backup_restic_class 逐条对齐：3 = 部分生效（有快照没删掉，下晚重试）
+# 只告警；其余非零判本类失败——保留策略没跑成的唯一后果是仓库无限增长，
+# 而观察期里没人会主动去查仓库尺寸。
+function Invoke-ResticRetention {
+    param(
+        [Parameter(Mandatory = $true)][string]$Class,
+        [Parameter(Mandatory = $true)][string]$RepoPath,
+        [string]$LogPath = "",
+        [string]$ResticBin = "restic"
+    )
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
+    $out = @(& $ResticBin "-r" $RepoPath "forget" "--keep-daily=7" "--keep-weekly=4" `
+        "--keep-monthly=6" "--prune" 2>&1 | ForEach-Object { "$_" })
+    $rc = $LASTEXITCODE
+    if ($LogPath) {
+        try {
+            # 引擎原文只进本地日志：调用点原来用 Tee-Object 边流边写，这里改成收进数组再落笔，
+            # 差别是崩溃时少半截——但换来的是这一层能被单独调用并拿到 rc
+            $out | Add-Content -LiteralPath $LogPath -Encoding utf8
+        } catch { }
+    }
+    if ($rc -eq 3) {
+        Write-Warning "[$Class] forget/prune 部分生效 (rc=3)"
+    } elseif ($rc -ne 0) {
+        throw "[$Class] restic forget/prune 失败 (exit $rc)"
+    }
+    @{ rc = $rc; out = $out }
+}
+# END-RETENTION
 
 # ---------- 运行史可审计（roadmap A4，与 backup.sh 同形）----------
 # BEGIN-ROTATE —— test_log_rotation_logic.ps1 靠这两行标记把本函数**原样**切进容器里跑
@@ -187,6 +233,7 @@ function Write-RunBoundary {
 # 而它在脚本最末尾一行，炸掉的就是整轮的退出码。
 function Get-RunGitSha {
     param([string]$Path = $PSScriptRoot)
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
     try {
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return "nogit" }
         $sha = (& git -C $Path rev-parse --short HEAD 2>$null) -join ''
@@ -305,6 +352,7 @@ function Get-VerifyDirSample {
 # finally，而临时件必须保证删掉；`return` 两种宿主都会跑 finally。
 function Get-VerifyCloudHash {
     param([string]$Dest)
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」：rclone 的 NOTICE 写在 stderr
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("bg-verify-" + [guid]::NewGuid().ToString("N"))
     try {
         & rclone copyto $Dest $tmp 2>$null
@@ -329,6 +377,7 @@ function Test-VerifyPrefix {
         [Parameter(Mandatory = $true)][string]$Target,
         [switch]$Privacy
     )
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         Format-VerifyNote SKIP $Label "本地没有这一棵树（该类别没备份或路径变了）"
         return
@@ -373,6 +422,7 @@ function Test-VerifyConfigHash {
         [Parameter(Mandatory = $true)][string]$Dest,
         [Parameter(Mandatory = $true)][string]$Label
     )
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
     $local = Join-Path $Repo "config"
     if (-not (Test-Path -LiteralPath $local -PathType Leaf)) {
         Format-VerifyNote SKIP $Label "本地仓库没有 config"
@@ -550,6 +600,7 @@ function Invoke-ResticCheck {
         [Parameter(Mandatory = $true)][string]$Repo,
         [string]$ResticBin = "restic"
     )
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
     $t0 = Get-Date
     $invoked = $false
     $rc = 127
@@ -670,6 +721,41 @@ function Invoke-IntegrityCheck {
 }
 # END-INTEGRITY
 
+# ---------- 云端推送 ----------
+# 为什么单独成函数而不是留在主流程里：这一层有两个 rclone 调用，而调用方
+# Start-PartiverseBackup 的 `$ErrorActionPreference = "Stop"` 在 5.1 宿主上会把 rclone 写在
+# stderr 的 NOTICE 变成终止性异常（见文件头「5.1 宿主口径」）。函数作用域里压回 Continue，
+# 出函数即还原——Stop 那份 cmdlet 纪律一点没丢，而「引擎调用的退出码」回到调用点用
+# $LASTEXITCODE 判定（异常不参与判定）。
+# $EnsureDir 只有类别仓库用：时间轴那份推送历来不建目录，加一遍等于改网盘上的目录形状。
+function Push-TreeToCloud {
+    param(
+        [Parameter(Mandatory = $true)][string]$SrcRoot,
+        [Parameter(Mandatory = $true)][string[]]$Targets,
+        [Parameter(Mandatory = $true)][string]$Sub,
+        [Parameter(Mandatory = $true)][string]$RcloneLog,
+        [switch]$EnsureDir
+    )
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
+    $bad = 0
+    foreach ($t in $Targets) {
+        $dest = Format-CloudDest -Target $t -SystemId $env:SYSTEM_ID -Sub $Sub
+        # 引擎输出走 host 而不是返回流：本函数的返回值必须是「失败的目标数」这一个整数。
+        # 收进返回流的任何一行 stdout 都会让 `$cloudFailed += Push-TreeToCloud …` 变成数组，
+        # 调用点那句「云端有没有可信副本」的判定随即失真（§1.4 那条红线就靠这个数）。
+        # 落点与抽出前的内联循环一致（stdout 进日志、stderr 不吞），只是不再进函数输出。
+        if ($EnsureDir) { & rclone mkdir $dest 2>$null | Out-Host }
+        & rclone copy $SrcRoot $dest --transfers 2 --bwlimit 10M --log-file $RcloneLog | Out-Host
+        # 明文时间轴与引擎仓库在这里是同一条红线（§1.4）：任一目标没上去就是「云端没有可信副本」，
+        # 只报不判等于让 FULLY COMPLETE 骗过接入点
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::[rclone] $dest 同步失败 (rc=$LASTEXITCODE)——云端没有 $Sub 这一份的可信副本"
+            $bad++
+        }
+    }
+    $bad
+}
+
 # ---------- 主函数 ----------
 function Start-PartiverseBackup {
     $ErrorActionPreference = "Stop"
@@ -760,15 +846,8 @@ function Start-PartiverseBackup {
 
             # 云端用 copy 只增不删（本地已 prune，云端保留全部历史）
             if ($env:SKIP_WEBDAV -ne "1") {
-                foreach ($t in $targets) {
-                    $dest = Format-CloudDest -Target $t -SystemId $env:SYSTEM_ID -Sub $cls
-                    & rclone mkdir $dest 2>$null
-                    & rclone copy "$repo/" $dest --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
-                    if ($LASTEXITCODE -ne 0) {
-                        Write-Host "::error::[rclone] $dest 同步失败 (rc=$LASTEXITCODE)——云端没有这一类的可信副本"
-                        $cloudFailed++
-                    }
-                }
+                $cloudFailed += Push-TreeToCloud -SrcRoot "$repo/" -Targets $targets `
+                    -Sub $cls -RcloneLog $RCLONE_LOG -EnsureDir
             }
         } catch {
             # ::error:: 注解 CI 匿名可读；附上 backup.log 尾部定位真实原因
@@ -784,17 +863,10 @@ function Start-PartiverseBackup {
             Invoke-SemanticLayer -Done $semDone -BackupBase $BACKUP_BASE `
                 -DeviceId $env:DEVICE_ID -TimeIso (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
             if ($env:SKIP_WEBDAV -ne "1") {
-                foreach ($t in $targets) {
-                    $tdest = Format-CloudDest -Target $t -SystemId $env:SYSTEM_ID -Sub "timeline"
-                    & rclone copy "$BACKUP_BASE\timeline/" "$tdest" `
-                        --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
-                    # 明文时间轴是「裸文件管理器可读」这件事的唯一副本，它没上去同样是
-                    # 云端没有可信副本（§1.4），不能只把引擎仓库的对平当数
-                    if ($LASTEXITCODE -ne 0) {
-                        Write-Host "::error::[rclone] $tdest 时间轴同步失败 (rc=$LASTEXITCODE)"
-                        $cloudFailed++
-                    }
-                }
+                # 明文时间轴是「裸文件管理器可读」这件事的唯一副本，它没上去同样是云端没有
+                # 可信副本（§1.4），不能只把引擎仓库的对平当数
+                $cloudFailed += Push-TreeToCloud -SrcRoot "$BACKUP_BASE\timeline/" `
+                    -Targets $targets -Sub "timeline" -RcloneLog $RCLONE_LOG
             }
         } catch {
             Write-Warning "[semantic] 生成失败（不影响备份）: $($_.Exception.Message)"
@@ -870,6 +942,7 @@ function Start-PartiverseBackup {
 
 # ---------- 交互式初始化 ----------
 function Initialize-PartiverseBackup {
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
     Write-Host ""
     Write-Host "  ╔═══════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "  ║   Partiverse Backup System — Windows 初始化  ║" -ForegroundColor Cyan

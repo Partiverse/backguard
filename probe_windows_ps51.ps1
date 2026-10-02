@@ -135,6 +135,73 @@ if ($t4 -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') {
     exit 1
 }
 
-Write-Host "=== 5.1 宿主探针 OK：全部 .ps1 带 BOM 且语法 0 错、JSON 类型与三种 stderr 形态的结论已上报、Format-IsoTime 交回 ISO ==="
+# ---- 事实 5：产品侧每一个原生命令调用点都必须在 EAP=Continue 的作用域里 ----
+# 这一条是事实 3 的**结论落地**：5.1 宿主上 Stop 作用域里的原生命令只要写一行 stderr 就抛终止性
+# 异常（上面实测三形全 THREW RemoteException），而备份引擎的正常输出偏偏写在 stderr。所以「产品
+# 脚本在真机上能不能跑完一轮」等价于「每一个 `& restic` / `& rclone` 处在哪一档 EAP 里」。
+# 为什么用解析器而不是正则扫文本：作用域这件事正则给不出答案——函数体、嵌套函数（semantic.ps1
+# 的 Invoke-Bg 定义在 Invoke-SemanticLayer 里面）、`& { … }` 内联 scriptblock、多行 param 之后的
+# 首句，位置全不一样；而「数不准」在这里不是精度问题，是**漏掉的那一处就是炸点**（本发 fix 之前
+# 这条规矩只活在注释里：写着「Invoke-CloudVerify 首句必须 Continue」，同文件另外九处原生命令
+# 一个都没登记，其中 Backup-ResticClass 的 `restic init … 2>&1 | Out-Null` 正是第二次起的每一轮
+# 都会踩的那一颗）。
+# 判定口径：调用点所在**最近的作用域**（函数体或 scriptblock 体）里，从作用域开头到该调用之前，
+# 必须出现把 `$ErrorActionPreference` 赋成 Continue 的语句。只认「在这条调用之前」——写在调用
+# 之后的赋值等于没写。`& 函数名` 不算原生命令（同文件里定义的函数名拿来排除）。
+$eapFiles = @('backup.ps1', (Join-Path 'semantic' 'semantic.ps1'))
+$eapViolations = @()
+$eapCalls = 0
+foreach ($rel in $eapFiles) {
+    $full = Join-Path $RepoRoot $rel
+    if (-not (Test-Path -LiteralPath $full)) {
+        Write-Host "::error::$rel 不在仓库里——这条规则等于没跑"; exit 1
+    }
+    $tokE = $null; $errE = $null
+    $astE = [System.Management.Automation.Language.Parser]::ParseFile($full, [ref]$tokE, [ref]$errE)
+    $own = @($astE.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+        ForEach-Object { $_.Name })
+    $cmds = @($astE.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))
+    foreach ($c in $cmds) {
+        $el = $c.CommandElements
+        if ($el.Count -eq 0) { continue }
+        $e0 = $el[0]
+        $name = ''
+        if ($e0 -is [System.Management.Automation.Language.VariableExpressionAst]) { $name = $e0.UserPath }
+        elseif ($e0 -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $name = $e0.Value }
+        if (-not $name) { continue }
+        # 外部程序 = 用 & 调的（& restic / & rclone / & $python / & $env:BG），或裸写的已知可执行名
+        $isNative = $false
+        if ($c.InvocationOperator -eq 'Ampersand') {
+            if ($own -notcontains $name) { $isNative = $true }
+        } elseif ($name -cmatch '^(restic|rclone|git|curl\.exe|winget|bcdedit|borg|age|python3?)$') {
+            $isNative = $true
+        }
+        if (-not $isNative) { continue }
+        $eapCalls++
+        $scope = $c.Parent
+        while ($scope -and -not ($scope -is [System.Management.Automation.Language.ScriptBlockAst])) {
+            $scope = $scope.Parent
+        }
+        if (-not $scope) { $eapViolations += "$rel`:$($c.Extent.StartLineNumber) (无所属作用域) $name"; continue }
+        $pre = $scope.Extent.Text.Substring(0, [Math]::Max(0, $c.Extent.StartOffset - $scope.Extent.StartOffset))
+        if ($pre -notmatch '(?im)^\s*\$ErrorActionPreference\s*=\s*"?\s*Continue') {
+            $eapViolations += "$rel`:$($c.Extent.StartLineNumber) $name"
+        }
+    }
+}
+Write-Host "probe51-eap: files=$($eapFiles.Count) nativeCalls=$($eapCalls) violations=$($eapViolations.Count)"
+if ($eapViolations.Count -gt 0) {
+    foreach ($v in $eapViolations) { Write-Host "  EAP-STOP: $v" }
+    Write-Host "::error::$($eapViolations.Count) 处原生命令不在 EAP=Continue 的作用域里——5.1 宿主上它们写 stderr 就等于抛终止性异常，整轮备份在那里断掉（事实 3 实测三形全 THREW）"
+    exit 1
+}
+if ($eapCalls -lt 10) {
+    # 调用点数掉下去＝扫描本身坏了（改了判定式、换了作用域形状、或产品脚本里的引擎调用被摘了）。
+    # 一条永远不会红的断言比没有断言更坏（§3「断言自己是死的」）
+    Write-Host "::error::只扫到 $eapCalls 处原生命令（预期 >=10）——这条规则自己失效了"
+    exit 1
+}
+
+Write-Host "=== 5.1 宿主探针 OK：全部 .ps1 带 BOM 且语法 0 错、JSON 类型与三种 stderr 形态的结论已上报、原生命令调用点全在 Continue 作用域、Format-IsoTime 交回 ISO ==="
 # 显式 exit 0：否则宿主退出码取最后一条原生命令的 rc（同 test_log_rotation_logic.ps1 那条）
 exit 0
