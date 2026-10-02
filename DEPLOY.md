@@ -173,6 +173,23 @@ $env:SEM_NTFY_URL = "https://<你的-ntfy>/backguard-<设备名>"
 - 恢复身份封好的 `recovery-identity.enc` 按设计**不上云**（凭据纪律），所以密钥目录必须有
   第二处离线副本（见下面 `rescue.ps1 -Recovery` 那段与 §5 验收清单）。
 
+恢复演练（roadmap A2b，Windows 侧 10-03 起才有）：`semantic.ps1` 在密封出
+`manifest.json.enc` 之后，用主身份解封**当晚那份**清单、按 `SEM_DRILL_COUNT`（默认 5）抽样，
+从对应类别的 restic 仓库真取回，逐条与备份期记下的**源文件** sha256 比内容，结论写
+`%BACKUP_BASE%\timeline\rescue-test.txt`：
+
+```
+PASS [files] C:/Users/…/notes.md (4127 B, 内容哈希一致)
+PASS [config] C:/…/config.sh (913 B, 仅比大小：清单未记内容哈希)
+RESULT: 2 PASS / 0 FAIL（抽样 2；内容哈希 1，仅比大小 1）
+```
+
+汇总行把两类计数分开报，是因为「只比过大小」不等于「内容对」——清单没记哈希的那几条才退回比
+大小，同一行末尾会写明依据。30 天才真跑一次（节流标记用这份产物自己的 mtime）：人工立刻跑
+`$env:SEM_DRILL_FORCE = "1"`，整层关掉 `$env:SEM_DRILL = "0"`（关掉后密封侧也不再记哈希，
+两侧共用同一开关，否则就是「记了没人用」）。这份报告**只留本地**：它是唯一逐条写全文件名的
+明文产物，`backup.ps1` 推时间轴时按名字把它排除，所以云端目录里看不见它。
+
 逃生面自证（Windows 侧，10-02 起有 `rescue.ps1`）：
 
 ```powershell
@@ -254,7 +271,9 @@ git -C "$DEPLOY_DIR" rev-parse --short HEAD
 
 - **只允许 ff**：部署树出现本地改动就是有人在上面开发，先查 `git -C "$DEPLOY_DIR" status`
   弄清来源再动，别 `reset --hard` 抹掉。
-- 追平后跑一次 `./drill.sh --force`（macOS/Linux）确认新代码的恢复链路仍通。
+- 追平后跑一次恢复演练确认新代码的取回链路仍通：macOS/Linux `./drill.sh --force`；
+  Windows 没有独立入口，`$env:SEM_DRILL_FORCE = "1"` 后跑一次 `.\backup.ps1 -Task Backup`
+  （演练是语义层里的一步，10-03 起两侧都有；代价是这会真跑一遍备份）。
 - 观察期内的节奏：CI 全绿 → 部署树追平 → 当晚 nightly 就是免费的验收场。追平前先确认
   没有备份在跑（`pgrep -fl "backup.sh|borg|restic|rclone"`）——09-30 那次「部署点落后 14 个
   提交、观察期数据作废」是漏了追平，不是代码问题。

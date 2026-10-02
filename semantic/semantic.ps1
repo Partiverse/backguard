@@ -97,6 +97,236 @@ function Format-IsoTime {
     [string]$Value
 }
 
+# bg 入口解析：$env:BG > 与本文件同目录的 bg.pyz / bg_semantic.py（再退到 python/py）。
+# 为什么提到顶层而不是留在 Invoke-SemanticLayer 里嵌套：密封侧记样本哈希与演练侧取样本
+# 都要调 bg，嵌套一份就得再抄第二份——而「记哈希的抽样与 drill 的抽样各算各的」正是 A2b
+# 那条教训的形状（bash 侧同一件事也只有 semantic_bg 一个实现）。
+# 注意 dot-source 时 $PSScriptRoot 已是 semantic 目录本身（CI 实测教训）。
+function Resolve-BgEntry {
+    if ($env:BG) { return @{ Bin = $env:BG; Args = @() } }
+    $bgScript = @("$PSScriptRoot\bg.pyz", "$PSScriptRoot\bg_semantic.py") |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $bgScript) { return $null }
+    $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue).Source }
+    if (-not $python) { return $null }
+    @{ Bin = $python; Args = @($bgScript) }
+}
+
+function Invoke-Bg {
+    param([Parameter(ValueFromRemainingArguments)][AllowEmptyCollection()] $Rest)
+    # 每个含原生命令的作用域自己声明一档（外层的 Continue 靠动态作用域也管用，但「外层忘了」
+    # 是本发 fix 之前那九处的成因；探针事实 5 就是按作用域逐个查的）
+    $ErrorActionPreference = "Continue"
+    $entry = Resolve-BgEntry
+    if (-not $entry) {
+        # 调用方都先过 Resolve-BgEntry 才走到这里；真走到这一步时不假装成功——留一行告警，
+        # 让上层那句「plan 解析不出样本」的判定接手（宁缺毋滥，绝不用上一条命令的 $LASTEXITCODE 冒充）
+        Write-Warning "[semantic] bg 入口不在（BG / python / bg.pyz 三者都没了）"
+        return
+    }
+    & $entry.Bin @($entry.Args) @($Rest)
+}
+
+# ---------- 恢复演练（roadmap A2b 的 Windows 那一半，对位 semantic.sh:369 run_drill）----------
+# 三个开关与 bash 逐字同名（SEM_DRILL / SEM_DRILL_COUNT / SEM_DRILL_FORCE），默认值也同：
+# 两份实现只在引擎上分开（borg extract vs restic restore），口径分了家就会有一天一边跑一边不跑。
+function Get-DrillSwitch { if ($env:SEM_DRILL) { $env:SEM_DRILL } else { "1" } }
+function Get-DrillCount {
+    if ($env:SEM_DRILL_COUNT -match '^\d+$') { $env:SEM_DRILL_COUNT } else { "5" }
+}
+function Get-DrillHashMaxBytes {
+    if ($env:SEM_DRILL_HASH_MAX_BYTES -match '^\d+$') { $env:SEM_DRILL_HASH_MAX_BYTES } else { "8388608" }
+}
+
+# 取回单个文件。--include 只把 `\` 归一成 `/`，**不补前导斜杠**：清单里那份路径是 bg 归一化
+# 过的（前导 / 与 Windows 盘符段都被剥掉），而 restic 的过滤规则是「不带前导 / 的多段模式在
+# 路径任意位置匹配」——10-03 用真 restic 量过九种形态（归档路径 /tmp/bg-include-exp/src/sub/
+# note.txt）：`tmp/bg-include-exp/src/sub/note.txt`（＝剥掉首段后的 raw）取回 1 个文件，
+# 而补了前导斜杠的 `/tmp/bg-include-exp/src/sub/note.txt` 取回 0 个。Windows 上归档路径是
+# `C:/Users/…`，剥掉盘符的 raw 正好是「少一个前导段」那一档，所以补斜杠等于每夜必取不回。
+# 代价是模式比精确锚定松（同后缀的别的子树也可能被解出来），所以判据不是 rc 而是「落地文件
+# 按后缀挑出来 + 比尺寸 + 比备份期记下的内容哈希」——同后缀同尺寸但不是那个文件，正由哈希拦下。
+function Restore-DrillFile {
+    param(
+        [string]$Bin = "restic",
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Snap,
+        [Parameter(Mandatory)][string]$Include,
+        [Parameter(Mandatory)][string]$Target
+    )
+    $ErrorActionPreference = "Continue"   # restic 的进度与警告写在 stderr
+    $inc = $Include -replace '\\', '/'
+    & $Bin -r $Repo restore $Snap --include $inc --target $Target 2>&1 |
+        ForEach-Object { "$_" } | Out-Null
+    $LASTEXITCODE
+}
+
+# 结论判定，逐字照抄 bash 的两条教训：汇总行写作「N PASS / 0 FAIL」，含字面 FAIL——按整行匹配
+# 'FAIL' 会把全通过误判成失败；而结论行缺失或解析不出，一律判失败（宁可误报，不可漏报）。
+function Test-DrillHasFailure {
+    param([Parameter(Mandatory)][string]$ReportPath)
+    $lines = @(try { Get-Content -LiteralPath $ReportPath -ErrorAction Stop } catch { @() })
+    if (@($lines | Where-Object { $_ -match '^FAIL ' -or $_ -match '^RESULT: FAIL' }).Count -gt 0) {
+        return $true
+    }
+    $counts = @($lines | ForEach-Object {
+        if ($_ -match '^RESULT: [0-9]+ PASS / ([0-9]+) FAIL') { $matches[1] }
+    })
+    if ($counts.Count -ne 1) { return $true }
+    [int]$counts[0] -ne 0
+}
+
+function New-DrillResult {
+    param(
+        [Parameter(Mandatory)][int]$Code,
+        [string]$Report = "",
+        [int]$Pass = 0, [int]$Fail = 0, [int]$Samples = 0,
+        [int]$Hashed = 0, [int]$SizeOnly = 0, [bool]$Failed = $false, [string]$Note = ""
+    )
+    # 返回**对象**而不是裸数组/裸整数：rescue.ps1 那一课的数组摊平在这里同样会咬人
+    [pscustomobject]@{ Code = $Code; Report = $Report; Pass = $Pass; Fail = $Fail
+        Samples = $Samples; Hashed = $Hashed; SizeOnly = $SizeOnly; Failed = $Failed; Note = $Note }
+}
+
+# 主流程：解封密封清单 → bg sample（与密封侧共用 select_drill_samples）→ 按类别查快照 →
+# restic 实取 → 比内容（备份期记下的 sha256；没记的退回比大小并**在结论里写明依据**）。
+# 退出码口径同 bash：0 真跑了（结论里可能含失败项）；10 被 30 天节流；20 没执行。
+# 调用方必须按码分支，别拿结果文件的 mtime 反推跑没跑。
+function Invoke-Drill {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [Parameter(Mandatory)][string]$SnapshotDir,
+        [object[]]$Items,
+        [string]$AgeBin = "",
+        [string]$Identity = "",
+        [string]$ResticBin = "restic"
+    )
+    $ErrorActionPreference = "Continue"
+    $rt = Join-Path $Stage "rescue-test.txt"
+
+    # 开关比的是**字符串** "1"（bash 侧 `[[ "${SEM_DRILL:-1}" == "1" ]]` 同一条）。写成 -eq 1
+    # 也能过（PowerShell 把右边转成字符串再比），但「谁转谁」是宿主相关的阅读负担，
+    # 而这一档判断错了整层演练会静默反向——显式比字符串。
+    if ((Get-DrillSwitch) -ne "1") {
+        return New-DrillResult -Code 20 -Report $rt -Note "disabled"
+    }
+    $itemsArr = @($Items)
+    if ($itemsArr.Count -eq 0) {
+        return New-DrillResult -Code 20 -Report $rt -Note "no-archive"
+    }
+    # 30 天节流：标记用**产物自身的 mtime**（与 A2a 同一机制，不另养状态文件）
+    if ((Test-Path -LiteralPath $rt -PathType Leaf) -and ($env:SEM_DRILL_FORCE -ne "1")) {
+        $days = ((Get-Date) - (Get-Item -LiteralPath $rt).LastWriteTime).TotalDays
+        if ($days -lt 30) {
+            return New-DrillResult -Code 10 -Report $rt -Note ("throttled={0:N1}d" -f $days)
+        }
+    }
+    if (-not $AgeBin) { $AgeBin = (Get-Command age -ErrorAction SilentlyContinue).Source }
+    if (-not $Identity) {
+        $Identity = Join-Path $env:APPDATA "PartiverseBackup\age\identity.txt"
+    }
+    $enc = Join-Path $SnapshotDir "manifest.json.enc"
+    if (-not $AgeBin -or -not (Test-Path -LiteralPath $Identity -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $enc -PathType Leaf)) {
+        return New-DrillResult -Code 20 -Report $rt -Note "missing age/identity/manifest.enc"
+    }
+
+    $tmp = New-Item -ItemType Directory -Force -Path `
+        (Join-Path $env:TEMP ("bg-drill-" + [guid]::NewGuid().ToString("N")))
+    $rep = New-Object System.Collections.Generic.List[string]
+    $pass = 0; $failn = 0; $hashed = 0; $sizeOnly = 0; $samples = 0
+    try {
+        $plain = Join-Path $tmp "manifest.json"
+        $rep.Add("# 恢复演练 rescue-test — " + (Get-Date -Format "yyyy-MM-ddTHH:mm:ss"))
+        $rep.Add("# 方式: 主身份解封 + restic 实取 + 内容比对（备份期记下的源 sha256；" +
+            "没记的退回比大小，逐条标注依据）")
+
+        & $AgeBin -d -i $Identity -o $plain $enc 2>&1 | ForEach-Object { "$_" } | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $plain -PathType Leaf)) {
+            $rep.Add("RESULT: FAIL（manifest 解封失败）")
+        } else {
+            # 抽样走 bg 的同一个函数（select_drill_samples），种子默认「当天」与密封侧一致——
+            # 两边各算各的就是「记了没人用」，而这层证据整段退化时现场只有一行计数
+            $planText = (@(Invoke-Bg sample --manifest $plain --count (Get-DrillCount) 2>$null) -join "`n")
+            $plan = $null
+            try { $plan = ConvertFrom-Json $planText } catch { $plan = $null }
+            $picked = @(if ($plan -and $plan.samples) { $plan.samples })
+            $samples = $picked.Count
+            if ($samples -eq 0) {
+                # 这里比 bash 严：bash 抽到 0 条时写「RESULT: 0 PASS / 0 FAIL」，看着是通过。
+                # 「一条都没抽中」只有两种原因（清单空 / bg 不可用），两种都不是取证通过。
+                $rep.Add("RESULT: FAIL（sample 没抽到条目：清单为空或 bg 不可用）")
+            }
+            $n = 0
+            foreach ($s in $picked) {
+                $n++
+                $cls = "$($s.class)"
+                $spath = "$($s.path)"
+                $ssize = "$($s.size)"
+                $item = @($itemsArr | Where-Object { "$($_.cls)" -eq $cls }) | Select-Object -First 1
+                if (-not $item) {
+                    # 跨类别抽样（config 里一个小文件恰恰最该证明取得回），拿 files 快照去解
+                    # config 路径必然取不回——真机 10-01 就是这么报了假失败
+                    $rep.Add("FAIL [$cls] ${spath}（本轮没有 ${cls} 类的快照，无从取回）")
+                    $failn++
+                    continue
+                }
+                $outDir = Join-Path $tmp ("out-" + $n)
+                [void](New-Item -ItemType Directory -Force -Path $outDir)
+                $rc = Restore-DrillFile -Bin $ResticBin -Repo "$($item.repo)" -Snap "$($item.snap)" `
+                    -Include $spath -Target $outDir
+                # restic 解包把**归档内的完整路径**落在 target 之下（实测 out-5/tmp/…/note.txt），
+                # 所以挑命中按后缀比，不去猜它前面那几段是什么。后缀就是清单里那份归一化路径。
+                $norm = ($spath -replace '\\', '/')
+                $cmpType = [System.StringComparison]::OrdinalIgnoreCase
+                $hit = @(Get-ChildItem -LiteralPath $outDir -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object { ($_.FullName -replace '\\', '/').EndsWith($norm, $cmpType) })
+                $wantSha = ""
+                if ($s.PSObject.Properties['sha256']) { $wantSha = "$($s.sha256)" }
+                if ($rc -ne 0 -or $hit.Count -eq 0) {
+                    $rep.Add("FAIL [$cls] ${spath}（取回失败或大小不符）")
+                    $failn++
+                } elseif ($hit[0].Length -ne [long]$ssize) {
+                    $rep.Add("FAIL [$cls] ${spath}（取回失败或大小不符：清单 ${ssize} B，取回 $($hit[0].Length) B）")
+                    $failn++
+                } elseif (-not $wantSha) {
+                    # 清单没记哈希就如实写明这一条只证到了大小——不标注，读报告的人会把
+                    # 「7 PASS」当成「取回内容对」
+                    $rep.Add("PASS [$cls] ${spath} (${ssize} B, 仅比大小：清单未记内容哈希)")
+                    $sizeOnly++; $pass++
+                } else {
+                    $gotSha = ""
+                    try {
+                        $gotSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $hit[0].FullName).Hash.ToLowerInvariant()
+                    } catch { $gotSha = "" }
+                    if ($gotSha -and $gotSha -eq $wantSha) {
+                        $rep.Add("PASS [$cls] ${spath} (${ssize} B, 内容哈希一致)")
+                        $hashed++; $pass++
+                    } else {
+                        # 大小相同而内容不同＝取回的不是那个文件（或归档里那份已不是当时那份）
+                        $shown = if ($gotSha) { $gotSha } else { "算不出哈希" }
+                        $rep.Add("FAIL [$cls] ${spath}（内容哈希不符：清单 ${wantSha} ≠ 取回 ${shown}；" +
+                            "大小倒是一致（${ssize} B）——只比大小看不见这一类）")
+                        $failn++
+                    }
+                }
+            }
+            if ($samples -gt 0) {
+                $rep.Add("RESULT: $pass PASS / $failn FAIL（抽样 ${samples}；内容哈希 ${hashed}，仅比大小 ${sizeOnly}）")
+            }
+        }
+        # UTF-8 无 BOM（与本文件头「清单落盘」同一口径）；这份文件只留本地，推送那一路 --exclude 挡住
+        [System.IO.File]::WriteAllLines($rt, $rep)
+    } finally {
+        # 明文 manifest.json 里有全量文件名，取回暂存也一样——用完即删（凭据纪律同族的隐私面）
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    New-DrillResult -Code 0 -Report $rt -Pass $pass -Fail $failn -Samples $samples `
+        -Hashed $hashed -SizeOnly $sizeOnly -Failed $(Test-DrillHasFailure -ReportPath $rt)
+}
+
 function Invoke-SemanticLayer {
     param(
         [object[]]$Done,          # 每项 @{ cls = "files"; repo = "C:\...\restic-files" }
@@ -112,22 +342,10 @@ function Invoke-SemanticLayer {
     $ErrorActionPreference = "Continue"
 
     # 解析 bg 入口：$env:BG > 与本脚本同目录的 bg.pyz / bg_semantic.py。
-    # 注意 dot-source 时 $PSScriptRoot 已是 semantic 目录本身（CI 实测教训）。
-    $bgScript = @("$PSScriptRoot\bg.pyz", "$PSScriptRoot\bg_semantic.py") |
-        Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $bgScript) { Write-Warning "[semantic] 缺少 bg.pyz/bg_semantic.py，跳过语义层"; return }
-    $python = (Get-Command python -ErrorAction SilentlyContinue).Source
-    if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue).Source }
-    if (-not $python -and -not $env:BG) {
-        Write-Warning "[semantic] 未找到 python（也未设置 BG），跳过语义层"; return
-    }
-
-    function Invoke-Bg {
-        param([Parameter(ValueFromRemainingArguments)] $Rest)
-        # 每个含原生命令的作用域自己声明一档（外层的 Continue 靠动态作用域也管用，但「外层忘了」
-        # 是本发 fix 之前那九处的成因；探针事实 5 就是按作用域逐个查的）
-        $ErrorActionPreference = "Continue"
-        if ($env:BG) { & $env:BG @Rest } else { & $python $bgScript @Rest }
+    # 实现在顶层（Resolve-BgEntry / Invoke-Bg），这里只做「没有就整层跳过」的守卫。
+    if (-not (Resolve-BgEntry)) {
+        Write-Warning "[semantic] 未找到 bg 入口（bg.pyz/bg_semantic.py 与 python 都不在，也没设 BG），跳过语义层"
+        return
     }
 
     Invoke-Bg --version *> $null
@@ -138,6 +356,9 @@ function Invoke-SemanticLayer {
     $tmp = New-Item -ItemType Directory -Force -Path `
         (Join-Path $env:TEMP "bg-sem-$(Get-Random)")
 
+    # 演练要用的「类别 → 本轮最新快照」登记表。用对象数组而不是 bash 那种 `cls:repo:arc` 串：
+    # Windows 的仓库路径带盘符（`C:\…` 里就有冒号），bash 侧 `${x%%:*}` 那套切法在这儿会切错。
+    $drillItems = @()
     $classArgs = @(); $prevArgs = @(); $parentArgs = @()
     foreach ($d in $Done) {
         $repo = $d.repo
@@ -150,6 +371,7 @@ function Invoke-SemanticLayer {
         if ($snaps.Count -eq 0) { continue }
         $sorted = $snaps | Sort-Object time
         $cur = $sorted[-1]
+        $drillItems += @{ cls = $d.cls; repo = $repo; snap = "$($cur.id)" }
 
         $curJson = Join-Path $tmp "$($d.cls).jsonl"
         $lines = [string[]]@(& restic -r $repo ls --json $cur.id 2>$null)
@@ -206,16 +428,53 @@ function Invoke-SemanticLayer {
     }
     $snapshotDir = ($genOut | Where-Object { $_ -match '^已生成快照目录: ' }) -replace '^已生成快照目录: ', ''
 
-    # 全量清单密封（manifest.json.enc）：age -R 非交互；Windows 密钥初始化
-    # （init-keys.exp 的对称实现）留待 M1 后续——无 recipients 时静默跳过
+    # 全量清单密封（manifest.json.enc）：age -R 非交互；密钥由 init-keys.ps1 生成
+    # （无 recipients 时静默跳过——那一档在 Windows 上与 bash 同义：还没初始化过）
     $ageBin = (Get-Command age -ErrorAction SilentlyContinue).Source
     $rec = Join-Path $env:APPDATA "PartiverseBackup\age\recipients.txt"
     if ($ageBin -and (Test-Path $rec)) {
+        # A2b：把「今晚 drill 会抽中的那几个文件」的源内容哈希记进密封清单。
+        # 抽样口径两侧必须逐字一致（同一个 count、种子都默认「当天」）——记了没人用、
+        # 用的没记，就等于这层证据从来没存在过，而报告上看着是「有 sha256 字段」的。
+        # 那一行 `[manifest] 演练样本内容哈希：n/N` 是唯一的现场信号，所以 stderr 必须进日志。
+        $hashArgs = @()
+        if ((Get-DrillSwitch) -eq "1") {
+            $hashArgs = @('--hash-drill-samples', '--sample-count', (Get-DrillCount),
+                          '--hash-max-bytes', (Get-DrillHashMaxBytes))
+        }
         $manifestJson = Join-Path $tmp "manifest.json"
-        Invoke-Bg manifest --run $runJson | Out-File -FilePath $manifestJson -Encoding utf8
+        # 裸 `@hashArgs` 才是 splat。带括号的 `@($hashArgs)` 是**一个参数**：整份数组被当成
+        # 单个 argv 元素按空格拼起来交给 bg，argparse 于是报 `unrecognized arguments:
+        # --hash-drill-samples --sample-count 99 …`——那行报错与「三个独立参数没被认出来」
+        # 逐字同形，光看日志看不出来（10-03 容器首轮实测）。上面 convert 那处用的就是裸形。
+        Invoke-Bg manifest --run $runJson @hashArgs 2>> $env:BACKUP_LOG |
+            Out-File -FilePath $manifestJson -Encoding utf8
         & $ageBin -R $rec -o (Join-Path $snapshotDir "manifest.json.enc") $manifestJson 2>> $env:BACKUP_LOG
         if ($LASTEXITCODE -eq 0) { Write-Host "[ OK ] [semantic] manifest.json.enc 已密封" -ForegroundColor Green }
         else { Write-Warning "[semantic] manifest 密封失败（不影响其余产物）" }
+    }
+
+    # 恢复演练（roadmap A2b 的 Windows 那一半，对位 semantic.sh:369 的 run_drill）：
+    # 主身份解封 → restic 实取 → 按备份期记下的源哈希比内容，结论落 timeline\rescue-test.txt。
+    # 非致命（§1.3）：这一层炸了只是少一份取证，不改备份结论，所以整个调用裹在 try 里。
+    try {
+        $d = Invoke-Drill -Stage $stage -SnapshotDir $snapshotDir -Items $drillItems -AgeBin $ageBin
+        switch ($d.Code) {
+            0 {
+                # 判据用 Failed（= Test-DrillHasFailure 的结论），不用 Fail 计数：后者是这一轮
+                # 自己累出来的，结论行没写成 / 解析不出时它是 0，于是「演练整段崩了」会被读成通过。
+                # bash 侧同一处踩过的坑（drill_has_failure 只认逐条 FAIL 行 + 计数）。
+                if ($d.Failed) {
+                    Write-Warning "[drill] 恢复演练有失败项（PASS $($d.Pass) / FAIL $($d.Fail)）：$($d.Report)"
+                } else {
+                    Write-Host "[ OK ] [drill] 恢复演练通过（$($d.Pass) 条，其中内容哈希 $($d.Hashed) 条、仅比大小 $($d.SizeOnly) 条）" -ForegroundColor Green
+                }
+            }
+            10 { Write-Host '[drill] 上次演练不足 30 天，跳过（人工演练：设 $env:SEM_DRILL_FORCE = "1" 绕开）' }
+            default { Write-Host "[drill] 本轮未演练（缺 age/主身份/密封清单或没有可演练的快照）" }
+        }
+    } catch {
+        Write-Warning "[drill] 演练流程异常退出（少一份取证，不改备份结论）: $($_.Exception.Message)"
     }
 
     # STORY 手机推送（research/08 T1.4）：ntfy 可选 sidecar，SEM_NTFY_URL 未配置即静默跳过。

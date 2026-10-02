@@ -728,15 +728,29 @@ function Invoke-IntegrityCheck {
 # 出函数即还原——Stop 那份 cmdlet 纪律一点没丢，而「引擎调用的退出码」回到调用点用
 # $LASTEXITCODE 判定（异常不参与判定）。
 # $EnsureDir 只有类别仓库用：时间轴那份推送历来不建目录，加一遍等于改网盘上的目录形状。
+#
+# $ExcludeNames 是红线 §1.1 在 Windows 侧的落点：`rescue-test.txt`（恢复演练结论）逐条写着抽样
+# 文件的**完整路径**，是明文层里唯一带文件名的产物，天生只准留本地。bash 侧同一件事是
+# `backup.sh:854` 的 `SYNC_EXCLUDES=("rescue-test.txt")`——两份实现里少掉任何一份，那台设备的
+# 云端时间轴就多一份全量文件名清单。模式按 rclone 的**基名**语义写（不含 `/` 的模式在任意层级
+# 命中），与 bash 传的那一串逐字同形。
+# BEGIN-PUSH —— test_drill_e2e.ps1 场景10 靠这两行标记把本函数**原样**切出去，对着真 rclone
+# 把「云端」做成一个本地目录跑一遍（同 # BEGIN-VERIFY 那条哨兵约定）。哨兵不成对时那份守卫
+# 当场炸，不会安静地测一段旧代码。
 function Push-TreeToCloud {
     param(
         [Parameter(Mandatory = $true)][string]$SrcRoot,
         [Parameter(Mandatory = $true)][string[]]$Targets,
         [Parameter(Mandatory = $true)][string]$Sub,
         [Parameter(Mandatory = $true)][string]$RcloneLog,
+        [AllowEmptyCollection()][string[]]$ExcludeNames = @(),
         [switch]$EnsureDir
     )
     $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
+    $excl = @()
+    foreach ($e in @($ExcludeNames)) {
+        if ($e) { $excl += @('--exclude', $e) }
+    }
     $bad = 0
     foreach ($t in $Targets) {
         $dest = Format-CloudDest -Target $t -SystemId $env:SYSTEM_ID -Sub $Sub
@@ -745,7 +759,7 @@ function Push-TreeToCloud {
         # 调用点那句「云端有没有可信副本」的判定随即失真（§1.4 那条红线就靠这个数）。
         # 落点与抽出前的内联循环一致（stdout 进日志、stderr 不吞），只是不再进函数输出。
         if ($EnsureDir) { & rclone mkdir $dest 2>$null | Out-Host }
-        & rclone copy $SrcRoot $dest --transfers 2 --bwlimit 10M --log-file $RcloneLog | Out-Host
+        & rclone copy $SrcRoot $dest @($excl) --transfers 2 --bwlimit 10M --log-file $RcloneLog | Out-Host
         # 明文时间轴与引擎仓库在这里是同一条红线（§1.4）：任一目标没上去就是「云端没有可信副本」，
         # 只报不判等于让 FULLY COMPLETE 骗过接入点
         if ($LASTEXITCODE -ne 0) {
@@ -755,6 +769,7 @@ function Push-TreeToCloud {
     }
     $bad
 }
+# END-PUSH
 
 # ---------- 权限面（roadmap A2a 的邻居：与 backup.sh 的整树 chmod 同一件事）----------
 # BEGIN-PERMS —— test_perms_logic.ps1 靠这两行标记把本函数**原样**切出去，对着 icacls 桩跑
@@ -922,8 +937,13 @@ function Start-PartiverseBackup {
             if ($env:SKIP_WEBDAV -ne "1") {
                 # 明文时间轴是「裸文件管理器可读」这件事的唯一副本，它没上去同样是云端没有
                 # 可信副本（§1.4），不能只把引擎仓库的对平当数
+                #
+                # rescue-test.txt 带完整文件名（红线 §1.1），只留本地——它由本文件的语义层调用
+                # （上面那行 Invoke-SemanticLayer）写出，而那条调用**不受 SKIP_WEBDAV 影响**，
+                # 所以 CI 每轮都有这一份，只是它永远不许上云。bash 侧同一条是 backup.sh:854。
                 $cloudFailed += Push-TreeToCloud -SrcRoot "$BACKUP_BASE\timeline/" `
-                    -Targets $targets -Sub "timeline" -RcloneLog $RCLONE_LOG
+                    -Targets $targets -Sub "timeline" -RcloneLog $RCLONE_LOG `
+                    -ExcludeNames @("rescue-test.txt")
             }
         } catch {
             Write-Warning "[semantic] 生成失败（不影响备份）: $($_.Exception.Message)"

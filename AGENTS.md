@@ -384,6 +384,19 @@
   而令牌的 `Text` 拼接会把 `.GetBytes(` 的点号丢掉（member 调用的 `.` 不是独立令牌）——
   判「代码里有没有 Get-Random」请用**整行注释剥离**，并给这条剥离本身配一发变异（m14），
   否则「判据是死的」与「实现违规」两种坏法报出来是同一句红。
+- **PowerShell 里 `@(...)` 出现在参数位置不是 splat，而是「一个参数」**（10-03 实测，A2b 的
+  Windows 那一半首轮就炸在这上面）：`Invoke-Bg manifest --run $runJson @($hashArgs)` 把整份数组
+  绑成 `$Rest` 里的**一个** `Object[]` 元素，交给原生命令时按空格拼成单个 argv，argparse 报
+  `unrecognized arguments: --hash-drill-samples --sample-count 99 --hash-max-bytes 8388608`——
+  **这行报错与「三个参数真没被认出来」逐字同形**，光看日志分不出是参数丢了还是参数粘成了一块。
+  裸形 `@hashArgs`（以及同一文件里 `convert` 那处用的 `@classArgs`）才是展开；`& $bin @($arr)` 在
+  调用运算符位置会展开一层，所以同一条写法在 `Push-TreeToCloud` 的 `& rclone … @($excl)` 那里是
+  对的——**别按「哪种写法能跑」归纳，按边界归纳：函数参数绑定不展开，调用运算符展开一层。**
+  后果链值得记：argparse 报错退出 → stdout 空 → `Out-File` 写出一份**空清单** → `age -R` 照样成功 →
+  日志打「manifest.json.enc 已密封」→ 演练解封出一份 `{"classes":{}}`、抽到 0 条。也就是说
+  「密封成功」这道自报什么都没证明，最后是演练侧「0 条判失败」那一档把它变成可见的 FAIL。
+  守卫：`test_drill_e2e.ps1` 场景1（现场信号那行 `[manifest] 演练样本内容哈希：n/N` 必须进日志、
+  `hashed>=1`、`sizeOnly==0`）与变异 m01/m02 两刀。
 - **权限面**：备份产物没有任何需要同机可读的东西——入口脚本（`backup.sh` / `init.sh` /
   `drill.sh`）一律 `umask 077`，`$CONF_DIR`（secrets.env + age 私钥）与 `$LOG_DIR`（backup.log /
   rclone.log / launchd.*.log / sem.log / drill.log / preflight-latest.json）700、其中文件 600。
@@ -502,8 +515,9 @@
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（56 项全绿，
-   3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（60 项全绿，
+   3.9/3.14 双版本已验证；10-03 起含 restic 引擎侧两条——白名单外的引擎不记哈希、
+   restic 按归档内路径记）→ `shellcheck -S warning backup.sh restore.sh
    semantic/semantic.sh drill.sh rescue.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
@@ -565,12 +579,31 @@
    apt restic + pwsh 7.4.5 + age v1.2.1，全部 linux-arm64）。同理，**变异驱动的逐刀日志必须落在挂进
    容器的宿主目录**：10-02 那轮 m15 的日志写在容器内 `/tmp`，容器退出即失，于是它被记成 `ESCAPED`，
    单独重跑才发现其实咬住了（38 个 `bg-rescue-*` 残留目录）——「没证据」和「没咬住」长得一模一样。
+   **同一台机器上不许并发跑两个变异驱动**：10-03 两个驱动共用 `$BASE/tree` 与 `$BASE/logs`，一个在切
+   m14 的工作树时另一个正在读它，于是 summary 记 `ESCAPED` 而同一刀的 run.log 里明明有一条真 FAIL——
+   假逃逸与真逃逸在 summary 里同形（只有逐刀回读 run.log 才露馅）。规矩：一刀一个 `$BASE`，
+   重跑必须换新目录，`MUT_KEEP_SUMMARY=1` 只防截断不防抢占。
    **`.cmd` 桩有两个形状是 10-02 在 windows runner 上第一次跑红才量出来的**（容器里永远走 `.sh`，
    所以这两条只在 CI 露头）：① `echo %*>> "文件"` 的 `%*` 与 `>>` 之间**不许有空格**——cmd 会把那个
    空格一起写进文件，于是「argv 逐字」断言差一个尾空格判红（实现一个字没错）；② stderr 要用
    `type "开关文件" 1>&2`，**不要**用 `if exist (…) (set /p MSG=<文件 & echo %MSG% 1>&2)`——括号块
    按「块解析时」展开变量，`set /p` 还没执行 `%MSG%` 就已经定值，打出来的是字面量 `%MSG%`，
    日志里没有引擎原文。两条都不在 bash 侧存在，别拿 `.sh` 那一份的形状当两档宿主通用。
+   **PowerShell 侧的 E2E 现在有第三套：`test_drill_e2e.ps1`（10-03，11 场景 / 90 条通过断言，15 刀变异台账见文件头）**，
+   被测面是 `semantic.ps1` 的恢复演练（A2b 的 Windows 那一半，roadmap 差距清单 ⑤）。三条口径是
+   这一发新增的：**① 「容器证不到的那一维，用 argv 桩钉实现契约，别假装真引擎测到了」**——
+   `bg` 的 `_norm_path` 在 posix 上只剥前导斜杠（盘符段那一支根本不触发），所以 `--include` 加不加
+   前导斜杠在 restic 那里**等价**（10-03 实测两种写法都取回得到），m10 那一刀在夹具里必然逃逸；
+   真宿主才不一样（`C:/…` 被剥成 `Users/…`，清单里的 path 是真归档路径的**后缀**，锚定版取回 0 文件
+   而 restic **退出码仍是 0**——「取回失败」会伪装成「本轮没有样本」）。场景11 因此把 restic 换成
+   只落 argv 的桩，判「反斜杠归正斜杠 + 不添前导斜杠 + 各占一项」，并把 m10 的逃逸原因写进台账而
+   不是删掉那一刀。**② 断言的基线必须在被它保护的那几步之前取**：场景5 一度在四次「缺料调用」之后
+   重读一遍 `rescue-test.txt` 再与 `$rtUntouched` 比，等于拿它自己比它自己，是一条恒真的死断言
+   （AGENTS §3.1 第②类的又一个形状，靠重读代码发现而不是靠变异）。**③ 子串判定用 `.Contains()`
+   方法，不用 `-Contains` 运算符**：左操作数是**字符串**时 `-Contains` 做整项相等比较，恒假——10-03
+   首轮三条断言就这样红在一份完全正确的报告上。windows job 里它同样两步（pwsh 7 + 5.1），排在
+   `Install deps` 之后、产品轮之前；`Install deps` 缺 restic/age 时真引擎那几段整段 Skip，
+   末行如实打 `DRILL-E2E-OK skipped=N`（**看到 OK 还要读 skipped**）。
    A2a 与 ⑧ 各另加
    一步**运行时接线断言**（`Assert integrity report wiring` / `Assert permission surface wiring`），因为逻辑测试无论多少条静态断言都
    证不了「这一轮真的落笔了」（⑧ 那一步的判据取 `AreAccessRulesProtected` 而不是「有没有
@@ -730,7 +763,9 @@
    （`backup.sh` 的 windows 分支登记 `类别:restic:路径` 并按引擎跑 `restic check --read-data`，
    守卫 `test_restic_retention.sh` 第 7 段），**`backup.ps1` 那一份也已在同一天接上**（`Invoke-IntegrityCheck`
    + `restic check --read-data`，守卫 `test_integrity_logic.ps1` 双档宿主各一步；这一句在 10-02 之前写的是
-   「ps1 里连 `check` 都没出现过」，已不成立）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
+   「ps1 里连 `check` 都没出现过」，已不成立）、⑤~~没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env`
+   里没有 age）~~ **10-03 接了**（`semantic.ps1` 的 `Invoke-Drill`：备份期 `seal_manifest` 走 `--hash-drill-samples`
+   记源 sha256、演练期解封后按内容比，判据与 `run_drill` 同形；守卫 `test_drill_e2e.ps1` 双档宿主各一步），
    ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，两轮 CI 各抓到一条真缺陷**
    （`semantic.ps1` 的 `Prune-LocalTimeline`，四条口径与 `prune_local_timeline` 逐条对齐：第 4 层
    才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收）。

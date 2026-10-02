@@ -840,11 +840,17 @@ def hash_drill_samples(doc: dict, count: int, max_bytes: int, seed: str,
     而取回校验永远只用得上抽中的那几个——成本落在样本数上，证据强度一点没少。
     源路径就是归档内路径补上 root（borg create 吃的是绝对路径，剥掉的只是展示层前缀）。
 
-    记不上的就**不记**（不是记 0 也不是猜）：非 borg 引擎、超过 max_bytes、
-    源文件已不在、尺寸与归档不符（＝borg create 之后、密封之前被人改过，这是唯一
+    记不上的就**不记**（不是记 0 也不是猜）：清单引擎不在白名单内、超过 max_bytes、
+    源文件已不在、尺寸与归档不符（＝备份之后、密封之前被人改过，这是唯一
     会让取回校验假报的窗口）。缺哈希的条目由 drill 退回比 size 并在结论里写明依据。
+
+    白名单里有 restic（10-03 补，Windows 侧 A2b）：restic 的归档内路径同样是从根写下来的
+    绝对路径，所以 `Path(root, p.lstrip("/"))` 这一条公式两种引擎共用。Windows 上 restic 打的
+    是 `C:/…` 或 `/C:/…`，lstrip 之后都成 `C:/…`，而 Windows 的 pathlib 见到带盘符的一段会
+    **整段替换** root（posix 上不会）——也就是说这条公式只在真实宿主上成立，本机（Linux/macOS）
+    跑 restic 夹具时路径仍是 `/tmp/…`，两种形状都要过。
     """
-    if doc.get("engine") != "borg":
+    if doc.get("engine") not in ("borg", "restic"):
         return 0
     hashed = 0
     for pick in select_drill_samples(doc.get("classes", {}), count, seed):

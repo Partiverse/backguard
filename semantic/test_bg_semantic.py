@@ -570,13 +570,31 @@ class TestDrillContentHash(unittest.TestCase):
         for e in doc["classes"]["files"]["entries"]:
             self.assertNotIn("sha256", e)
 
-    def test_hash_skipped_for_non_borg_engine(self):
+    def test_hash_skipped_for_engine_outside_whitelist(self):
         root = Path(tempfile.mkdtemp())
         files = {"Users/x/a.txt": b"hello"}
         self._tree(root, files)
-        doc = self._doc(self._entries(files), engine="restic")
+        doc = self._doc(self._entries(files), engine="generic")
         self.assertEqual(
             bg.hash_drill_samples(doc, 1, 1 << 20, "2026-10-02", str(root)), 0)
+
+    def test_restic_engine_hashes_by_archive_path(self):
+        """restic 也在白名单内（10-03，Windows 侧 A2b）：归档内路径是从根写下来的绝对路径，
+        带前导 /，所以 lstrip 之后与 borg 用同一条拼接公式。"""
+        root = Path(tempfile.mkdtemp())
+        files = {"Users/x/Docs/a.txt": b"alpha", "Users/x/Docs/b.txt": b"beta"}
+        self._tree(root, files)
+        entries = [{"path": "/" + rel, "size": len(data), "mtime": 1700000000}
+                   for rel, data in sorted(files.items())]
+        doc = self._doc(entries, engine="restic")
+        n = bg.hash_drill_samples(doc, 2, bg.DRILL_HASH_MAX_BYTES, "2026-10-02", str(root))
+        self.assertEqual(n, 2)
+        picks = bg.select_drill_samples(doc["classes"], 2, "2026-10-02")
+        self.assertEqual([p["path"] for p in picks],
+                         ["/Users/x/Docs/a.txt", "/Users/x/Docs/b.txt"])
+        for p in picks:
+            self.assertEqual(p["entry"].get("sha256"),
+                             self._sha(files[p["path"].lstrip("/")]))
 
     def test_sample_passes_sha_through_and_manifest_stays_clean(self):
         root = Path(tempfile.mkdtemp())

@@ -594,6 +594,43 @@ jobs:
               exit 1
           }
 
+      - name: Recovery drill E2E (pwsh 7)
+        # semantic.ps1 的恢复演练（roadmap A2b 的 Windows 那一半）端到端：真 restic 三类仓库 +
+        # 真 age + 真 bg，跑完整 Invoke-SemanticLayer（密封 + 演练都在里面），再单独验节流、
+        # 缺料分档、跨类别、内容哈希篡改、退化到只比大小的标注，以及红线 §1.1 的推送侧
+        # （Push-TreeToCloud -ExcludeNames 真挡住 rescue-test.txt，对照组真推得上去）。
+        # **为什么这一发必须存在**：Windows 侧此前根本没有演练——semantic.ps1 只密封就结束，
+        # 所以「备份期记下源哈希」那一半即使做对了也仍是「记了没人用」。首轮（10-03 容器）它就
+        # 当场抓出一个真 bug：`Invoke-Bg manifest … @($hashArgs)` 的带括号写法不是 splat，
+        # 整份参数被拼成**一个** argv，bg 报 unrecognized arguments、密封进了一份空清单，
+        # 而全链路看着「已密封」。
+        # 排在 rescue / init-keys 之前：这是本轮新加的覆盖，免费 runner 上被砍掉的永远是队尾。
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_drill_e2e.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::semantic.ps1 drill E2E rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
+      - name: Recovery drill E2E (Windows PowerShell 5.1)
+        # 同一份守卫在真 5.1 宿主上再跑一遍，这一步不是复述 7.4 的结论：夹具读产物走
+        # [IO.File]::ReadAllLines(UTF8) 而不是 5.1 的 Get-Content 默认码页（后者会把 rescue-test.txt
+        # 里的中文打成乱码，于是**每一条中文断言恒假**）；`-Encoding utf8` 在 5.1 写 BOM；
+        # 原生命令在 Stop 作用域写 stderr 会抛终止性异常。三处都是这一步才见过的。
+        # 正文只能 ASCII（Actions 写这份临时 .ps1 不带 BOM，5.1 按控制台代码页读中文会变乱码）。
+        shell: powershell
+        timeout-minutes: 25
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_drill_e2e.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run drill E2E: rc=$LASTEXITCODE - see the FAIL lines above"
+              exit 1
+          }
+
       - name: Escape recovery E2E (pwsh 7)
         # rescue.ps1 的端到端：真 restic 仓库（本地布局 + 云端副本布局两种形状）+ 真 age 密封
         # 账本，24 个场景全走子进程（逃生工具的契约就是「独立文件、独立进程、只吃命令行」，
