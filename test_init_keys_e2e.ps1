@@ -117,7 +117,11 @@
 #       改成父链逐层点名之后，改名这一刀当场咬住。
 #   m16 非 Windows 宿主的权限分支谎报 `applied`（其实没动过 ACL）→ 1：场景22
 #       「非 Windows 宿主如实打 skipped=no-icacls」。**登记一条缺口**：icacls 真收紧那一半
-#       （`perms applied` + DACL 只剩当前用户）只在 windows runner 上验，容器里没有 icacls。
+#       （`perms applied` + 断开继承 + 许可名单外没有别的主体）只在 windows runner 上验，
+#       容器里没有 icacls。判据口径与 ci.yml 的 `Assert permission surface wiring` 逐字一致
+#       ——**比较全落在 SID 上**（Get-Acl 交回的 IdentityReference 在 Windows 上通常已翻成账号名），
+#       且许可名单含 SYSTEM / Administrators 两个特权主体；10-03 windows job 首轮就是因为这里
+#       拿账号名去比 SID 而判红一条只有 runner 才露头的假失败。
 # 「摘掉被测实现而断言仍绿」的刀：0 把。m13 不计入（它的守卫是探针，见上）。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
@@ -663,12 +667,32 @@ if (Need-Engine '场景22 权限面分支') {
             "实得: $($permLines -join ' | ')"
         try {
             $acl = Get-Acl -LiteralPath $d
-            $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-            $allows = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' })
-            Chk '场景22 密钥目录的 DACL 只剩当前用户（关继承 + 单条授权；目录先收紧再落盘）' (
-                [bool]$acl.AreAccessRulesProtected -and $allows.Count -ge 1 -and
-                @($allows | Where-Object { "$($_.IdentityReference.Value)" -ne $sid }).Count -eq 0) `
-                "protected=$($acl.AreAccessRulesProtected) allows=$(@($allows | ForEach-Object { "$($_.IdentityReference.Value)" }) -join ',')"
+            # 比较全部落在 **SID** 上：Get-Acl 交回的 IdentityReference 在 Windows 上通常已经翻成
+            # 账号名，拿名字去比 WindowsIdentity 的 SID 字符串会把「自己」也算成外人。10-03 windows
+            # runner 首轮就是这么红的（三条 allow 全是 `runnervmfi6oq\runneradmin` 这种名字，一条都
+            # 不等于 SID）。同一坑的既有解法见 ci.yml `Assert permission surface wiring`。
+            $self = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            # 许可名单 = 自己 + 两个系统特权主体（S-1-5-18 SYSTEM / S-1-5-32-544 Administrators）。
+            # 原来这里写的是「DACL 只剩当前用户」，那在这条 runner 上是个**不成立的期望**：icacls
+            # 关掉继承、只授自己之后，那两个 ACE 依然在。它们不是「同机别的账号」，隐私红线管的是
+            # 别人读不读得到，所以判据取「断开继承（只有 Set-PrivateAclTree 那一次调用能产出）+
+            # 名单外没有别的主体」——摘掉调用点仍由 protected 那一半咬住（变异 m16）。
+            $allow = @($self, 'S-1-5-18', 'S-1-5-32-544')
+            $sids = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' } |
+                ForEach-Object {
+                    if ($_.IdentityReference -is [System.Security.Principal.SecurityIdentifier]) {
+                        $_.IdentityReference.Value
+                    } else {
+                        try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+                        catch { $_.IdentityReference.Value }
+                    }
+                })
+            $foreign = @($sids | Where-Object { $allow -notcontains $_ })
+            Chk '场景22 密钥目录断开了继承，且许可名单（自己 + SYSTEM + Administrators）之外没有别的主体' (
+                [bool]$acl.AreAccessRulesProtected -and $sids.Count -ge 1 -and $foreign.Count -eq 0) `
+                "protected=$($acl.AreAccessRulesProtected) allows=$($sids -join ',')"
+            Chk '场景22 收紧后自己仍有授权（把自己挡在外面＝下一次初始化直接失败）' (
+                $sids -contains $self) "allows=$($sids -join ',')"
         } catch {
             Chk '场景22 读 DACL 不该抛（读不到就如实报，别静默绿）' $false "异常: $($_.Exception.Message)"
         }
