@@ -198,7 +198,9 @@
   **动态作用域**解析，靠外层不管用，「外层忘了」就是这一发之前九处的成因）。**成败判定一律不靠
   异常，靠 `$LASTEXITCODE` 与显式 `throw`**：`throw` 在 Continue 下同样终止，所以 try/catch 结构
   一处没动。守卫两头：`probe_windows_ps51.ps1` 事实 5 用 **AST**（不是正则）扫每个原生命令调用
-  点、要求它所在 `ScriptBlockAst` 在调用之前有这条赋值（**29 处 / 0 违规**，其中变量形 `& $var` 12 处；
+  点、要求它所在 `ScriptBlockAst` 在调用之前有这条赋值（**10-03 起四个文件：35 处 / 0 违规**，
+  其中变量形 `& $var` 18 处；清单是 `backup.ps1` + `semantic/semantic.ps1` + `rescue.ps1` +
+  `init-keys.ps1`；
   并带 `nativeCalls>=10` 与 `varForm>=5` 两道存活下限——只扫到 3 处就等于规则自己失效），ci.yml 另有一步「5.1 下真跑一轮产品脚本」把它钉
   成行为面（摘掉任一处赋值，红的是**退出码**而不是静态检查）。用 PowerShell 解析器取元素请写
   `$cmd.CommandElements`（**属性**；7.2 上没有 `GetCommandElements()` 方法）。
@@ -348,6 +350,40 @@
   要求判红 + 恰好 1 条 FAIL + 报错写明「大小倒是一致」）与 `test_bg_semantic.py::TestDrillContentHash`。
 - **age 密封**：age 只读 /dev/tty 不吃管道——密钥初始化必须 expect 驱动
   （`init-keys.exp`）；passphrase stanza 独占，双恢复路径用双 X25519 recipient 实现。
+  **PowerShell 侧的对应物是 `init-keys.ps1`（10-03，两档 `-Stage Primary`/`Rescue`）**，四件事是
+  实测出来的、不是从 bash 侧推的：① **空回车陷阱**——age 的第一句提示原文是 `Enter passphrase
+  (leave empty to autogenerate a secure one)`，回车按空等于**封进一个谁都没见过的随机口令**，
+  `age -p` 照样退出 0、`.enc` 照样落盘，而纸上那串恢复码从此解不开它。所以「封存」之后必须拿
+  **已知的那串恢复码**把 `.enc` 真解一遍并核对解出来的公钥在册（`verify-rescue pubkey=match`），
+  验不过就保留明文临时身份让人重试——封错了与没封上的区别只有重新解一遍才知道；
+  ② **`age -p`/`age -d`（passphrase 形）在无 tty 时直接报错且不回退 stdin**（实测原文
+  `could not read passphrase: standard input is not a terminal, and /dev/tty is not available`），
+  而 `age-keygen -o/-y`、`age -R`、`age -d -i` 全非交互——这就是「Primary 落盘即可开始密封、
+  Rescue 必须在人坐在键盘前时做」这条分档的物理理由。**不要**为了「让 CI 也能封」去喂管道；
+  ③ `age-keygen` 把公钥打在 **stderr**（不是 stdout），且**拒绝覆盖**已有身份（rc=1，原文件不动），
+  所以中断留下的半成品只能报状态不能猜；④ passphrase 那一档的**机器契约面**要靠 pty 才看得见：
+  age 在提示前后写 `ESC[F` + `ESC[K`（光标回退 + 擦行），expect 的 transcript 因此会把相邻契约行
+  **拼进同一行**——夹具的读法是先剥 ANSI 转义、再在每个 `initkeys: ` 标记前强制换行，
+  否则 `StartsWith` 判据恒假（10-03 五段 pty 场景全绿之前正是这一步先红的）。
+- **PowerShell 有三条跨宿主形状坑，都是 10-03 写 `init-keys.ps1` 时量出来的**（前两条尤其别拿
+  「Linux 上路径分隔符是 `/`」的直觉猜）：**① `Join-Path $env:APPDATA "PartiverseBackup\age"`
+  和 `New-Object System.IO.FileInfo(...)` 在 Linux 上也会把反斜杠规范化掉**，两个宿主得到的是
+  **同一个形状**（实测 `joined=/tmp/xapp/PartiverseBackup/age`，落盘后 `ls` 只有一层
+  `PartiverseBackup`）——这与 §2 那条「`Test-Path` 直接吃裸反斜杠名会炸」不矛盾，炸的是没经过
+  这两层的路径拼接。**判据因此不要比相对路径字符串**（它跟着宿主分隔符变，上一版断言就是这样假失败的），
+  比**父链逐层点名**：叶子文件名 → 父目录名 → 祖父目录名 → 再上一层等于喂进去的那个根。
+  **② 变量名大小写不敏感，而 `if {}` 不建立作用域**：`$D = Run-Pty …` 会覆盖上面 `$d` 里的目录路径，
+  随后 `Join-Path $d 'recipients.txt'` 拿到的是一个 hashtable 的 ToString——报错长成 `Cannot find path
+  'System.Collections.Hashtable/recipients.txt'`，与真缺陷毫无关系；`$r2` 与 `$R2` 也是同一个变量。
+  ③ **`& $scriptBlockVar` 与 `& $binaryVar` 在 AST 里长得一模一样**，所以 `probe_windows_ps51.ps1`
+  事实 5（每个原生命令调用点所在作用域必须自己把 EAP 压回 Continue）会把夹具/产品里内联的
+  `& $f "identity.txt"` 记成原生调用违规。修法是在产品侧改（`init-keys.ps1` 用一个文件级
+  `Test-KeyFile` 函数替掉内联 scriptblock），**不是**教分类器去猜运行时类型——那等于把守卫的判据
+  换成它自己也不确定的东西。静态判据里想「排除注释」也走不通 AST：容器那台 pwsh 7.4.5 解析不了
+  `[System.Management.Automation.Language.CommentToken]` 类型字面量（`Unable to find type`），
+  而令牌的 `Text` 拼接会把 `.GetBytes(` 的点号丢掉（member 调用的 `.` 不是独立令牌）——
+  判「代码里有没有 Get-Random」请用**整行注释剥离**，并给这条剥离本身配一发变异（m14），
+  否则「判据是死的」与「实现违规」两种坏法报出来是同一句红。
 - **权限面**：备份产物没有任何需要同机可读的东西——入口脚本（`backup.sh` / `init.sh` /
   `drill.sh`）一律 `umask 077`，`$CONF_DIR`（secrets.env + age 私钥）与 `$LOG_DIR`（backup.log /
   rclone.log / launchd.*.log / sem.log / drill.log / preflight-latest.json）700、其中文件 600。
@@ -511,6 +547,18 @@
    上游那一步：`Install deps` 对 `restic.exe`/`age.exe` 都有「尺寸 <1 MB 就 throw」＋ 打版本号，
    依赖缺失当场把 step 判红，轮不到 E2E 悄悄 Skip；夹具末行仍如实打 `RESCUE-E2E-OK skipped=N`
    （§3「不得只报 E2E-OK 而不报未测」同一条口径）。
+   **PowerShell 侧的 E2E 现在有第二套：`test_init_keys_e2e.ps1`（10-03，31 场景 / 113 条通过断言，17 刀变异全咬住）**，
+   被测面是 `init-keys.ps1`（Windows 密钥初始化，§2 age 那一条的 PowerShell 对应物）。三条口径
+   是这一发新增的：**① 子进程的 stdin 一律挂一根管道**（`"`n" | & $selfPs …`）——不只为了让
+   「没有终端」的判定与 CI 一致，更因为**没有 tty 就没有任何一发能等人打字**：Rescue 档撞到
+   `age -p` 的提示时，stdin 是终端就会挂到 step 超时（25 分钟整轮白跑）而不是报出「拒封」那一行。
+   要测「真终端里封存成功」必须另走 expect 造伪终端（那五段在 windows runner 上整段 **Skip**，
+   因为 runner 没有 expect——这是登记在案的覆盖缺口，`INITKEYS-E2E-OK skipped=N` 里那个数必须读）。
+   **② 「闭环验证」不能只信产品自报**：`verify kind=… result=ok` 是它自己打的，所以夹具在脚本
+   **之外**再拿 recipients.txt 封一件探针、用两把身份分别解开比字节，pty 段封出的 `.enc` 也在外部
+   拿恢复码解开、取公钥、核对它确实在册。**③ 凭据面用「同源 + 只显一次 + 收尾扫全树」**：恢复码
+   只许出现在 `recovery-code.txt` 与那一次显示里，不进契约行、不进日志，夹具结束时扫自己整棵树。
+   windows job 里它同样两步（pwsh 7 + 5.1），排在 `Install deps` 之后、产品轮之前。
    **本机跑这份 E2E 的容器必须是宿主原生架构**：`mcr.microsoft.com/powershell:lts` 只有 amd64 与
    arm/v7，arm64 Mac 上 amd64 走 Rosetta、arm/v7 走 qemu TCG 会 `Assertion failed: (dc->base.pc_next & 1) == 0`
    然后 `rc=139`——那是环境崩溃不是判决。本仓的口径是自建 `backguard-native:deps`（ubuntu:24.04 arm64 +
@@ -594,6 +642,15 @@
    先确认左操作数是标量（判定辅助函数那端再把任何形状收敛成布尔：数组＝「有没有命中」）；静态取
    位置的断言先问「取不取得到」再取上下文；同一条变异第二次崩在环境（qemu/TCG 的 rc=139 也算）时
    **重跑一次再落账**，别写成 MISS。
+   **纯文本红线守卫的「扫描面」自己也是被测面**（10-03 的 `test_cloud_copy_only.sh`）：它整树扫
+   `*.sh`/`*.ps1` 找 `rclone sync`，而豁免只写了守卫自己一个文件，于是 10-02 新加的
+   `test_rescue_e2e.ps1:722`（静态断言「rescue.ps1 里没有 rclone sync」）被当成违规命中，linux job
+   红在一棵根本没有 `rclone sync` 的树上——**红线守卫咬住了同事的守卫**。两条口径：
+   ① 豁免**显式列类别**（守卫自身 + `test_*` 夹具；夹具写出这个词，正是为了断言产品脚本里没有它），
+   不靠 glob 撞运气；② 光有豁免不够——「一个文件都没扫」与「扫过且干净」在结论里长得一模一样
+   （都打 OK），而把 `test_*` 手滑成 `*` 恰好就是前一种。所以产品入口逐个点名当 tripwire，
+   **先判扫描面还在、再判有没有命中**，结论行把 `scanned=` 打出来。变异要连豁免一起摘一次、
+   再把扫描根换成空目录，才证得出这条 tripwire 是活的（该守卫 6 刀 + 1 发对照，10-03 全咬住）。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、
@@ -709,7 +766,11 @@
    都要在真机或跨类别夹具上跑一次**，单类别 E2E 测不出这类错配
    （夹具规矩：三类仓库各存自己的子树，路径互不重叠，否则写死仓库也能 PASS）。
    抽样条数由 `SEM_DRILL_COUNT`（默认 5）控制，E2E 拉满它以求确定性
-3. Windows 密钥初始化交互版 `init-keys.ps1`（对齐 `init-keys.exp`）
+3. ~~Windows 密钥初始化交互版 `init-keys.ps1`（对齐 `init-keys.exp`）~~ 已完成（10-03，
+   `init-keys.ps1` 两档 `-Stage Primary`/`Rescue` + `-Status`；守卫 `test_init_keys_e2e.ps1`，
+   已挂 windows job 两步 pwsh 7 + 5.1。**登记在案的缺口**：pty 那五段在 windows runner 上整段
+   Skip（没有 expect），所以「真 age + 真 Windows 终端」这一组合至今只在容器里验过，装机仍要
+   人按 `DEPLOY.md` §2 跑一次才算完成）
 4. ~~launchd plist 明文口令~~ 已删（2026-10-01 01:35）：**不需要 wrapper**——`backup.sh`
    自己 `set -a; source secrets.env`，plist 里那份 `BORG_PASSPHRASE` 与 secrets.env 同值、
    删除后重载 launchd 并手动触发了完整一次备份（退出 0、产物齐全）作为验证。

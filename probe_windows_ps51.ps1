@@ -151,7 +151,12 @@ if ($t4 -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') {
 # rescue.ps1 也在清单内：它是逃生工具，跑现场最可能是 Windows PowerShell 5.1（系统自带那台），
 # 而它每个函数都在调 restic / age ——漏掉这个文件等于「只在夜间备份上验过 Continue 规矩」。
 # 守卫的接线断言在 test_rescue_e2e.ps1 末尾（把这行里的 'rescue.ps1' 摘掉那条就红）。
-$eapFiles = @('backup.ps1', (Join-Path 'semantic' 'semantic.ps1'), 'rescue.ps1')
+# init-keys.ps1（10-03 加入）同一条理由：它每个函数都在调 age / age-keygen / icacls。
+# **一条写法规矩**（10-03 由 init-keys.ps1 撞出来的）：这些文件里不要写 `& $sbVar 参数` 调内联
+# 脚本块。`& $ResticBin`（真子进程）与 `& $f`（本地脚本块）在 AST 里形状完全一样，这条规则
+# 区分不了二者的运行时类型，于是脚本块会被登记成「原生命令调用点」并判违规（实测四处）。把分类器
+# 修成能猜类型不值当——避开这个写法就够，而且「同一形状里既有真炸点又有假阳性」本身就是坏消息。
+$eapFiles = @('backup.ps1', (Join-Path 'semantic' 'semantic.ps1'), 'rescue.ps1', 'init-keys.ps1')
 $eapViolations = @()
 $eapCalls = 0
 $eapVarCalls = 0

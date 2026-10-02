@@ -633,6 +633,40 @@ jobs:
               exit 1
           }
 
+      - name: Init-keys E2E (pwsh 7)
+        # init-keys.ps1（Windows 密钥初始化）的端到端：Primary 档全非交互（age-keygen + age -R/-d -i），
+        # Rescue 档要 age 在终端上索取 passphrase——那几段在 runner 上没有 expect，会整段打
+        # `skip - …`，所以 **OK 之后还要看 skipped 那个数**（口径同 rescue E2E 那两步）。
+        # 为什么值得单独挂一步：`semantic.ps1:212` 的密封只在 recipients.txt 存在时才跑，而 Windows
+        # 侧此前没有任何东西生成它——也就是说 Windows 的时间轴从来没密封出过 manifest.json.enc，
+        # 「逃生时只剩引擎一条路」是当时的实际状态。这一步把「生成得到、配对得上、恢复码解得开」
+        # 钉成机器判据。
+        # 判据只认 ASCII 契约行（`initkeys: <事实>`）：中文人读行在 5.1 的控制台代码页下会变 ?。
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_init_keys_e2e.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::init-keys.ps1 E2E rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
+      - name: Init-keys E2E (Windows PowerShell 5.1)
+        # 同一份守卫在真 5.1 宿主上再跑一遍：5.1 与 7.4 的差别在这一步里全是实打实的面——
+        # `-Encoding utf8` 写 BOM（age 按字节读 recipients.txt 就废了）、静态
+        # RandomNumberGenerator::Fill 不存在、原生命令在 Stop 作用域里写 stderr 就抛终止性异常。
+        # 正文只能 ASCII（Actions 写这份临时 .ps1 不带 BOM，5.1 按控制台代码页读中文会变乱码）。
+        shell: powershell
+        timeout-minutes: 25
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_init_keys_e2e.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run init-keys E2E: rc=$LASTEXITCODE - see the FAIL lines above"
+              exit 1
+          }
+
       - name: Run backup and assert
         timeout-minutes: 40
         env:

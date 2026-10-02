@@ -147,8 +147,31 @@ cd backguard
 $env:SEM_NTFY_URL = "https://<你的-ntfy>/backguard-<设备名>"
 ```
 
-验收同上（四件套 / 推送 / Task Scheduler）；密封需装 age.exe 并手动生成
-`%APPDATA%\PartiverseBackup\age\recipients.txt`（Windows 密钥初始化交互版在 M1 后续补齐）。
+验收同上（四件套 / 推送 / Task Scheduler）。
+
+**密封还需要 age 密钥，Windows 上由 `init-keys.ps1` 生成**（10-03 起；在此之前 Windows 的
+时间轴**从来没有密封出过 `manifest.json.enc`**——`semantic.ps1` 的密封那一步只在
+`%APPDATA%\PartiverseBackup\age\recipients.txt` 存在时才跑，而本机没有任何东西生成它）。
+分两档，第二档必须人坐在键盘前：
+
+```powershell
+.\init-keys.ps1                      # Primary：两把 X25519 身份 + recipients.txt（两行）+ 恢复码
+.\init-keys.ps1 -Stage Rescue        # Rescue：用恢复码封存 .recovery-identity.enc（要终端）
+.\init-keys.ps1 -Status              # 只数文件，不开任何加密件（可被脚本调）
+```
+
+- 装 age 本身：`backup.ps1 -Task Init` 的 `Install-Deps`（或手工放 `age.exe` / `age-keygen.exe`
+  后用 `-Age` / `-AgeKeygen` 指路径；也认 `BACKGUARD_AGE` / `BACKGUARD_AGE_KEYGEN` 两个环境变量）。
+- 恢复码 **只在屏幕上显示一次** 并落 `recovery-code.txt`（8 组 4 位十六进制，与 `init-keys.exp`
+  同形）：抄到纸上，核对无误后 `Remove-Item` 掉那份文件。它不进日志、不进机器契约行。
+- `Primary` 落盘前自己验一遍闭环（拿 recipients.txt 封一件探针、再用两把身份分别解开比内容）；
+  `Rescue` 落盘后拿**你抄的那串恢复码**把 `.enc` 真解一遍并核对公钥在册——这一步必须是终端，
+  因为 age 的 passphrase 形态只认 tty，而它的提示原文是
+  `Enter passphrase (leave empty to autogenerate a secure one)`：**按空回车会封进一个谁都没见过的
+  随机口令**，`age -p` 照样退出 0、`.enc` 照样落盘，那张纸从此解不开它。重验抓的就是这一手。
+- `recipients.txt` 一旦存在就必须**恰好两行**（主身份 + 救援身份）；单行意味着只剩一条恢复路径。
+- 恢复身份封好的 `recovery-identity.enc` 按设计**不上云**（凭据纪律），所以密钥目录必须有
+  第二处离线副本（见下面 `rescue.ps1 -Recovery` 那段与 §5 验收清单）。
 
 逃生面自证（Windows 侧，10-02 起有 `rescue.ps1`）：
 
