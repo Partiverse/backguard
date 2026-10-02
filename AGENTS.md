@@ -198,10 +198,38 @@
   **动态作用域**解析，靠外层不管用，「外层忘了」就是这一发之前九处的成因）。**成败判定一律不靠
   异常，靠 `$LASTEXITCODE` 与显式 `throw`**：`throw` 在 Continue 下同样终止，所以 try/catch 结构
   一处没动。守卫两头：`probe_windows_ps51.ps1` 事实 5 用 **AST**（不是正则）扫每个原生命令调用
-  点、要求它所在 `ScriptBlockAst` 在调用之前有这条赋值（17 处 / 0 违规，并带 `nativeCalls>=10`
-  的存活下限——只扫到 3 处就等于规则自己失效），ci.yml 另有一步「5.1 下真跑一轮产品脚本」把它钉
+  点、要求它所在 `ScriptBlockAst` 在调用之前有这条赋值（**29 处 / 0 违规**，其中变量形 `& $var` 12 处；
+  并带 `nativeCalls>=10` 与 `varForm>=5` 两道存活下限——只扫到 3 处就等于规则自己失效），ci.yml 另有一步「5.1 下真跑一轮产品脚本」把它钉
   成行为面（摘掉任一处赋值，红的是**退出码**而不是静态检查）。用 PowerShell 解析器取元素请写
   `$cmd.CommandElements`（**属性**；7.2 上没有 `GetCommandElements()` 方法）。
+  **同一支扫描器自己的盲区（10-02 夜，加 rescue.ps1 进清单时才露头）**：`VariableExpressionAst`
+  在 pwsh 7.4 上**没有 `UserPath` 属性**（实测 `PSObject.Properties.Name -contains 'UserPath'` = False），
+  取到的是 `$null`，于是「名字为空就跳过」那一句把 `& $ResticBin` / `& $script:AgeBin` **一整类**
+  调用静默挡在门外——`backup.ps1` 13 处 + `rescue.ps1` 6 处，**从没进过这条规矩**，而打印出来的
+  总数一直是 17，文档却写着「扫每个原生命令调用点」。正确取法是 `$e0.VariablePath.UserPath`，它连
+  作用域名一起给（`script:ResticBin`），跟「本文件定义的函数名」比对之前要摘掉 `scope:` 前缀。
+  **口径**：任何「按元素形状分类再计数」的静态守卫，都要给**每一类**各设一条存活下限，并让变异
+  证明该类真的在数（m17：把取名字改回 `.UserPath` → varForm 掉到 0、nativeCalls 掉回 17，当场报红）。
+- **PowerShell 函数返回数组会被管道摊平：1 个元素出来是标量，0 个元素出来是 `$null`**（10-02
+  写 `rescue.ps1` 时同一课交两次学费，其中一次是**产品缺陷**）：`Get-ResticSnapshots` 返回裸数组，
+  调用点 `$ids[-1]` 在**只有一个快照**的仓库上取到的是快照 ID 的**最后一个字符**——契约行打成
+  `archive=b`，restic 回 `no matching ID found for prefix "b"`，最后误报成 `ENGINE_UNREADABLE`。
+  而「单快照档案」恰是逃生现场最常见的那一档（新设备第一晚）。空数组反过来摊平成「什么都没
+  输出」，与引擎失败的 `$null` 分不开，于是空仓库冒充口令错。口径：**碰集合的函数返回一个对象**
+  （`@{ ok = $bool; ids = @() }`），调用点用 `$snap.ids` 取——**属性访问不摊平**，管道和函数返回才摊平。
+  这句有实测撑着：变异 m16 把调用点的 `@($snap.ids)` 摘掉，97 条断言一条没红——**摊平的边界只在
+  函数返回那一道**，属性访问处的 `@()` 只是保险，别把它当被测面信赖；挡住这一发的确实是
+  「返回对象」这一手。同一个坑第二次咬的是守卫自己：
+  `RowFor` 命中 1 条时出来的是那个 hashtable 本身，`$rNote[0]` 变成「按键 0 索引哈希表」＝ `$null`，
+  断言**恒假**而报错信息里连值都打不出来——正是那个「什么都没有」指向了病根。推论：**凡把
+  「0 条 / 1 条 / N 条」当区分的断言，调用点一律 `@(...)`**，`-eq 0`/`-eq 1` 之外的形状都先问一句
+  「1 个元素时这个变量还是数组吗」。
+- **5.1 的 .NET Framework 上没有 `String.EndsWith(string, StringComparison)`**（pwsh 7 有，
+  所以本机能跑不代表 CI 那档能跑）：字面量后缀判断写成
+  `s.IndexOf(tail, [System.StringComparison]::Ordinal) -eq (s.Length - tail.Length)`。
+  同理，**判断字面量路径永远别用 `-like`**——`-like` 把 `[01]` 当字符类、`*` `?` 当通配，而
+  被测实现用的是 Ordinal 包含；夹具里那条 `a [01] b.txt` 就是为了让「换成正则匹配」这一刀必须红。
+  守卫与被守卫的实现**必须同形**，不然变异咬不住、断言还会假通过。
 - **`ls -1t "$f".*` 对目录操作数打印的是「目录的内容」，不是目录本身**——想按 mtime 排「这些
   路径」必须加 `-d`（`ls -1dt`）。10-01 日志轮转的守卫因此没被测到：同名目录压根没进删除候选，
   摘掉「必须是普通文件」那道变异**E2E 全绿**。更阴的是两个 bug 互相掩盖：不加 `-d` 时 ls 给
@@ -470,6 +498,25 @@
    `test_cloud_verify_logic.ps1`、`test_integrity_logic.ps1`、`test_retention_logic.ps1`、
    `test_perms_logic.ps1`（后三套均 10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、Windows PowerShell
    5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2 编码那条）。
+   **第六套 `test_rescue_e2e.ps1`（10-02，24 场景 / 97 条断言）不是逻辑测试而是 E2E**：它起真
+   `restic`（`init` + 两次 `backup`，故意让 config 档案只有 1 个快照——单快照那一档正是摊平缺陷的
+   靶子）、真 `age`（`age-keygen` 现做身份、密封 `manifest.json.enc`；路径 A 用真 age 验到底，
+   路径 B 只验**调用序列**——真 age 只读 /dev/tty，CI 等不到人打字，那一档用桩），
+   把 `rescue.ps1` 当**子进程**跑（`-File` + 隔离 `-Base`），断言只取 `rescue: <fact>`
+   那些 ASCII 契约行——5.1 是按控制台代码页解码子进程 stdout 的，中文行会变 `?`，所以人读行不许进
+   断言（这条自警由 `rescue.ps1` 的 `Write-Contract` 逐字符 >0x7F 兜住，变异 m06 咬住）。windows job
+   里它同样两步（pwsh 7 + 5.1），排在 `Install deps` 之后、产品轮之前，且 `Install deps` 现在**必须装
+   age**——restic 或 age 任一不在 PATH，夹具就把**真引擎那二十二段（场景 3–24）整段 Skip**，
+   而 **Skip 不是通过**。这一条不靠新开关，靠
+   上游那一步：`Install deps` 对 `restic.exe`/`age.exe` 都有「尺寸 <1 MB 就 throw」＋ 打版本号，
+   依赖缺失当场把 step 判红，轮不到 E2E 悄悄 Skip；夹具末行仍如实打 `RESCUE-E2E-OK skipped=N`
+   （§3「不得只报 E2E-OK 而不报未测」同一条口径）。
+   **本机跑这份 E2E 的容器必须是宿主原生架构**：`mcr.microsoft.com/powershell:lts` 只有 amd64 与
+   arm/v7，arm64 Mac 上 amd64 走 Rosetta、arm/v7 走 qemu TCG 会 `Assertion failed: (dc->base.pc_next & 1) == 0`
+   然后 `rc=139`——那是环境崩溃不是判决。本仓的口径是自建 `backguard-native:deps`（ubuntu:24.04 arm64 +
+   apt restic + pwsh 7.4.5 + age v1.2.1，全部 linux-arm64）。同理，**变异驱动的逐刀日志必须落在挂进
+   容器的宿主目录**：10-02 那轮 m15 的日志写在容器内 `/tmp`，容器退出即失，于是它被记成 `ESCAPED`，
+   单独重跑才发现其实咬住了（38 个 `bg-rescue-*` 残留目录）——「没证据」和「没咬住」长得一模一样。
    **`.cmd` 桩有两个形状是 10-02 在 windows runner 上第一次跑红才量出来的**（容器里永远走 `.sh`，
    所以这两条只在 CI 露头）：① `echo %*>> "文件"` 的 `%*` 与 `>>` 之间**不许有空格**——cmd 会把那个
    空格一起写进文件，于是「argv 逐字」断言差一个尾空格判红（实现一个字没错）；② stderr 要用
@@ -599,7 +646,8 @@
 
 1. ~~rescue 单文件脚本独立版~~ bash 版已完成：`rescue.sh`（08 章 T3.2，无 Python 依赖，
    两种目录布局 + 引擎自动判定 + age 双路径；`test_rescue_e2e.sh` 锁行为）。
-   **PowerShell 版 `rescue.ps1` 仍待做**——只在能挂上 CI 验证时写（本机无 pwsh）。
+   PowerShell 版 `rescue.ps1` 已完成（10-02，restic-only + age 账本两条路径；
+   `test_rescue_e2e.ps1` 24 场景 / 97 条断言挂 windows job 两档宿主，见 §3）。
    **10-02 起的 Windows 差距清单**（对着 `backup.sh` 逐条读出来的，T1.6 上真机前先补这几发）：
    ①`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是**在 powershell.exe 5.1 下的未验证面**——
    Task Scheduler 注册的正是 powershell.exe，而 5.1 里原生命令的 stderr 一旦重定向

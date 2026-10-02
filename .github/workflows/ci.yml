@@ -461,11 +461,24 @@ jobs:
             if ($exe.FullName -ne "$binDir\restic.exe") { Move-Item $exe.FullName "$binDir\restic.exe" -Force }
           }
           if ((Get-Item "$binDir\restic.exe").Length -lt 1MB) { throw "restic.exe 尺寸异常" }
+          # age：rescue.ps1 的账本解封（路径 A 用主身份、路径 B 用恢复码）与 test_rescue_e2e.ps1
+          # 的真 age 那几段都要它。restic / age / age-keygen 任一不在 PATH，夹具就把真引擎那二十二段
+          # （场景 3–24）整段 Skip——Skip 不是通过。
+          # 版本钉住而不是问 API 要 latest：下载失败应当当场报红，而不是下一轮悄悄换了个二进制。
+          $ageVer = "1.2.1"
+          curl.exe -fsSL -o "$env:RUNNER_TEMP\age.zip" `
+            "https://github.com/FiloSottile/age/releases/download/v$ageVer/age-v$ageVer-windows-amd64.zip"
+          if ($LASTEXITCODE -ne 0) { Write-Error "age 下载失败"; throw "age download failed" }
+          Expand-Archive "$env:RUNNER_TEMP\age.zip" -DestinationPath "$env:RUNNER_TEMP\agesetup" -Force
+          Move-Item "$env:RUNNER_TEMP\agesetup\age\age.exe" "$binDir\age.exe" -Force
+          Move-Item "$env:RUNNER_TEMP\agesetup\age\age-keygen.exe" "$binDir\age-keygen.exe" -Force
+          if ((Get-Item "$binDir\age.exe").Length -lt 1MB) { throw "age.exe 尺寸异常" }
           curl.exe -fsSL -o "$env:RUNNER_TEMP\rclone.zip" "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
           Expand-Archive "$env:RUNNER_TEMP\rclone.zip" -DestinationPath $binDir -Force
           Move-Item "$binDir\rclone-*-windows-amd64\rclone.exe" "$binDir\rclone.exe" -Force
           Add-Content $env:GITHUB_PATH $binDir
           & "$binDir\restic.exe" version
+          & "$binDir\age.exe" --version
 
       - name: Prepare test config
         shell: pwsh
@@ -578,6 +591,45 @@ jobs:
           & "$PWD\test_perms_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::权限面逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
+      - name: Escape recovery E2E (pwsh 7)
+        # rescue.ps1 的端到端：真 restic 仓库（本地布局 + 云端副本布局两种形状）+ 真 age 密封
+        # 账本，24 个场景全走子进程（逃生工具的契约就是「独立文件、独立进程、只吃命令行」，
+        # dot-source 测不到 argv 引号面与控制台编码面）。
+        # **为什么放在产品轮之前**：同前三步逻辑测试的口径——它只动临时目录，红了不该把同轮
+        # 40 分钟的产品断言带走；而它是这一轮新加的覆盖，免费 runner 上被砍掉的永远是队尾。
+        # **为什么必须真装 age**：restic / age / age-keygen 任一不在 PATH，夹具就把真引擎那二十二段
+        # （场景 3–24：账本两条解封路径、格式告警、旧形时间轴…）整段 Skip，而 Skip 不是通过——
+        # rescue 的主判据恰恰是「密封清单解得开、解出来的取回路径真能取到文件」。
+        # 判据只认 ASCII 契约行（`rescue: <事实>`）：5.1 读子进程 stdout 用的是控制台代码页，
+        # 中文人读行会先被解码成 ? ——见 rescue.ps1 文件头与 test_rescue_e2e.ps1 场景 23。
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_rescue_e2e.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::rescue.ps1 E2E rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
+      - name: Escape recovery E2E (Windows PowerShell 5.1)
+        # 同一份守卫在**真实宿主**上再跑一遍：Task Scheduler 注册的 backup.ps1 走的是 powershell.exe
+        # 5.1，而 5.1 与 7.4 在两处实测不同——原生命令在 Stop 作用域里往 stderr 写一行就抛终止性
+        # 异常（probe_windows_ps51.ps1 事实 3）、函数内 exit 不跑外层 finally。这一步的解释器由
+        # 测试自己选中（`$PSVersionTable.Major -lt 6` → 子进程也用 5.1），所以它是整条链路第一次
+        # 在 5.1 上跑，不是把 7.4 的结论复述一遍。
+        # 正文只能 ASCII（§2 编码那条：Actions 写这个临时 .ps1 不带 BOM，5.1 按控制台代码页读，
+        # 中文会先变乱码——所以错误行照其它 5.1 步骤那样用英文）。
+        shell: powershell
+        timeout-minutes: 25
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_rescue_e2e.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run rescue E2E: rc=$LASTEXITCODE - see the FAIL lines above"
               exit 1
           }
 

@@ -148,9 +148,13 @@ if ($t4 -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') {
 # 判定口径：调用点所在**最近的作用域**（函数体或 scriptblock 体）里，从作用域开头到该调用之前，
 # 必须出现把 `$ErrorActionPreference` 赋成 Continue 的语句。只认「在这条调用之前」——写在调用
 # 之后的赋值等于没写。`& 函数名` 不算原生命令（同文件里定义的函数名拿来排除）。
-$eapFiles = @('backup.ps1', (Join-Path 'semantic' 'semantic.ps1'))
+# rescue.ps1 也在清单内：它是逃生工具，跑现场最可能是 Windows PowerShell 5.1（系统自带那台），
+# 而它每个函数都在调 restic / age ——漏掉这个文件等于「只在夜间备份上验过 Continue 规矩」。
+# 守卫的接线断言在 test_rescue_e2e.ps1 末尾（把这行里的 'rescue.ps1' 摘掉那条就红）。
+$eapFiles = @('backup.ps1', (Join-Path 'semantic' 'semantic.ps1'), 'rescue.ps1')
 $eapViolations = @()
 $eapCalls = 0
+$eapVarCalls = 0
 foreach ($rel in $eapFiles) {
     $full = Join-Path $RepoRoot $rel
     if (-not (Test-Path -LiteralPath $full)) {
@@ -166,8 +170,18 @@ foreach ($rel in $eapFiles) {
         if ($el.Count -eq 0) { continue }
         $e0 = $el[0]
         $name = ''
-        if ($e0 -is [System.Management.Automation.Language.VariableExpressionAst]) { $name = $e0.UserPath }
-        elseif ($e0 -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $name = $e0.Value }
+        $fromVar = $false
+        if ($e0 -is [System.Management.Automation.Language.VariableExpressionAst]) {
+            # **不是** `$e0.UserPath`：7.4 的 VariableExpressionAst 上没有这个属性（实测
+            # `PSObject.Properties.Name -contains 'UserPath'` = False），取到的是 $null，于是下面那句
+            # `if (-not $name) { continue }` 把 `& $ResticBin` **一整类**调用静默跳过——10-02 加上
+            # rescue.ps1 之后总数仍是 17，才发现这一形从没登记过（backup.ps1 13 处 + rescue.ps1 6 处）。
+            # 正确取法是 `.VariablePath.UserPath`，它连作用域名一起给（`script:ResticBin`），
+            # 所以比对「本文件定义的函数名」之前要把 `scope:` 前缀摘掉。
+            $name = "$($e0.VariablePath.UserPath)"
+            $fromVar = $true
+            if ($name -match '^[A-Za-z]+:(.*)$') { $name = $matches[1] }
+        } elseif ($e0 -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $name = $e0.Value }
         if (-not $name) { continue }
         # 外部程序 = 用 & 调的（& restic / & rclone / & $python / & $env:BG），或裸写的已知可执行名
         $isNative = $false
@@ -178,6 +192,7 @@ foreach ($rel in $eapFiles) {
         }
         if (-not $isNative) { continue }
         $eapCalls++
+        if ($fromVar) { $eapVarCalls++ }
         $scope = $c.Parent
         while ($scope -and -not ($scope -is [System.Management.Automation.Language.ScriptBlockAst])) {
             $scope = $scope.Parent
@@ -189,7 +204,7 @@ foreach ($rel in $eapFiles) {
         }
     }
 }
-Write-Host "probe51-eap: files=$($eapFiles.Count) nativeCalls=$($eapCalls) violations=$($eapViolations.Count)"
+Write-Host "probe51-eap: files=$($eapFiles.Count) nativeCalls=$($eapCalls) varForm=$($eapVarCalls) violations=$($eapViolations.Count)"
 if ($eapViolations.Count -gt 0) {
     foreach ($v in $eapViolations) { Write-Host "  EAP-STOP: $v" }
     Write-Host "::error::$($eapViolations.Count) 处原生命令不在 EAP=Continue 的作用域里——5.1 宿主上它们写 stderr 就等于抛终止性异常，整轮备份在那里断掉（事实 3 实测三形全 THREW）"
@@ -199,6 +214,12 @@ if ($eapCalls -lt 10) {
     # 调用点数掉下去＝扫描本身坏了（改了判定式、换了作用域形状、或产品脚本里的引擎调用被摘了）。
     # 一条永远不会红的断言比没有断言更坏（§3「断言自己是死的」）
     Write-Host "::error::只扫到 $eapCalls 处原生命令（预期 >=10）——这条规则自己失效了"
+    exit 1
+}
+if ($eapVarCalls -lt 5) {
+    # `& $变量` 那一形整类掉下来 = 取名字的那一步又瞎了（7.4 上没有 `.UserPath`，10-02 就是被这个
+    # 属性不存在坑掉，19 处调用静默不登记而总数照旧 17）。下限取 5：现存是 backup 13 + rescue 6。
+    Write-Host "::error::只扫到 $eapVarCalls 处变量形的原生命令（预期 >=5）——取名字的那一步又失效了，整类调用没进守卫"
     exit 1
 }
 

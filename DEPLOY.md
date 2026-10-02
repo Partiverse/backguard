@@ -150,6 +150,19 @@ $env:SEM_NTFY_URL = "https://<你的-ntfy>/backguard-<设备名>"
 验收同上（四件套 / 推送 / Task Scheduler）；密封需装 age.exe 并手动生成
 `%APPDATA%\PartiverseBackup\age\recipients.txt`（Windows 密钥初始化交互版在 M1 后续补齐）。
 
+逃生面自证（Windows 侧，10-02 起有 `rescue.ps1`）：
+
+```powershell
+.\rescue.ps1 -Base <备份根> -List                                   # 三类仓库 + 时间轴看得见
+.\rescue.ps1 -Base <备份根> -Class files -Find <一个你知道的文件名>   # 只搜；取回路径在 row| 第 5 段
+.\rescue.ps1 -Base <备份根> -Class files -Get '<那一行>' -To <空目录>
+.\rescue.ps1 -Base <备份根> -Ledger -Identity <age\identity.txt>     # 解封密封账本（路径 A）
+```
+
+它只读 restic 仓库：撞到 borg 仓库报 `BORG_REPO_ON_WINDOWS` 并指回 `rescue.sh`（那一份仍要在
+Linux/macOS 上跑）。只有纸质恢复码时走路径 B（`-Recovery <age\recovery-identity.enc>`，age 现场
+要口令，得人在键盘前）；`recovery-identity.enc` 按设计不上云，所以密钥目录必须有第二处离线副本。
+
 ## 3. dogfood 行为契约（2 周）
 
 - **不主动提醒**：组织者不在群里发「记得看 STORY」；通知只有备份系统自己的 ntfy 推送。
