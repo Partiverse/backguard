@@ -4,6 +4,57 @@
 # 兼容性：清单落盘走 [IO.File]::WriteAllLines（UTF-8 无 BOM）；bg 侧以 utf-8-sig 读取，
 # 兼容 Windows PowerShell 5.1 与 pwsh 7。
 
+# 兼容 Windows PowerShell 5.1 与 pwsh 7：只用 Skip/First（不用 6.0+ 的 -SkipLast），
+# 排序键显式走 invariant culture，删除一律 -LiteralPath（方括号路径不当通配符）。
+
+# 本地暂存保留最近 N 份快照（SEM_TIMELINE_KEEP，默认 14；非数字回落默认，<=0 不清理）。
+# 与 semantic.sh 的 prune_local_timeline 同形，四条口径一条不落：①只认 stage 根下第 4 层
+# （YYYY/MM/DD/HHMM-标签）的目录；②按相对路径排序取「除最后 N 份外」；③删除前逐个过形态
+# 白名单，不匹配就告警跳过——stage 根解析错时宁可漏删不可误删；④清走后把空日期壳自深向浅收掉。
+# 云端那份不动（AGENTS §1.4 只增不减）：调用点在时间轴推送之前，被裁的本来上一轮就上过云。
+function Prune-LocalTimeline {
+    param([Parameter(Mandatory)][string]$Stage)
+
+    $keep = 14
+    if ($env:SEM_TIMELINE_KEEP -match '^\d+$') { $keep = [int]$env:SEM_TIMELINE_KEEP }
+    if ($keep -lt 1) { return }
+    if (-not (Test-Path -LiteralPath $Stage)) { return }
+
+    $prefix = $Stage.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    $snaps = @(Get-ChildItem -LiteralPath $Stage -Recurse -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            if (-not $_.FullName.StartsWith($prefix, [System.StringComparison]::Ordinal)) { return }
+            $rel = $_.FullName.Substring($prefix.Length)
+            # 4 层 = 3 个分隔符；与 bash 的 -mindepth 4 -maxdepth 4 同口径
+            if (([regex]::Matches($rel, '[\\/]')).Count -ne 3) { return }
+            [pscustomobject]@{ Full = $_.FullName; Rel = $rel; Leaf = $_.Name }
+        })
+    if ($snaps.Count -le $keep) { return }
+
+    $victims = @($snaps | Sort-Object -Property Rel -Culture '' |
+        Select-Object -First ($snaps.Count - $keep))
+    foreach ($v in $victims) {
+        if ($v.Leaf -notmatch '^[0-9]{4}-[a-z0-9-]+$') {
+            Write-Warning "[semantic] 跳过非快照形态路径: $($v.Rel)"
+            continue
+        }
+        Remove-Item -LiteralPath $v.Full -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $v.Full) {
+            Write-Warning "[semantic] 本地暂存没删掉（被占用？）: $($v.Rel)"
+        } else {
+            Write-Host "[ OK ] [semantic] 本地暂存保留最近 $keep 份，清理: $($v.Rel)"
+        }
+    }
+
+    # 腾空日期壳级联删除：先筛「无子项」再按路径长度降序（≈自深向浅），永不命中 stage 根本身
+    # （Get-ChildItem -Recurse -Directory 不含操作数自己）。-Recurse 只为压掉目录提示，此处的
+    # 目录刚被判过空。
+    Get-ChildItem -LiteralPath $Stage -Recurse -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.GetFileSystemInfos().Count -eq 0 } |
+        Sort-Object -Property { $_.FullName.Length } -Descending |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 function Invoke-SemanticLayer {
     param(
         [object[]]$Done,          # 每项 @{ cls = "files"; repo = "C:\...\restic-files" }
@@ -136,6 +187,9 @@ function Invoke-SemanticLayer {
     Get-ChildItem $runsDir -Filter "run-*.json" | Sort-Object LastWriteTime -Descending |
         Select-Object -Skip 60 | Remove-Item -Force -ErrorAction SilentlyContinue
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+
+    # 本地暂存保留策略（与 semantic.sh:354 同一处落点：生成之后、推送之前）
+    Prune-LocalTimeline -Stage $stage
 
     Write-Host "[ OK ] [semantic] 时间轴已生成: $stage" -ForegroundColor Green
 }

@@ -378,7 +378,12 @@
    powershell.exe 跑一轮**（新 CI step 里子进程特意用 pwsh.exe，就是为了不把这两发混在一起）。
    ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④没有 A2a 完整性（restic `check --read-data`
    同形）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
-   ⑥`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）、⑦`restic forget` 不带
+   ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 已补**
+   （`semantic.ps1` 的 `Prune-LocalTimeline`，四条口径与 `prune_local_timeline` 逐条对齐：第 4 层
+   才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收；
+   守卫是 windows job 的 `Assert local timeline retention`，`KEEP=1` 压成确定形状。写它时唯一能
+   静态确定形状的是「5.1 也得跑」——所以只用 `-First`/`Sort-Object -Culture ''` 这类 5.1 就有的
+   写法，没碰 6.0+ 的 `-SkipLast`）、⑦`restic forget` 不带
    `--prune`（仓库只 compact 不了）、⑧权限面靠 NTFS 继承，bash 侧那套整树归一化没有对应实现。
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，

@@ -609,6 +609,103 @@ jobs:
           # 守卫永远只可能红，等于没有守卫。
           exit 0
 
+      # Windows 侧本地暂存保留策略（semantic.ps1 的 Prune-LocalTimeline，与 semantic.sh 的
+      # Windows 侧本地暂存保留策略（semantic.ps1 的 Prune-LocalTimeline，与 semantic.sh 的
+      # prune_local_timeline 同一条口径）。此前 Windows 只有 run JSON 留档有保留上限，时间轴根
+      # 越长越厚——本地暂存的意义是「云端丢了能重建」，不是无限历史。KEEP=1 把裁剪压成确定形状：
+      # 铺开 3 个旧种子 + 1 个形态不合规的目录，跑完之后必须只剩「本轮那份 + 不合规那份」，
+      # 且被裁快照腾空的日期壳一并消失。断言顺序照 §3：先证本轮真跑完（否则整轮崩在别处会伪装成
+      # 「保留策略坏了」）、再问哪条检查抓到了它、退出码放最后；成功路径显式 exit 0（上一条守卫
+      # 实测的坑：pwsh -Command 没有 exit 语句时拿最后一条原生命令的 rc 当宿主 rc）。
+      - name: Assert local timeline retention
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          SKIP_WEBDAV: "1"
+        run: |
+          $ErrorActionPreference = "Continue"
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
+          $env:SEM_TIMELINE_KEEP = "1"
+          $stage = "$env:RUNNER_TEMP\repos\timeline"
+
+          # stage 根下第 4 层（YYYY/MM/DD/HHMM-标签）的目录，与 bash 的 -mindepth 4 -maxdepth 4 同口径
+          function Get-SnapDirs {
+              param([string]$Root)
+              $n = $Root.Length
+              @(Get-ChildItem -LiteralPath $Root -Recurse -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName.Length -gt $n -and
+                      (($_.FullName.Substring($n).TrimStart('\', '/') -split '[\\/]').Count) -eq 4 })
+          }
+
+          # 种子日期按当天回推，别写死年份：runner 时钟走到 2027 年那些目录就变成「未来快照」，
+          # 排序时留在最后，断言当场变成随机红
+          $seedDays = @(1, 2, 3 | ForEach-Object { (Get-Date).AddDays(-60 * $_) })
+          function New-SnapDir {
+              param([string]$Root, [string]$Rel)
+              # 用 .NET 直接建整棵树：New-Item -Force 对「多级父目录不存在」的行为在 5.1/7 之间
+              # 不一致，种子铺不全的话后面每一句都会假绿
+              $p = Join-Path $Root ($Rel -replace '/', '\')
+              [void][System.IO.Directory]::CreateDirectory($p)
+              'seed' | Out-File (Join-Path $p 'marker.txt')
+              $p
+          }
+          foreach ($d in $seedDays) {
+              [void](New-SnapDir $stage ($d.ToString('yyyy/MM/dd') + '/0900-seed'))
+          }
+          # 形态不合规的那一个（叶子不是 HHMM-标签）必须**活着**——白名单是「宁可漏删不可误删」
+          $badDay = (Get-Date).AddDays(-61)
+          $badDir = Join-Path $stage (($badDay.ToString('yyyy/MM/dd') + '/notes') -replace '/', '\')
+          [void][System.IO.Directory]::CreateDirectory($badDir)
+          'keep me' | Out-File (Join-Path $badDir 'marker.txt')
+
+          $before = @(Get-SnapDirs $stage)
+          if ($before.Count -lt 5) {
+              Write-Host "::error::种子没铺开（第 4 层只有 $($before.Count) 个目录），下面全是空转"
+              exit 1
+          }
+
+          $out = & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
+          $code = $LASTEXITCODE
+          $text = $out | Out-String
+          $after = @(Get-SnapDirs $stage)
+          $leaves = @($after | ForEach-Object { $_.Name })
+
+          if ($text -notmatch 'FULLY COMPLETE') {
+              Write-Host "::error::这一轮没跑到 FULLY COMPLETE，保留策略的判定无从谈起"
+              Write-Host (($out | Select-Object -Last 25) -join "`n")
+              exit 1
+          }
+          $leftover = @($leaves | Where-Object { $_ -like '*-seed' })
+          if ($leftover.Count -gt 0) {
+              Write-Host "::error::KEEP=1 却没裁掉种子的旧快照，残留 $($leftover -join ', ')——保留策略没生效"
+              exit 1
+          }
+          if ($leaves -notcontains 'notes') {
+              Write-Host "::error::形态不合规的目录被删了（叶子白名单没起作用），剩 $($leaves -join ', ')"
+              exit 1
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $badDir 'marker.txt'))) {
+              Write-Host "::error::不合规目录里的文件也没了——连内容一起消失说明删的是路径而不是判定"
+              exit 1
+          }
+          $kept = @($leaves | Where-Object { $_ -match '^[0-9]{4}-[a-z0-9-]+$' })
+          if ($kept.Count -ne 1) {
+              Write-Host "::error::合规快照该只剩 1 份（KEEP=1），实剩 $($kept.Count) 份：$($kept -join ', ')"
+              exit 1
+          }
+          $seedShell = Join-Path $stage ((Get-Date).AddDays(-180).ToString('yyyy/MM/dd'))
+          if (Test-Path -LiteralPath $seedShell) {
+              Write-Host "::error::快照裁了但日期壳还在（$seedShell）——空壳级联那段没跑"
+              exit 1
+          }
+          if ($code -ne 0) {
+              Write-Host "::error::保留策略都对了，退出码却不是 0（$code）——结论行与判定脱节"
+              exit 1
+          }
+          Write-Host "=== 本地暂存保留策略 OK（合规剩 $($kept.Count) 份、不合规那份在、日期壳已收）==="
+          exit 0
+
       - name: Push debug logs
         if: failure()
         shell: pwsh
