@@ -832,23 +832,43 @@ def select_drill_samples(classes: dict, count: int, seed: str) -> list[dict]:
     return picked
 
 
+def _source_candidates(p: str, root: str) -> list[Path]:
+    """归档内路径 -> 磁盘上可能的源路径，按优先级排。
+
+    第一档是通用情形（borg/restic 在 posix 上都是「绝对路径剥掉前导 /」）。第二档专门给
+    Windows：**restic 在 Windows 上把盘符的冒号去掉了**（10-03 真 runner 一手证据——清单里是
+    `C/Users/runneradmin/…`，而源文件在 `C:\\Users\\runneradmin\\…`）。`_norm_path` 剥盘符那条
+    正则要的是 `[A-Za-z]:`，在这种形状上根本不触发，所以拿它补不回来。
+    `Path(root, "C:", "Users", …)` 在 Windows 上会换成 `C:\\Users\\…`（只给盘符不带反斜杠的段
+    替换掉 drive，root 的其余部分保留），在 posix 上则是 `root/C:/Users/…`——`:` 在 posix 是
+    合法文件名字符，所以这一档**在 Linux 容器里可测**，不必等真宿主。
+    """
+    cleaned = p.lstrip("/")
+    cands = [Path(root, cleaned)]
+    parts = cleaned.split("/")
+    if len(parts) > 1 and re.fullmatch(r"[A-Za-z]", parts[0]):
+        cands.append(Path(root, parts[0] + ":", *parts[1:]))
+    return cands
+
+
 def hash_drill_samples(doc: dict, count: int, max_bytes: int, seed: str,
                        root: str = "/") -> int:
     """给「当晚 drill 会抽中的那批文件」读源文件 sha256 并写进密封清单（A2b）。
 
     为什么只记样本、不给全部 ≤N MB 文件记：全量要把每个小文件在夜间多读一遍磁盘，
     而取回校验永远只用得上抽中的那几个——成本落在样本数上，证据强度一点没少。
-    源路径就是归档内路径补上 root（borg create 吃的是绝对路径，剥掉的只是展示层前缀）。
+    源路径由 `_source_candidates` 从归档内路径推出来（borg 在 posix 上就是补回 root；Windows 的
+    restic 那一档见下），推不出来就不记。
 
     记不上的就**不记**（不是记 0 也不是猜）：清单引擎不在白名单内、超过 max_bytes、
     源文件已不在、尺寸与归档不符（＝备份之后、密封之前被人改过，这是唯一
     会让取回校验假报的窗口）。缺哈希的条目由 drill 退回比 size 并在结论里写明依据。
 
-    白名单里有 restic（10-03 补，Windows 侧 A2b）：restic 的归档内路径同样是从根写下来的
-    绝对路径，所以 `Path(root, p.lstrip("/"))` 这一条公式两种引擎共用。Windows 上 restic 打的
-    是 `C:/…` 或 `/C:/…`，lstrip 之后都成 `C:/…`，而 Windows 的 pathlib 见到带盘符的一段会
-    **整段替换** root（posix 上不会）——也就是说这条公式只在真实宿主上成立，本机（Linux/macOS）
-    跑 restic 夹具时路径仍是 `/tmp/…`，两种形状都要过。
+    白名单里有 restic（10-03 补，Windows 侧 A2b）。restic 的归档内路径与源路径的关系**按宿主分**：
+    posix 上是「绝对路径剥掉前导 /」；Windows 上 restic 把盘符的冒号也去掉了（10-03 真 runner
+    证据：`C/Users/…` 而源文件在 `C:\\Users\\…`），所以要按 `_source_candidates` 试两档。
+    原先这里写的是「`Path(root, p.lstrip("/"))` 两种引擎共用一条公式」——那句话已被真宿主证伪，
+    而它的后果是静默的：记不上哈希不报错，只让演练整夜退回比大小。
     """
     if doc.get("engine") not in ("borg", "restic"):
         return 0
@@ -858,8 +878,12 @@ def hash_drill_samples(doc: dict, count: int, max_bytes: int, seed: str,
         size = entry.get("size", 0)
         if max_bytes and size > max_bytes:
             continue
-        src = Path(root, pick["path"].lstrip("/"))
-        if not src.is_file() or src.stat().st_size != size:
+        src = None
+        for cand in _source_candidates(pick["path"], root):
+            if cand.is_file():
+                src = cand
+                break
+        if src is None or src.stat().st_size != size:
             continue
         h = hashlib.sha256()
         try:

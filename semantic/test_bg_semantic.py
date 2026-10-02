@@ -579,8 +579,8 @@ class TestDrillContentHash(unittest.TestCase):
             bg.hash_drill_samples(doc, 1, 1 << 20, "2026-10-02", str(root)), 0)
 
     def test_restic_engine_hashes_by_archive_path(self):
-        """restic 也在白名单内（10-03，Windows 侧 A2b）：归档内路径是从根写下来的绝对路径，
-        带前导 /，所以 lstrip 之后与 borg 用同一条拼接公式。"""
+        """restic 也在白名单内（10-03，Windows 侧 A2b）：posix 上归档内路径就是从根写下来的
+        绝对路径，带前导 /，lstrip 之后与 borg 同形。"""
         root = Path(tempfile.mkdtemp())
         files = {"Users/x/Docs/a.txt": b"alpha", "Users/x/Docs/b.txt": b"beta"}
         self._tree(root, files)
@@ -595,6 +595,41 @@ class TestDrillContentHash(unittest.TestCase):
         for p in picks:
             self.assertEqual(p["entry"].get("sha256"),
                              self._sha(files[p["path"].lstrip("/")]))
+
+    def test_windows_drive_without_colon_hashes_via_second_candidate(self):
+        """10-03 真 windows runner 的一手形状：restic 把盘符的冒号也去掉了，清单里是
+        `C/Users/…` 而源文件在 `C:\\Users\\…`。只按「补 root」那一条公式拼，得到的是
+        `C:\\C\\Users\\…`（不存在），于是**每夜 hashed=0** 而不报错——演练整段退化成比大小。
+        第二档候选 `root/C:/Users/…` 在 posix 上是可创建的（`:` 是合法文件名字符），
+        所以这一维在这里就钉得住，不必等真宿主。"""
+        root = Path(tempfile.mkdtemp())
+        data = b"windows payload"
+        self._tree(root, {"C:/Users/x/Docs/a.txt": data})
+        entries = [{"path": "C/Users/x/Docs/a.txt", "size": len(data), "mtime": 1700000000}]
+        doc = self._doc(entries, engine="restic")
+        self.assertEqual(
+            bg.hash_drill_samples(doc, 1, bg.DRILL_HASH_MAX_BYTES, "2026-10-02", str(root)), 1)
+        self.assertEqual(doc["classes"]["files"]["entries"][0]["sha256"], self._sha(data))
+
+    def test_windows_shape_still_refuses_when_file_absent(self):
+        """第二档候选不是「猜一个哈希」：两档都不存在仍然不记（宁缺毋滥那条不变）。"""
+        root = Path(tempfile.mkdtemp())
+        entries = [{"path": "C/Users/x/Docs/gone.txt", "size": 5, "mtime": 1700000000}]
+        doc = self._doc(entries, engine="restic")
+        self.assertEqual(
+            bg.hash_drill_samples(doc, 1, bg.DRILL_HASH_MAX_BYTES, "2026-10-02", str(root)), 0)
+        self.assertNotIn("sha256", doc["classes"]["files"]["entries"][0])
+
+    def test_source_candidates_shapes(self):
+        """候选顺序与触发条件：只有「首段是单个字母且还有后续段」才多出盘符那一档。
+        顺序也要钉——先试通用那档，posix 上真存在名为 `C` 的目录时不该被盘符形状抢走。"""
+        self.assertEqual(bg._source_candidates("/tmp/a/b.txt", "/"),
+                         [Path("/tmp/a/b.txt")])
+        self.assertEqual(bg._source_candidates("C/Users/x/a.txt", "/"),
+                         [Path("/C/Users/x/a.txt"), Path("/C:/Users/x/a.txt")])
+        self.assertEqual(bg._source_candidates("C", "/"), [Path("/C")])
+        self.assertEqual(bg._source_candidates("C:/Users/x/a.txt", "/"),
+                         [Path("/C:/Users/x/a.txt")])
 
     def test_sample_passes_sha_through_and_manifest_stays_clean(self):
         root = Path(tempfile.mkdtemp())

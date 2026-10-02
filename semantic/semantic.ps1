@@ -157,9 +157,21 @@ function Restore-DrillFile {
     )
     $ErrorActionPreference = "Continue"   # restic 的进度与警告写在 stderr
     $inc = $Include -replace '\\', '/'
-    & $Bin -r $Repo restore $Snap --include $inc --target $Target 2>&1 |
-        ForEach-Object { "$_" } | Out-Null
-    $LASTEXITCODE
+    # 引擎原文只进本地 backup.log，不进 rescue-test.txt：取回失败有两条完全不同的坏法
+    # （rc≠0 是引擎报错，rc=0 而挑不出文件是「模式没命中／落地形状变了」），报告里那一句
+    # 「取回失败或大小不符」分不开它们，而这两个问题的修法不一样。10-03 真 windows runner
+    # 就是靠这条才看得见（清单路径 `C/Users/…` vs 源路径 `C:\Users\…`）。
+    $o = @(& $Bin -r $Repo restore $Snap --include $inc --target $Target 2>&1 |
+        ForEach-Object { "$_" })
+    $rc = $LASTEXITCODE
+    if ($env:BACKUP_LOG) {
+        $tail = @($o | Where-Object { $_ } | Select-Object -Last 3)
+        try {
+            [void](Add-Content -LiteralPath $env:BACKUP_LOG -Value `
+                ("[drill-restore] rc=$rc include=$inc target=$Target" + "`n" + ($tail -join "`n")))
+        } catch { }
+    }
+    $rc
 }
 
 # 结论判定，逐字照抄 bash 的两条教训：汇总行写作「N PASS / 0 FAIL」，含字面 FAIL——按整行匹配
