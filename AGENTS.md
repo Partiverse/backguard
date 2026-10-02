@@ -235,6 +235,12 @@
    新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；**写文档说「已挂 CI（linux + macos
    各一步）」之前必须 `grep -n <脚本名> .github/workflows/ci.yml` 核对**——10-01 那条就是这么
    写串的：macos 一步从没加过，而 HANDOVER 已经把它记成既成事实；
+   **但 grep 到 ≠ 跑过：免费 macOS runner 上被超时砍掉的永远是清单尾部，而尾部恰好是最新加的
+   守卫**。0b3518a 那轮实测（job 派工 → 1:40:19 被 100 分钟上限砍在「init 向导」）：backup 11m、
+   restore 13m、cloud_failure 30m、drill 28m、rescue 11m，而排在最后的 log_rotation/integrity/
+   cloud_verify 三步**一秒都没执行**。所以「E2E 步骤按什么顺序排」在这条 runner 上就是优先级
+   本身：便宜的、以及这一轮新加的覆盖放前面，30 分钟级的慢桩放最后（本轮已按这条重排，并把
+   预算抬到 180 = 已跑的 100 分钟 + 剩三步余量）。
    `test_portable_stat.sh` 的断言 4
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
    **改目录形状时 `.github/workflows/ci.yml` 里那些硬编码路径也是被测面**——本机 E2E

@@ -257,11 +257,13 @@ jobs:
 
   macos:
     runs-on: macos-latest
-    # 实测 macos job 76 分钟（dd4de89 那轮：runner 派工 18:36 → 完成 19:52），88 分钟也见过
-    # （20:31:49Z→21:59:14Z）——免费 macOS runner 比本机慢一个量级，预算照本机时长写必然误杀。
-    # 10-01 夜里 E2E 从六套增至八套（integrity + cloud_verify 补上 BSD 覆盖），预算跟着抬一档；
-    # 这不是「越慢越好」，而是别让它**因为预算**红——红一轮就等于今晚没有可部署的 HEAD
-    timeout-minutes: 120
+    # 实测（0b3518a 那轮，100 分钟上限被砍在 E2E init 那一步）：派工 13:22:27Z → 1:40:19 时
+    # 只跑到「init 向导」，而它后面还有 log_rotation / integrity / cloud_verify 三步没开跑。
+    # 各步耗时：backup 11m、restore 13m、cloud_failure 30m、drill 28m、rescue 11m、init 4m+——
+    # 免费 macOS runner 比本机慢一个量级（本机全套十分钟级），预算照本机时长写必然误杀。
+    # 180 = 已跑的 100 分钟 + 剩三步的余量。**这不是「越慢越好」**，而是别让它**因为预算**红：
+    # 红一轮就等于今晚没有可部署的 HEAD（§4.1 部署点只认 completed/success）
+    timeout-minutes: 180
     # macOS 自带 bash 3.2 不支持 declare -A / nameref，脚本需要 bash 5
     defaults:
       run:
@@ -357,14 +359,6 @@ jobs:
         timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_restore_e2e.sh
 
-      - name: E2E cloud push failure visibility
-        timeout-minutes: 40
-        run: /opt/homebrew/bin/bash test_cloud_failure.sh
-
-      - name: E2E standalone drill entry
-        timeout-minutes: 40
-        run: /opt/homebrew/bin/bash test_drill_e2e.sh
-
       # 系统自带 /usr/bin/expect：恢复码（路径 B）的 tty 交互分支在 BSD 上同样要跑
       - name: E2E standalone rescue entry
         timeout-minutes: 40
@@ -390,6 +384,14 @@ jobs:
       - name: E2E cloud copy self-proof
         timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_cloud_verify.sh
+
+      - name: E2E cloud push failure visibility
+        timeout-minutes: 40
+        run: /opt/homebrew/bin/bash test_cloud_failure.sh
+
+      - name: E2E standalone drill entry
+        timeout-minutes: 40
+        run: /opt/homebrew/bin/bash test_drill_e2e.sh
 
   windows:
     runs-on: windows-latest
