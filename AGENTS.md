@@ -62,7 +62,12 @@
   「云端失败必须非零退出」的告警分支（backup.sh:377）被它炸掉，等于红线守卫自己判崩。
   实测口径：/bin/bash 3.2 只要 **LC_CTYPE 是多字节 locale** 必炸（`LC_ALL=C` 与
   `LC_CTYPE=C LANG=en_US.UTF-8` 都正常）；CI 的 homebrew bash 5.3.15 同样炸，本机 5.3.20
-  不炸——版本相关，**别拿本机行为当保证**。静态守卫见 `test_portable_stat.sh` 断言 4。
+  不炸——版本相关，**别拿本机行为当保证**。静态守卫见 `test_portable_stat.sh` 断言 4（10-02 它
+  第一次抓到的是**我自己新写的守卫**：`test_restic_retention.sh` 消息里的 `$want（`）。
+  **另一条字节级解析雷（同夜实测）**：同一份新 `fail` 消息里写了个裸反引号，bash 把它和
+  **18 行之后**注释里的反引号配成一对命令替换，中间 17 行真断言被当成命令文本吃掉——
+  `bash -n` 照样过、脚本照样打 E2E-OK，而那一整段一行没跑。**双引号消息体里不要出现反引号**，
+  且新建/重写断言后要用变异或存活探针证明它真跑得动，「本机绿」不构成证据。
 - **测试桩里的变量要在 heredoc 中转义**：写 stub 用的 `cat > "$T/bin/curl" <<CURL`（**无引号**
   定界符）会在生成那一刻展开 `${VAR:-0}`——退出码之类的开关被烤成常量，之后改环境变量永远
   切不动（10-01 第 3 轮「让推送失败」因此假通过过一次）。桩内一律 `\$VAR`，或改用 `<<'CURL'`
@@ -170,7 +175,33 @@
   **`shell: powershell` 的 step 正文必须纯 ASCII**——GitHub Actions 把 run 正文写成临时 .ps1
   时不带 BOM，所以中文只能放在 YAML 注释里或放进带 BOM 的仓库文件（这一发的探针自己带着
   中文注释，于是它想测的那件事一次都没测到：run 36991285809 的 windows job 红在解析器报错，
-  而报的是**探针自己**）。新增 `.ps1` 自动在事实 0 的守卫内（它扫全仓）。
+  而报的是**探针自己**）。
+  **同一条编码事实的第二种坏法（10-02 第二次露头，比语法错更难发现）**：正文里的中文
+  **不会**每次都炸解析器——只有字节落在 0x91-0x94 才变弯引号；落在别处它只是**安静地变成
+  乱码**，于是写在 `-match '……失败'` 里的模式再也匹配不到任何东西，**断言恒假却照样打绿**。
+  所以口径不只是「正文纯 ASCII」，而是**这类 step 里的匹配模式与判据字符串只能是 ASCII**；
+  要匹配产品输出中的中文行，改用该行里确定存在的 ASCII 片段（本仓的 `[ OK ] [semantic]`
+  就是为此而留的 ASCII 信号）。核查手段（每次动 `shell: powershell` 的正文后跑一次）：
+  逐 step 取 `run: |` 正文、按字符 >0x7F 报行号——`grep` 在 YAML 里分不出正文与注释。
+  新增 `.ps1` 自动在事实 0 的守卫内（它扫全仓）。
+- **Windows PowerShell 5.1 下，`$ErrorActionPreference="Stop"` 的作用域里原生命令只要往 stderr 写
+  一行就抛终止性异常**（10-02 在真宿主上实测，run 37003329872 的 5.1 探针事实 3；宿主
+  PS 5.1.26100.33438）：三种形态**全抛**——`2>&1 | Tee-Object`、`2>$null`、`2>&1 | Out-Null`，
+  异常是 `RemoteException`/`NativeCommandError`。pwsh 7 **不抛**，这是两档宿主的语义差别之一，
+  不是「版本新旧的兼容细节」。而备份引擎的正常输出偏偏写在 stderr（restic 的进度、rclone 的
+  `NOTICE: Config file ... not found`），Task Scheduler 注册的命令行又是 `powershell.exe -File
+  backup.ps1`——**也就是说 Windows 夜间从未真跑完过一轮**，而 CI 的 pwsh 产品轮在整个观察期里
+  全绿。更坏的一半在旁路：`catch { Write-Warning "[semantic] 生成失败（不影响备份）" }` 会把
+  这种异常吞成一句 warning，于是明文层从未产出而结论照样 `FULLY COMPLETE`。
+  口径：**每个含原生命令的作用域自己把 EAP 压回 Continue**（赋值是函数作用域的，出函数自动回到
+  调用方的 Stop，cmdlet 那一份纪律一点没丢；嵌套函数如 `Invoke-Bg` 也要自己声明——偏好变量按
+  **动态作用域**解析，靠外层不管用，「外层忘了」就是这一发之前九处的成因）。**成败判定一律不靠
+  异常，靠 `$LASTEXITCODE` 与显式 `throw`**：`throw` 在 Continue 下同样终止，所以 try/catch 结构
+  一处没动。守卫两头：`probe_windows_ps51.ps1` 事实 5 用 **AST**（不是正则）扫每个原生命令调用
+  点、要求它所在 `ScriptBlockAst` 在调用之前有这条赋值（17 处 / 0 违规，并带 `nativeCalls>=10`
+  的存活下限——只扫到 3 处就等于规则自己失效），ci.yml 另有一步「5.1 下真跑一轮产品脚本」把它钉
+  成行为面（摘掉任一处赋值，红的是**退出码**而不是静态检查）。用 PowerShell 解析器取元素请写
+  `$cmd.CommandElements`（**属性**；7.2 上没有 `GetCommandElements()` 方法）。
 - **`ls -1t "$f".*` 对目录操作数打印的是「目录的内容」，不是目录本身**——想按 mtime 排「这些
   路径」必须加 `-d`（`ls -1dt`）。10-01 日志轮转的守卫因此没被测到：同名目录压根没进删除候选，
   摘掉「必须是普通文件」那道变异**E2E 全绿**。更阴的是两个 bug 互相掩盖：不加 `-d` 时 ls 给
@@ -247,15 +278,25 @@
   ①`-r <repo>` 是**每条子命令各要一次**，`init` 带了不等于 `backup` 认得它，少了直接 rc=1
   「Please specify repository location」；②`forget` **只删快照对象、不删数据**——引擎帮助页原话
   「In order to remove the unreferenced data after "forget" was run successfully, see the "prune"
-  command」，所以**必须 `forget --prune`**，否则「本地保留 7d/4w/6m」只是把快照藏起来（实测 9 份日
-  快照 forget 退出 0、快照少两份、仓库字节只动了索引的 4 KiB；补上 prune 才释放 6 MiB 级）——
+  command」，所以**必须 `forget --prune`**，否则「本地保留 7d/4w/6m」只是把快照藏起来（实测：夹具
+  的 9 份跨日快照加上当晚那份，forget 退出 0、快照少两份、仓库字节只动了索引的 4 KiB；补上 prune
+  才释放 6 MiB 级）——
   而「本地已 prune、云端 copy 只增不减」这套设计的整个前提就在这一发上；③`--time` 只认
   `"2006-01-02 15:04:05"`，RFC3339（`T` 分隔 + 时区）反而报解析失败，夹具造历史快照别用 ISO 串。
   退出码表也要读引擎自己的：**3 = 有源文件没读到（快照已落库，不完整）**，与 borg `create` 的
   rc=1 同档，只 warn；1/11/12（通用错 / 仓库被锁 / 口令不对）才判本类失败。两份实现（`backup.sh`
   的 windows 分支与 `backup.ps1`）此前对 3 的判法不一致，现已按同一张表对齐。
   **夹具的一处死法**：预置的历史快照若只往同一个目录累加文件，新快照仍引用全部旧内容，prune
-  无可回收、断言就测不出「没带 --prune」——每份独有数据必须在下一份之前从磁盘删掉。
+  无可回收、断言就测不出「没带 --prune」——每份独有数据必须在下一份之前从磁盘删掉。同一类死法
+  的第二发是**内容全同**：九份快照用同一个随机种子生成同一份 256 KiB 文件，去重压成一个 pack，
+  prune 无字节可回收（种子必须按钟点变）。
+  **`--keep-daily/weekly/monthly` 是分桶，不是「留最后 N 份」**（10-02 实测）：9 份快照摊在 9 个
+  **不同日子**上跑 `--keep-daily=7 --keep-weekly=4 --keep-monthly=6`，forget **一份都不裁**——
+  daily 丢掉的那两个日桶恰好各自是本週/本月的第一份，weekly/monthly 又把它们救回来。所以
+  「快照数按口径减少」这条断言在跨日夹具上是死的；要测就得**同一天压钟点**（实测 9 份同日 →
+  2 份，回收 1.85 MiB）。反过来说 `test_restic_retention.sh` 那份跨日夹具能测掉，靠的是生产轮
+  当晚又补一份「今天」的快照、占掉新的週/月名额——**别把夹具能裁当成分档算法的证据**（分档本身
+  由 bash 侧那份夹具证过一次，ps1 侧断言只写「按口径少掉 + 字节回收」）。
 - **恢复演练按内容校验（roadmap A2b，10-02 落地）**：旧口径取回后**只比 size**，「同长度不同
   内容」永远 PASS——它是「rclone 只比大小」那一课在取回侧的镜像，也是 10-01 跨类别错配（取回
   了错仓库的文件）能被放过去的缘故。现在备份期 `seal_manifest` 给**当晚抽中的那几条**样本记
@@ -411,13 +452,20 @@
    正好撞满 step 级 `timeout-minutes: 40`，那一轮 macos 跑了 126 分钟仍红，而它后面三步
    一秒没执行——**这条 runner 上没有一步是便宜的，重排清单救不了，只能分车道**。
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
-   **PowerShell 侧的逻辑测试现在有三套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）、
-   `test_cloud_verify_logic.ps1` 与 `test_integrity_logic.ps1`（均 10-02），每套都是 windows job
-   两步——pwsh 7 排在产品轮之前、Windows PowerShell 5.1 排在最后，两档宿主语义都要过（5.1 那一步的
-   正文只能有 ASCII，见 §2 编码那条）。A2a 另加一步**运行时接线断言**（`Assert integrity report
-   wiring`），因为逻辑测试无论多少条静态断言都证不了「这一轮真的落笔了」。同族的
-   `test_prune_logic.ps1` 目前仍是手工跑——加它进 CI 的时机是下一次动 `Prune-LocalTimeline`
-   时，别现在顺手写进文档（§3 那条「写『已挂 CI』之前必须 grep ci.yml 核对」就是为这种句子立的）。
+   **PowerShell 侧的逻辑测试现在有四套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）、
+   `test_cloud_verify_logic.ps1`、`test_integrity_logic.ps1`、`test_retention_logic.ps1`（后两套
+   与最后一套均 10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、Windows PowerShell
+   5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2 编码那条）。A2a 另加
+   一步**运行时接线断言**（`Assert integrity report wiring`），因为逻辑测试无论多少条静态断言都
+   证不了「这一轮真的落笔了」。10-02 起 windows job 末尾另有一步 **`Backup round on Windows
+   PowerShell 5.1`**：它不是逻辑测试，是**拿 5.1 宿主真跑一整轮产品脚本**（子进程
+   `powershell.exe -File backup.ps1`，跑在 pwsh 那一轮已建好的仓库上，所以连「已初始化」的幂等
+   分支一起走）——§2 那条「Stop 作用域里原生命令写 stderr 就抛」只有这一档宿主能证伪，而它
+   断言的不是退出码（那半边 `restic backup` 第一条就红），而是**旁路有没有被 catch 悄悄吞掉**：
+   所以三步判定 = rc/COMPLETE 行 + 「本轮真的产出了新的 MANIFEST.txt」+ 输出里不许出现
+   `[semantic] …失败`。同族的 `test_prune_logic.ps1` 目前仍是手工跑（ci.yml 里它那一次出现只是注释，不是步骤）——
+   加它进 CI 的时机是下一次动 `Prune-LocalTimeline` 时，别现在顺手写进文档（§3 那条「写『已挂
+   CI』之前必须 grep ci.yml 核对」就是为这种句子立的）。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    **夹具里「一份产物被多次调用」是死断言的常见来源**（10-02 实测踩进）：窗口节流用产物自己的
    mtime 当标记，同一份夹具里第二次起的 `Invoke-*Check` 会全部被「未到窗口」挡在门外——看着像
@@ -458,7 +506,7 @@
    §4/§5a/§7 的注释记着这条规矩）。同理，**新增一类校验对象要先确认它真进了清单**：自证第一版
    borg 分支漏登记 `repo_pairs`，三类仓库根本没被校验，而 E2E 全绿——是报告头部的
    `checks=2` 暴露的，所以**汇总计数行值得单独断言**，别只看「有没有 FAIL」。
-   **变异报「没咬住」有三种成因，别一律当成实现的问题**：①断言被冗余实现救场（上面那条）；
+   **变异报「没咬住」有四种成因，别一律当成实现的问题**：①断言被冗余实现救场（上面那条）；
    ②**断言自己是死的**——10-02 的 m04：夹具取证据计数写成了
    `basis="$(grep -o '内容哈希 [0-9]*，仅比大小 [0-9]*' "$RT" | head -1)"`，「无命中」正是这条断言
    要抓的情形，而 grep 的 rc=1 在 `set -euo pipefail` 下让夹具在那一行就退出，后面的
@@ -466,7 +514,17 @@
    推论：**`X="$(grep …)"` 里「空结果」是被测情形时必须显式中和退出码**，否则它是一条死断言，
    而它的死法与「变异没落上」长得一模一样；③同一组用例里多条跳过/失败理由**互相顶掉**——
    A2b 的单测把「超大 / 缺失 / 被改过」三条写成 size=999，999 先被超大规则拦下，摘掉尺寸闸门
-   仍全绿；要写成每条理由各自的数值都过得了别的闸门。
+   仍全绿；要写成每条理由各自的数值都过得了别的闸门；④**守卫自己崩**（10-02 的
+   `test_retention_logic.ps1`，三刀第一次交回 UNDETERMINED 全是这一类）——变异把被测实现摘掉之后
+   **断言的取数路径先炸**：`(Get-Content …) -match 'x'` 的左操作数是命令表达式时 PowerShell 走
+   **集合语义**、返回「匹配到的元素」，空结果是 `System.Object[]`，绑不进 `Chk([bool]$cond)`（于是
+   「日志没落笔」这条本该报 FAIL 的断言报的是守卫自己的参数绑定错），而
+   `$src.Substring($idxCall, 200)` 在调用点被摘掉时 `IndexOf` 交回 **-1**，先于断言抛
+   「StartIndex cannot be less than zero」。两种现场在容器里都是**没有汇总行**，所以只能判
+   UNDETERMINED——**照着它去改实现就是把守卫的毛病当成产品的毛病**。口径：条件里出现 `-match`
+   先确认左操作数是标量（判定辅助函数那端再把任何形状收敛成布尔：数组＝「有没有命中」）；静态取
+   位置的断言先问「取不取得到」再取上下文；同一条变异第二次崩在环境（qemu/TCG 的 rc=139 也算）时
+   **重跑一次再落账**，别写成 MISS。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、

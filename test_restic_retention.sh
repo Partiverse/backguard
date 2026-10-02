@@ -183,22 +183,34 @@ if grep -q 'FULLY COMPLETE' "$T/out.log"; then
 fi
 
 # ---------- 6：PowerShell 那一份必须带同一发（静态守卫）----------
-# 为什么这一发是静态的：本机无 pwsh 跑不了 backup.ps1，而 CI 的 windows job 每轮新建空仓库，
-# forget 在那里一份都裁不掉、prune 无事可做——「没带 --prune」和「带了」在那一轮里长得一模一样。
-# 行为面已由前五段在同一引擎、同一策略、同一 EXIT STATUS 表上验过，这里只钉两份实现的形状对齐。
+# 本机无 pwsh 跑不了 backup.ps1，而 CI 的 windows job 每轮新建空仓库，forget 在那里一份都裁不掉、
+# prune 无事可做——「没带 --prune」和「带了」在那一轮里长得一模一样。**行为**面已由前五段在同一
+# 引擎、同一策略、同一 EXIT STATUS 表上验过；ps1 侧自己的形状+行为由 test_retention_logic.ps1 钉
+# （容器里挂真 restic，CI 的 windows job 直接跑），这一段只钉两份实现**口径对齐**——bash 侧改了
+# 参数而 ps1 侧没跟上的话，真机接入看到的就是两套保留策略。
+#
+# 为什么改成「按哨兵切整段函数」而不是「取 forget 那行往后 8 行」：10-02 把 forget 从
+# Backup-ResticClass 收进 Invoke-ResticRetention 之后，argv 变成跨两行的反引号续行、rc 判断读的是
+# 局部变量 $rc（不再直接查 $LASTEXITCODE）。按行号取窗口的那套锚点当场全数失效——而它失效的方式
+# 是「读到一个不含 rc 判断的窗口」，看着像实现被摘掉了。切成整段再拼回一行，参数与 rc 表都在同
+# 一段文本里，续行不再是断点（tr -d 反引号；CRLF 也一并抹掉，backup.ps1 在 Windows 上被编辑过）。
 PS1="$V0_DIR/backup.ps1"
-if ! grep -nE 'restic .*forget[^|]*--prune' "$PS1" > "$T/ps1-forget.txt" 2>/dev/null; then
-    fail "第 6 步：backup.ps1 的 forget 没有 --prune——Windows 真机上一旦接入，本地仓库就只增不减（第 2 步已在 bash 侧量过那 4 KiB 与 6 MiB 的差别）"
-fi
-forget_line=$(cut -d: -f1 < "$T/ps1-forget.txt" | head -1)
-# 取窗口用 sed 而不是 `tail -n +N | head -8`：后者在 pipefail 下是个定时炸弹——文件一大，
-# head 读完 8 行就退出，tail 还在写，SIGPIPE 让整条赋值语句 rc=141 直接炸掉脚本（10-02 给
-# backup.ps1 加完 A6 那 315 行就当场露头，本机 5/5 复现，而 466 行的旧版一直侥幸为 0）。
-after=$(sed -n "$(( forget_line + 1 )),$(( forget_line + 8 ))p" "$PS1")
-grep -q 'LASTEXITCODE -eq 3' <<<"$after" \
+ps1_body=$(sed -n '/^function Invoke-ResticRetention/,/^}/p' "$PS1" | tr -d '`\r' | tr '\n' ' ')
+[[ -n "$ps1_body" ]] \
+    || fail "第 6 步：backup.ps1 里切不到 Invoke-ResticRetention（函数名或收尾大括号变了，这一段读不到被测面——静态守卫自己死了不等于实现没问题）"
+for want in '"-r"' '"forget"' '"--keep-daily=7"' '"--keep-weekly=4"' '"--keep-monthly=6"' '"--prune"'; do
+    [[ "$ps1_body" == *"$want"* ]] \
+        || fail "第 6 步：backup.ps1 的 forget argv 少了 ${want}（实得：$(grep -o '"-[^"]*"' <<<"$ps1_body" | tr '\n' ' ')）——Windows 真机一旦接入，本地仓库就只增不减，第 2 步已在 bash 侧量过那 4 KiB 与 6 MiB 的差别"
+done
+grep -qF 'if ($rc -eq 3)' <<<"$ps1_body" \
     || fail "第 6 步：backup.ps1 的 forget 之后没有 rc=3 的容忍分支（两份实现对同一档退出码判得不一样，第一次真机接入就会看到两种结果）"
-grep -q 'LASTEXITCODE -ne 0' <<<"$after" \
+grep -qF 'elseif ($rc -ne 0)' <<<"$ps1_body" \
     || fail "第 6 步：backup.ps1 的 forget 之后没检查退出码（第 5 步那一发在 Windows 上就是静默的）"
+grep -qF 'throw' <<<"$ps1_body" \
+    || fail "第 6 步：backup.ps1 的非零 rc 不抛出——保留策略没跑成却继续宣布 COMPLETE"
+# 调用点也要钉：函数在但没人调＝这一发又变回装饰（Backup-ResticClass 里那次重构最容易丢的就是它）
+grep -qF 'Invoke-ResticRetention -Class $Class -RepoPath $RepoPath' "$PS1" \
+    || fail "第 6 步：backup.ps1 的调用点没把本轮类别与仓库路径交给 Invoke-ResticRetention（函数在而没人调）"
 
 # ---------- 7：A2a 存储完整性接到 restic 分支（0 PASS / 11 UNKNOWN / 其余 FAIL）----------
 # 这一发原先压着不动的理由是「CI 从不跑 restic，写上去就是永远不被执行的死代码」（AGENTS §2

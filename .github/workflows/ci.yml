@@ -422,9 +422,12 @@ jobs:
     # 60→90（10-02）：这个 job 现在有**两**步各自要跑一整轮真产品脚本（日志轮转接线、A2a 接线），
     # 而各步 step 级超时之和（40+20+25+20+20）早就大于 job 级 60——只要有一轮慢一点，被砍的一定是
     # 队尾，而队尾恰好是这一轮新加的覆盖（§3 在 macos 那轮实测过同一件事：免费 runner 上被超时
-    # 砍掉的永远是清单尾部）。这里没有可引用的实测用量（HEAD 那轮的 windows job 红在第 6 步，
-    # 第 7 步之后一秒没跑），所以 90 是「按步预算推的余量」而不是测出来的数：真被砍了再按
-    # 逐 step 时间戳收窄，别拿这个数当事实读。
+    # 砍掉的永远是清单尾部）。
+    # **实测用量已有一手数据（run 37003329872 的 windows job，逐 step 时间戳）**：Set up job 起
+    # 到 Post checkout 止共 1 分 42 秒，其中最重的「Run backup and assert」23 秒、子进程跑整轮的
+    # 「Assert cloud push failure is visible」14 秒、三步 5.1 逻辑测试合计 1 秒。所以 90 是余量
+    # 而不是需求，「25 分钟一轮」那个数从来是猜的（写在探针步的注释里，已就地更正）。这一档 runner
+    # 慢在 Install deps 的两个下载上，不在产品轮；被超时砍掉的风险在这里主要是排队而不是执行。
     timeout-minutes: 90
     permissions:
       contents: write
@@ -537,6 +540,28 @@ jobs:
               exit 1
           }
 
+      - name: Restic retention logic
+        # restic 保留策略（forget --prune）的**逻辑+行为**那一半：从 backup.ps1 按哨兵标记切出
+        # Invoke-ResticRetention，桩那一段钉 argv 逐字与 rc 三档，真 restic 那一段预置 9 份快照后
+        # 要求「快照数真的按口径减少」+「仓库字节真的下降」。排在产品轮之前同前三步的口径：
+        # 它只动临时目录，红了不该把同轮 25 分钟的产品结论带走。
+        # **为什么这一步必须挂在 windows job 而不是只靠本地容器**：产品轮每轮新建空仓库，forget
+        # 在那里一份快照都裁不掉——「没带 --prune」和「带了」在同一轮里长得一模一样，而它 standing
+        # 的前提是「本地已 prune，云端 copy 只增不减」。bash 侧 10-02 用真 restic 量过那 4 KiB 与
+        # 6 MiB 的差别（test_restic_retention.sh），ps1 侧此前只有静态守卫。
+        # **这里比容器跑得更宽**：restic 已由 Install deps 进 PATH，所以场景4（真仓库、真快照、真
+        # 回收）会执行；容器里没有 restic 时它整段 Skip。场景5 里 `.cmd` 桩那一支也只有在这台宿主
+        # 上走得到（容器只走 `.sh`）。
+        shell: pwsh
+        timeout-minutes: 15
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_retention_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::restic 保留策略逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
       - name: Run backup and assert
         timeout-minutes: 40
         env:
@@ -644,8 +669,10 @@ jobs:
           # 脚本的话产品一 exit 本 step 就跟着死——「判红」与「没断言」撞成同一件事，正好把这条
           # 守卫自己变成假绿。解释器用 pwsh.exe（与本 job 的 shell: pwsh 同一个），因为
           # powershell.exe 5.1 在 $ErrorActionPreference=Stop 下会把原生命令的 stderr 重定向
-          # （restic … 2>&1 | Tee-Object、rclone mkdir … 2>$null）变成终止性异常——那是 #20
-          # 另记的一发未验证面，不该混进这条红线断言里。
+          # （restic … 2>&1 | Tee-Object、rclone mkdir … 2>$null）变成终止性异常。那一发**已由
+          # 本 job 末尾的「Backup round on Windows PowerShell 5.1」单独处理**（10-02 实测三形全
+          # THREW，产品侧的每个含原生命令作用域自己压回 Continue）；这条守卫只管红线 §1.4，两种
+          # 坏法混在一步里就分不出「云端没推上去」和「宿主语义炸了」。
           $out = & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
           $code = $LASTEXITCODE
           $text = $out | Out-String
@@ -1084,8 +1111,11 @@ jobs:
         # probe_windows_ps51.ps1（那份带 BOM），并新增「事实 0：仓库每个 .ps1 必须带 BOM」。
         # **本步只对「探针自己有没有跑起来」下硬断言**（BOM + 语法面 + ISO 形状 + verdict 非空）；
         # 三种 stderr 形态的结论先如实报出来，要断言什么取决于它报回的答案。
-        # 分工也说清楚：它验的是**宿主**，不是备份产物，所以不重复跑 backup.ps1（那要再花 25 分钟，
-        # 而 windows job 预算 60 分钟已经装了三轮产品链路）。
+        # 分工也说清楚：它验的是**宿主**（载入、解析、返回形状、异常语义），不是备份产物。整轮
+        # 产品在 5.1 下真跑一遍由本 job 末尾的「Backup round on Windows PowerShell 5.1」负责——
+        # 这一步不重复跑它，是为了让「宿主级事实」在 10 秒内收敛，红了先看清楚是解析器的问题
+        # 还是产品链路的问题（10-02 之前这一发欠着的原话是「探针不跑产品，跑产品要 25 分钟」；
+        # 实测同一 job 的 pwsh 产品轮只要几十秒，那个数是猜的，见 §4.24）。
         shell: powershell
         timeout-minutes: 10
         run: |
@@ -1144,6 +1174,106 @@ jobs:
               Write-Host "::error::Windows PowerShell 5.1 cannot run integrity logic: rc=$LASTEXITCODE"
               exit 1
           }
+
+      - name: Restic retention logic on Windows PowerShell 5.1
+        # 同一份保留策略逻辑换到 Task Scheduler 真正注册的那台宿主（powershell.exe 5.1 + .NET
+        # Framework）再跑一遍。分歧是**具体**的：Invoke-ResticRetention 顶部那句
+        # `$ErrorActionPreference = "Continue"` 只有在这档宿主上才起作用——pwsh 7 本来就不把原生
+        # 命令的 stderr 当终止性异常，所以 7 那一步永远测不到「这句写错位置／被摘掉」，而
+        # `& restic … 2>&1 | ForEach-Object` 正是 5.1 会抛的那条形。
+        # 顺带补齐容器测不到的另一支：windows runner 走的是 `.cmd` 桩（容器只走 `.sh`）。
+        # 排在 job 末尾的理由同前三步：新覆盖红了不该带走这一轮已经拿到的产品结论。
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_retention_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run retention logic: rc=$LASTEXITCODE"
+              exit 1
+          }
+
+      - name: Backup round on Windows PowerShell 5.1
+        # THE face this job had never touched: Task Scheduler registers
+        #   powershell.exe -ExecutionPolicy Bypass -File backup.ps1
+        # i.e. Windows PowerShell 5.1, while every other step here runs the product under pwsh 7.
+        # Measured on this host (probe fact 3, run 37003329872): under
+        # $ErrorActionPreference="Stop" a native command that writes ONE line to stderr raises a
+        # terminating exception in 5.1 (all three shapes: 2>&1|Tee, 2>$null, 2>&1|Out-Null) and
+        # does not in pwsh 7. restic progress and rclone's NOTICE lines live on stderr, so the
+        # real Windows nightly could not have finished a round - while the pwsh-based round above
+        # stayed green through the whole observation window.
+        # This step runs the product a SECOND time in the same job, on the repos the pwsh round
+        # already created. That is deliberate: it also walks the idempotent branch
+        # ("restic init" on an existing repository), which is the call every nightly from the
+        # second run onwards steps on.
+        # Assertions, in the order that makes the diagnosis readable (AGENTS §3):
+        #   1) rc=0 and the COMPLETE line -> nothing threw its way out of the round;
+        #   2) a MANIFEST.txt newer than this round started -> the plaintext layer really
+        #      produced artifacts under 5.1. Without this, the semantic layer's own
+        #      `catch { Write-Warning "[semantic] ..." }` turns a total loss of the layer into
+        #      one warning line and the round still prints FULLY COMPLETE;
+        #   3) the layer's own "[ OK ] [semantic]" completion line is present and no
+        #      RemoteException/NativeCommandError text appears anywhere -> the bypass really ran
+        #      (every degradation path inside semantic.ps1 returns before that OK line).
+        # Body is pure ASCII, including every pattern: Actions writes the run body to a temp .ps1
+        # without BOM, and 5.1 then decodes Chinese as CP1252 - where 0x91-0x94 are curly quotes,
+        # which PowerShell takes for string delimiters (run 36991285809 died on `Missing closing
+        # '}'), while other byte values mojibake quietly and leave a Chinese -match pattern
+        # matching NOTHING while the step still prints green (AGENTS §2).
+        shell: powershell
+        timeout-minutes: 25
+        env:
+          SKIP_WEBDAV: "1"
+        run: |
+          $ErrorActionPreference = "Continue"
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
+          $startedAt = Get-Date
+          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
+          $code = $LASTEXITCODE
+          $text = $out | Out-String
+          if ($code -ne 0) {
+              Write-Host "::error::backup.ps1 under Windows PowerShell 5.1 exited $code - a native stderr line probably became a terminating exception"
+              Write-Host "--- last 30 lines of the 5.1 round ---"
+              Write-Host (($out | Select-Object -Last 30) -join "`n")
+              exit 1
+          }
+          if ($text -notmatch 'FULLY COMPLETE') {
+              Write-Host "::error::5.1 round exited 0 without the COMPLETE line"
+              Write-Host (($out | Select-Object -Last 15) -join "`n")
+              exit 1
+          }
+          $manifest = Get-ChildItem "$env:BACKUP_BASE\timeline" -Recurse -Filter "MANIFEST.txt" -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $manifest) {
+              Write-Host "::error::no MANIFEST.txt anywhere under the timeline root - the semantic layer produced nothing on this host"
+              exit 1
+          }
+          if ($manifest.LastWriteTime -lt $startedAt) {
+              Write-Host "::error::newest MANIFEST.txt is from an earlier round ($($manifest.LastWriteTime.ToString('u')), this round started $($startedAt.ToString('u'))) - the 5.1 round did not produce plaintext"
+              exit 1
+          }
+          # 3) the layer's own success line (semantic.ps1 writes "[ OK ] [semantic] ..." only after
+          #    generate produced the timeline; every degradation path returns before it). The check
+          #    is ASCII on purpose: Actions writes this body to a temp .ps1 WITHOUT BOM, so any
+          #    Chinese in it is CP1252 mojibake on this host and the pattern would match nothing -
+          #    a dead assertion that still prints green.
+          if ($text -notmatch '\[ OK \] \[semantic\]') {
+              Write-Host "::error::the semantic bypass never reported its OK line - it degraded quietly"
+              Write-Host (($out | Select-String -Pattern 'semantic' | Select-Object -Last 5) -join "`n")
+              exit 1
+          }
+          # 4) no native-command exception signature anywhere: those two strings are exactly what
+          #    5.1 turns a stderr line into under Stop (probe fact 3), and they are ASCII, so they
+          #    survive this host's decoding.
+          if ($text -match 'RemoteException|NativeCommandError') {
+              Write-Host "::error::a native command raised in this scope - the ErrorActionPreference=Continue cover is missing somewhere"
+              Write-Host (($out | Select-String -Pattern 'RemoteException|NativeCommandError' | Select-Object -First 3) -join "`n")
+              exit 1
+          }
+          Write-Host "=== 5.1 backup round OK: rc=0, plaintext fresh at $($manifest.FullName) ==="
+          exit 0
 
       - name: Push debug logs
         if: failure()
