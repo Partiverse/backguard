@@ -413,7 +413,15 @@
    Task Scheduler 注册的正是 powershell.exe，而 5.1 里原生命令的 stderr 一旦重定向
    （`restic … 2>&1 | Tee-Object`、`rclone mkdir … 2>$null`）会变成终止性异常，把成功的类别
    记成失败；CI 的 windows job 跑的是 pwsh 7，所以这条永远不会在 CI 现形，**上真机前先手用
-   powershell.exe 跑一轮**（新 CI step 里子进程特意用 pwsh.exe，就是为了不把这两发混在一起）。
+   powershell.exe 跑一轮**——**10-02 已把它编成 CI step**（`Windows PowerShell 5.1 host probe`，
+   `shell: powershell` 就是那台宿主，不必等真机）：报四件事——两份 .ps1 在 5.1 解析器下的语法错数、
+   `ConvertFrom-Json` 交回的类型（§4.17 的争议点）、`$EAP=Stop` 下三种 stderr 形态
+   （`2>&1 | Tee-Object` / `2>$null` / `2>&1 | Out-Null`，正是 `backup.ps1:97/179/22` 用的那三种）
+   各自抛不抛、`Format-IsoTime` 在 5.1 上交回的是不是 ISO。**只有第二条和第三条是「先报后断」**
+   （要断什么取决于答案），第一、四条是硬断言。它排在 windows job 所有产品断言**之后**：
+   新探针红的时候不该把同一轮「保留策略修好了没」那条结论带走（runner 一轮一小时起，
+   §3「步骤顺序就是优先级」）。（另一发：云端失败守卫的子进程特意用 `pwsh.exe`，
+   就是为了不把「宿主 5.1」与「被测脚本」两件事混在一起——那条不变。）
    ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④没有 A2a 完整性（restic `check --read-data`
    同形）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
    ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，两轮 CI 各抓到一条真缺陷**
