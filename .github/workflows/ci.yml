@@ -255,14 +255,36 @@ jobs:
           # borg create 失败——现有守卫全绿也看不见它，所以必须单独有一步
           bash test_integrity.sh
 
+      - name: E2E month jump (low-frequency paths compose)
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          # 把时间推过一个月（touch -t 两个产物的 mtime，不碰 OS 时钟）：完整性窗口与演练
+          # 窗口同夜重开、云端自证的「单向包含」由**真实保留策略**裁出来、报告晚一轮上云、
+          # 轮转与边界行在同一夜。四条低频路径的组合面是单项夹具造不出来的（roadmap §11 A2b 后）
+          bash test_month_jump.sh
+
+      - name: E2E BSD-only branch probe (no backup round)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # 从生产文件里**切**出纯函数（哈希轮流域 / 本地清单 / lsl 行解析 / 目录级脱敏 /
+          # date -r / 演练 fail-closed），对着 python3 现算的真相断言。零备份轮，几秒。
+          # macos 车道也跑同一步——两边的哈希轮流域正好互补
+          bash test_bsd_probe.sh
+
   macos:
     runs-on: macos-latest
-    # 实测（0b3518a 那轮，100 分钟上限被砍在 E2E init 那一步）：派工 13:22:27Z → 1:40:19 时
-    # 只跑到「init 向导」，而它后面还有 log_rotation / integrity / cloud_verify 三步没开跑。
-    # 各步耗时：backup 11m、restore 13m、cloud_failure 30m、drill 28m、rescue 11m、init 4m+——
-    # 免费 macOS runner 比本机慢一个量级（本机全套十分钟级），预算照本机时长写必然误杀。
-    # 180 = 已跑的 100 分钟 + 剩三步的余量。**这不是「越慢越好」**，而是别让它**因为预算**红：
-    # 红一轮就等于今晚没有可部署的 HEAD（§4.1 部署点只认 completed/success）
+    # 车道分配是量出来的，不是排出来的（docs/HANDOVER §11 的 10-02 午后块有逐 step 墙钟）：
+    # 免费 macos runner 上一个整轮 backup.sh 要 6–13 分钟，同一份夹具在 linux 是 0.1–1 分钟。
+    # 59e4c9d 那次「把新覆盖排在前面」的修法前提错了——这条 runner 上没有一步是便宜的：
+    # backup 13m / restore 13.6m / rescue 10.7m / init 11.8m / log_rotation 34.7m，
+    # 而 integrity 一步（六个整轮）在 step 级 40 分钟被砍（`E2E repository integrity check`
+    # = failure），后面 cloud_verify / cloud_failure / drill 一秒没跑，整轮 126 分钟。
+    # 所以这四套重夹具退回 linux-only（那边四套合计 <2 分钟），macos 只留**整轮型且形状
+    # 敏感**的（borg extract 的 cwd 语义、launchd plist、ls/rm/wc 的 BSD 行为），BSD 独有的
+    # 纯函数分支由零备份轮的 test_bsd_probe.sh 兜住。
+    # 预算 180 = 本车道现在约 90 分钟 + 一倍余量；红一轮＝今晚没有可部署的 HEAD（§4.1）
     timeout-minutes: 180
     # macOS 自带 bash 3.2 不支持 declare -A / nameref，脚本需要 bash 5
     defaults:
@@ -369,29 +391,21 @@ jobs:
         timeout-minutes: 40
         run: /opt/homebrew/bin/bash test_init_e2e.sh
 
-      # 真机调度就是 launchd：日志轮转与边界行在 BSD 的 ls/rm/wc 上必须同样成立
+      # 真机调度就是 launchd：日志轮转与边界行在 BSD 的 ls/rm/wc 上必须同样成立。
+      # 实测这一步在 macos runner 上 34.7 分钟（本机 <1 分钟），40 分钟的 step 上限只差
+      # 5 分钟就误杀——按整轮数放 60
       - name: E2E log rotation + run boundary line
-        timeout-minutes: 40
+        timeout-minutes: 60
         run: /opt/homebrew/bin/bash test_log_rotation.sh
 
-      # BSD 上 date -r 的 mtime 语义、borg with-lock 的报错原文都可能与 GNU 不同：
-      # 窗口节流与「锁 vs fatal」的分流在 macos 上得同样跑一次
-      - name: E2E repository integrity check
-        timeout-minutes: 40
-        run: /opt/homebrew/bin/bash test_integrity.sh
-
-      # 云端自证的报告行解析（awk/grep 取列）与 rclone local 后端在 BSD 上同形才算覆盖
-      - name: E2E cloud copy self-proof
-        timeout-minutes: 40
-        run: /opt/homebrew/bin/bash test_cloud_verify.sh
-
-      - name: E2E cloud push failure visibility
-        timeout-minutes: 40
-        run: /opt/homebrew/bin/bash test_cloud_failure.sh
-
-      - name: E2E standalone drill entry
-        timeout-minutes: 40
-        run: /opt/homebrew/bin/bash test_drill_e2e.sh
+      # 零备份轮的 BSD 分支探针：sha256sum/shasum 轮流域、date -r、rclone lsl 含空格路径、
+      # 目录级脱敏、演练 fail-closed。这四类恰好是被从这条车道摘掉的那四套夹具里
+      # 「只有 BSD 会出问题」的那部分，而它们全是纯函数——不跑一轮备份就能测完（本机 <5 秒）。
+      # 上面 "Assert restore drill ran clean" 仍然在本车道实跑一次真演练，A2b 的内容哈希那一维
+      # 因此在 BSD 上有真机形状；判定逻辑由这一步兜住
+      - name: E2E BSD-only branch probe (no backup round)
+        timeout-minutes: 10
+        run: /opt/homebrew/bin/bash test_bsd_probe.sh
 
   windows:
     runs-on: windows-latest
