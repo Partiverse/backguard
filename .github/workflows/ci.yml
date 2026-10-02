@@ -425,7 +425,7 @@ jobs:
     # 砍掉的永远是清单尾部）。
     # **实测用量已有一手数据（run 37003329872 的 windows job，逐 step 时间戳）**：Set up job 起
     # 到 Post checkout 止共 1 分 42 秒，其中最重的「Run backup and assert」23 秒、子进程跑整轮的
-    # 「Assert cloud push failure is visible」14 秒、三步 5.1 逻辑测试合计 1 秒。所以 90 是余量
+    # 「Assert cloud push failure is visible」14 秒、四步 5.1 逻辑测试合计 1 秒。所以 90 是余量
     # 而不是需求，「25 分钟一轮」那个数从来是猜的（写在探针步的注释里，已就地更正）。这一档 runner
     # 慢在 Install deps 的两个下载上，不在产品轮；被超时砍掉的风险在这里主要是排队而不是执行。
     timeout-minutes: 90
@@ -559,6 +559,25 @@ jobs:
           & "$PWD\test_retention_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::restic 保留策略逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
+      - name: Permission surface logic
+        # Windows 侧的权限面（roadmap ⑧，bash 侧那一课的 ps1 版本）：从 backup.ps1 按 BEGIN-PERMS/
+        # END-PERMS 哨兵切出 Set-PrivateAcl，桩那一段钉「argv 逐字 = 树 /inheritance:r /grant:r
+        # "*<SID>:(OI)(CI)F"」+ 非致命三档 + 返回流干净，调用点那一段钉两处（夜间轮 + 初始化向导，
+        # 且排在读 secrets.env 之前）。
+        # **为什么这一发不能只靠本地容器**：新目录从 %APPDATA%/%LOCALAPPDATA%/%USERPROFILE% 继承
+        # DACL，而默认继承里带着 `BUILTIN\Users`——真机上同机别的账号读得到 restic 口令与 age 私钥。
+        # 容器里没有 icacls，场景6（断开继承 + 子项靠**动态继承**跟着变）整段 Skip；那正是这条产品面
+        # 成立与否的全部理由，所以下面还要有 5.1 那一档同名的一步。
+        # 排在产品轮之前同前几步的口径：它只动临时目录里的桩，红了不该把同轮的产品结论带走。
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_perms_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::权限面逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
               exit 1
           }
 
@@ -1097,6 +1116,53 @@ jobs:
           Write-Host "=== A2a 接线 OK：产品轮产出 checks=$($sum.Groups[1].Value) 的报告、无路径漏泄、第二发被窗口挡在门外 ==="
           exit 0
 
+      - name: Assert permission surface wiring
+        # 逻辑测试（上面那两步）无论多少条静态断言都证不了「这一轮真的收紧了」——A2a 那一课
+        # （`Assert integrity report wiring`）的同形欠账，所以这一发读**上面那轮产品备份**留下的
+        # 真目录：$env:APPDATA\PartiverseBackup（config.ps1 + secrets.env 住的地方）、
+        # $env:LOCALAPPDATA\PartiverseBackup\logs、$env:RUNNER_TEMP\repos（产品轮按 BACKUP_BASE 建）。
+        # **判据取 `AreAccessRulesProtected` 而不是「有没有 BUILTIN\Users」**：后者在这条 runner 上
+        # 可能是镜像默认 DACL 本来就干净（真机上 %APPDATA% 的继承里带着 Users，CI 的临时账号不一定），
+        # 拿它当唯一信号会是一条**恒真的死断言**——摘掉调用点照样绿。「根被断开继承」这件事只有
+        # Set-PrivateAcl 那一次调用能产出，而它正是「子项靠动态继承跟着变」的前提。
+        # 顺带仍查「除许可名单外没有别的 ACE」与「根上仍有自己」（把自己挡在外面＝下一轮直接失败）。
+        # 比较全部落在 **SID** 上：Get-Acl 交回的 IdentityReference 在 Windows 上通常已翻成账号名，
+        # 拿名字比 WindowsIdentity 的 SID 会把「自己」也算成外人（一条只有 runner 才露头的假失败）。
+        # 排在既有产品断言之后、5.1 那几步之前：它依赖产品轮的产物，自己几秒收敛。
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $self = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $allow = @($self, 'S-1-5-18', 'S-1-5-32-544')
+          function SidOf($ref) {
+              if ($ref -is [System.Security.Principal.SecurityIdentifier]) { return $ref.Value }
+              try { return $ref.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { return $ref.Value }
+          }
+          $trees = @("$env:APPDATA\PartiverseBackup",
+                     "$env:LOCALAPPDATA\PartiverseBackup\logs",
+                     "$env:RUNNER_TEMP\repos")
+          $bad = @()
+          $shown = @()
+          foreach ($t in $trees) {
+              if (-not (Test-Path -LiteralPath $t)) { $bad += "tree missing: $t"; continue }
+              $acl = Get-Acl -LiteralPath $t
+              $sids = @($acl.Access | ForEach-Object { SidOf $_.IdentityReference })
+              if (-not $acl.AreAccessRulesProtected) { $bad += "still inherits, Set-PrivateAcl did not run on it: $t" }
+              $foreign = @($sids | Where-Object { $allow -notcontains $_ })
+              if ($foreign.Count -gt 0) { $bad += "ACE outside allowlist on ${t}: $($foreign -join ',')" }
+              if ($sids -notcontains $self) { $bad += "no ACE for self on $t (next round cannot write here)" }
+              $shown += "$t protected=$($acl.AreAccessRulesProtected) ace=$($sids.Count)"
+          }
+          if ($bad.Count -gt 0) {
+              Write-Host "::error::permission surface wiring check failed"
+              $bad | ForEach-Object { Write-Host "::error::$_" }
+              $shown | ForEach-Object { Write-Host $_ }
+              exit 1
+          }
+          $shown | ForEach-Object { Write-Host $_ }
+          Write-Host "=== permission surface wiring OK: 3 trees inheritance-closed, self-only (allowlist: self + SYSTEM + Administrators) ==="
+
       - name: Windows PowerShell 5.1 host probe
         # AGENTS §5 的「`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是在 powershell.exe
         # 5.1 下的未验证面」——Task Scheduler 注册的正是这台宿主，而本 job 其余步骤的 shell 都是
@@ -1190,6 +1256,29 @@ jobs:
           & "$PWD\test_retention_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::Windows PowerShell 5.1 cannot run retention logic: rc=$LASTEXITCODE"
+              exit 1
+          }
+
+      - name: Permission surface logic on Windows PowerShell 5.1
+        # Same suite, same reason as the other 5.1 steps: Set-PrivateAcl opens with
+        # `$ErrorActionPreference = "Continue"` and that line only matters on the host
+        # Task Scheduler actually registers (5.1 turns native stderr into a terminating
+        # exception; pwsh 7 does not). If it is dropped, one icacls complaint becomes an
+        # exception the call site degrades into a warning, and the whole permission pass
+        # silently stops happening -- the product round would stay green.
+        # This step is also the ONLY place scenario 6 gets its evidence: the container has
+        # no icacls, so "inheritance really breaks" and "children follow by dynamic
+        # inheritance" (the premise for normalizing the whole tree with one call) can only
+        # be shown here. The fixture seeds BUILTIN\Users on the outer dir first, so the
+        # baseline is real exposure, not whatever the runner image happens to grant.
+        # Body must stay pure ASCII (see the host probe step). Ranked at the tail for the
+        # same reason as the three steps above it.
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_perms_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run permission surface logic: rc=$LASTEXITCODE"
               exit 1
           }
 

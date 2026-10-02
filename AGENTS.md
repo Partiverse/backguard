@@ -338,6 +338,20 @@
   `~/.local/share` 常被 `mkdir -p` 建成 755）靠 `backup.sh` 每次运行的幂等 `chmod` 修复，所以
   老设备只要 nightly 跑到新提交就自动收紧，不必改 plist。日志里是引擎输出的**完整路径**，
   这是隐私红线之外没人管过的一面。
+  **Windows 侧同一课的形状不同**（10-02 落地 `Set-PrivateAcl`）：NTFS 上新建目录从父目录**继承**
+  DACL，而 `%APPDATA%`/`%LOCALAPPDATA%`/`%USERPROFILE%` 的默认继承里带着 `BUILTIN\Users`——同机
+  别的账号读得到 `secrets.env` 与 `age\`。这里**没有 chmod**，也不逐文件跑 icacls（几千个 chunk
+  扫不起），做的是一次 `icacls <根> /inheritance:r /grant:r "*<当前用户 SID>:(OI)(CI)F"`：子项靠
+  **动态继承**当场跟着变（继承 ACE 不是创建时烤死的，只要子项自己没断开继承），所以「整棵树」与
+  「只叫一次」不矛盾。SID 必须 `WindowsIdentity::GetCurrent()` 现取（写死一条＝别人机器上把别的
+  账号收成唯一授权对象）。icacls 非零**只告警并计入 `bad`**，绝不终止这一轮（收紧失败＝维持原状，
+  §1.3 同一条哲学）。守卫 `test_perms_logic.ps1`：桩那半（argv 逐字 / 三档非致命 / 返回流干净 /
+  两处调用点的顺序）容器就能跑，**「继承真的断开、子项真的跟着变」只有 windows runner 拿得到证据**
+  （容器没有 icacls，那一支整段 Skip 并如实计数）；夹具为此**自己铺起点**——先给外层目录显式授给
+  `BUILTIN\Users`，否则「起点是空的」会让断言恒真。
+  **比较口径只能落在 SID 上**：`Get-Acl` 的 `IdentityReference` 在 Windows 上通常已翻成账号名，
+  而 `WindowsIdentity` 给的是 SID，拿名字比 SID 会把「自己」也算成外人——一条只有 runner 才露头的
+  假失败（10-02 第一版就是这样写的）。
 - **调度模板不写 `RunAtLoad`**：`launchctl load`（装机、改配置后重载）会因它立刻再跑
   一发全量上传，而向导本身已经跑过首次备份；错过的排程 launchd 唤醒时本会补跑，
   不需要 RunAtLoad。真机旧 plist 已于 2026-10-01 10:40 对齐（`bootout` → 装件 →
@@ -452,12 +466,20 @@
    正好撞满 step 级 `timeout-minutes: 40`，那一轮 macos 跑了 126 分钟仍红，而它后面三步
    一秒没执行——**这条 runner 上没有一步是便宜的，重排清单救不了，只能分车道**。
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
-   **PowerShell 侧的逻辑测试现在有四套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）、
-   `test_cloud_verify_logic.ps1`、`test_integrity_logic.ps1`、`test_retention_logic.ps1`（后两套
-   与最后一套均 10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、Windows PowerShell
-   5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2 编码那条）。A2a 另加
-   一步**运行时接线断言**（`Assert integrity report wiring`），因为逻辑测试无论多少条静态断言都
-   证不了「这一轮真的落笔了」。10-02 起 windows job 末尾另有一步 **`Backup round on Windows
+   **PowerShell 侧的逻辑测试现在有五套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）、
+   `test_cloud_verify_logic.ps1`、`test_integrity_logic.ps1`、`test_retention_logic.ps1`、
+   `test_perms_logic.ps1`（后三套均 10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、Windows PowerShell
+   5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2 编码那条）。
+   **`.cmd` 桩有两个形状是 10-02 在 windows runner 上第一次跑红才量出来的**（容器里永远走 `.sh`，
+   所以这两条只在 CI 露头）：① `echo %*>> "文件"` 的 `%*` 与 `>>` 之间**不许有空格**——cmd 会把那个
+   空格一起写进文件，于是「argv 逐字」断言差一个尾空格判红（实现一个字没错）；② stderr 要用
+   `type "开关文件" 1>&2`，**不要**用 `if exist (…) (set /p MSG=<文件 & echo %MSG% 1>&2)`——括号块
+   按「块解析时」展开变量，`set /p` 还没执行 `%MSG%` 就已经定值，打出来的是字面量 `%MSG%`，
+   日志里没有引擎原文。两条都不在 bash 侧存在，别拿 `.sh` 那一份的形状当两档宿主通用。
+   A2a 与 ⑧ 各另加
+   一步**运行时接线断言**（`Assert integrity report wiring` / `Assert permission surface wiring`），因为逻辑测试无论多少条静态断言都
+   证不了「这一轮真的落笔了」（⑧ 那一步的判据取 `AreAccessRulesProtected` 而不是「有没有
+   `BUILTIN\Users`」——后者在这条 runner 上可能本来就干净，是恒真的死断言）。10-02 起 windows job 末尾另有一步 **`Backup round on Windows
    PowerShell 5.1`**：它不是逻辑测试，是**拿 5.1 宿主真跑一整轮产品脚本**（子进程
    `powershell.exe -File backup.ps1`，跑在 pwsh 那一轮已建好的仓库上，所以连「已初始化」的幂等
    分支一起走）——§2 那条「Stop 作用域里原生命令写 stderr 就抛」只有这一档宿主能证伪，而它
@@ -601,8 +623,9 @@
    （`Invoke-CloudVerify`，五条判平口径与 bash 侧对齐，守卫 `test_cloud_verify_logic.ps1`；
    本地目录复现不了「只比大小」那两支已在台账里如实注册为静态覆盖，见 §2 同名单元）、④~~没有 A2a 完整性~~ **10-02 接了 bash 侧**
    （`backup.sh` 的 windows 分支登记 `类别:restic:路径` 并按引擎跑 `restic check --read-data`，
-   守卫 `test_restic_retention.sh` 第 7 段），**`backup.ps1` 那一份仍是同批欠账**（ps1 里连
-   `check` 都没出现过）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
+   守卫 `test_restic_retention.sh` 第 7 段），**`backup.ps1` 那一份也已在同一天接上**（`Invoke-IntegrityCheck`
+   + `restic check --read-data`，守卫 `test_integrity_logic.ps1` 双档宿主各一步；这一句在 10-02 之前写的是
+   「ps1 里连 `check` 都没出现过」，已不成立）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
    ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，两轮 CI 各抓到一条真缺陷**
    （`semantic.ps1` 的 `Prune-LocalTimeline`，四条口径与 `prune_local_timeline` 逐条对齐：第 4 层
    才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收）。
@@ -624,7 +647,10 @@
    `backup` 调用整条少了 `-r`**——restic 不记得上一条 `init` 用的哪个仓库，实测三类全红在
    「Please specify repository location」，也就是说 windows 分支**从没跑成过一次备份**；它没露头
    只是因为没人在 Windows 上跑 `backup.sh`（真机走 `backup.ps1`），而 CI 的 windows job 也只跑 ps1。
-   两发一起由 `test_restic_retention.sh` 钉住（真 restic，六段五发变异）、⑧权限面靠 NTFS 继承，bash 侧那套整树归一化没有对应实现。
+   两发一起由 `test_restic_retention.sh` 钉住（真 restic，六段五发变异）、⑧~~权限面靠 NTFS 继承，bash
+   侧那套整树归一化没有对应实现~~ **10-02 接了**（`Set-PrivateAcl`：一次 `icacls <根> /inheritance:r
+   /grant:r "*<现取 SID>:(OI)(CI)F"` 收紧四棵树，子项靠动态继承跟上；守卫 `test_perms_logic.ps1`
+   双档宿主各一步，真 icacls 那一支只有 windows runner 走得到。口径见 §2「权限面」那条的 Windows 段）。
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，
    全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认

@@ -756,6 +756,50 @@ function Push-TreeToCloud {
     $bad
 }
 
+# ---------- 权限面（roadmap A2a 的邻居：与 backup.sh 的整树 chmod 同一件事）----------
+# BEGIN-PERMS —— test_perms_logic.ps1 靠这两行标记把本函数**原样**切出去，对着 icacls 桩跑
+# （容器里只有 `.sh` 那一支，真 icacls 只有 windows runner 走得到）。
+#
+# 为什么必须有这一发（与 §2 那条权限教训同形）：Windows 上任何新建目录都从父目录**继承** DACL，
+# 而 %APPDATA%、%LOCALAPPDATA%、%USERPROFILE% 的默认继承里都带着 `BUILTIN\Users`——同一台机器上的
+# 别的账号能遍历并读到 `secrets.env`（restic 口令）与 `age\` 私钥目录。真机实测那一课的原话是
+# 「点名式清单注定还要漏」（bash 侧补了 `*.log` 就漏 `age/` 子目录），所以这里**不点名文件**，
+# 只对根做两件事：`/inheritance:r` 断开继承、`/grant:r "*<当前用户 SID>:(OI)(CI)F"` 只留自己。
+# 子项靠**动态继承**自动跟上：Windows 的继承 ACE 不是创建时烤死的，父档 DACL 一改，没主动断开
+# 继承的子项（restic/rclone/PowerShell 建的那些都不曾断开）当场跟着变，所以整棵树一次调用就归一，
+# 不必为几千个 chunk 文件逐个跑 icacls（bash 侧不递归进仓库目录是同一取舍）。
+#
+# 非致命（§1.3）：icacls 返回非零只告警并计入 `bad`，绝不终止这一轮——收紧失败等于「维持原状」，
+# 而把一次旁路失败变成整轮失败会让告警通道失去信任。口令/私钥读得到与否由这条旁路负责，
+# 由 CI 里「Assert private permission surface」那一步对着真 icacls 的结果判红。
+function Set-PrivateAcl {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Tree,
+        [string]$Sid = "",
+        [string]$IcaclsBin = "icacls"
+    )
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」：icacls 的报错写在 stderr
+    if (-not $Sid) {
+        $Sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    }
+    $grant = "*${Sid}:(OI)(CI)F"
+    $applied = @()
+    $bad = @()
+    foreach ($t in $Tree) {
+        if (-not $t) { continue }
+        if (-not (Test-Path -LiteralPath $t)) { continue }   # 还没建的树不判失败
+        & $IcaclsBin $t "/inheritance:r" "/grant:r" $grant | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "[perms] icacls 对 $t 返回 $LASTEXITCODE——这一棵树本轮没被收紧（旁路不终止备份）"
+            $bad += $t
+        } else {
+            $applied += $t
+        }
+    }
+    @{ sid = $Sid; applied = $applied; bad = $bad }
+}
+# END-PERMS
+
 # ---------- 主函数 ----------
 function Start-PartiverseBackup {
     $ErrorActionPreference = "Stop"
@@ -772,6 +816,19 @@ function Start-PartiverseBackup {
     $script:BackupLogPath = $BACKUP_LOG
 
     New-Item -ItemType Directory -Force -Path $CONF_DIR, $LOG_DIR, $BACKUP_BASE | Out-Null
+
+    # 权限面归一化（roadmap ⑧，与 backup.sh 的整树 chmod 同一件事）：排在建目录之后、
+    # 读 secrets.env 之前——凭据被同机账号读到的那一段时间越短越好，而它完全不依赖配置读得成不成。
+    # 四棵树：配置（secrets.env + age\）、日志、仓库根（timeline 明文层在里面）、
+    # 以及默认仓库根的**父**目录——`Install-Deps-Windows` 把 restic/rclone 落在
+    # `%USERPROFILE%\PartiverseBackup\bin`，它不在 $BACKUP_BASE（= 同级的 repo 子目录）之下，
+    # 点名清单少写这一条就等于漏掉整个工具目录（§2「点名式清单注定还要漏」的又一形）。
+    try {
+        [void](Set-PrivateAcl -Tree @($CONF_DIR, $LOG_DIR, $BACKUP_BASE,
+            "$env:USERPROFILE\PartiverseBackup"))
+    } catch {
+        Write-Warning "[perms] 权限面归一化异常退出（不阻断备份）: $($_.Exception.Message)"
+    }
 
     # 加载配置
     if (Test-Path "$CONF_DIR\config.ps1") {
@@ -953,6 +1010,14 @@ function Initialize-PartiverseBackup {
     $LOG_DIR = "$env:LOCALAPPDATA\PartiverseBackup\logs"
     $BACKUP_BASE = "$env:USERPROFILE\PartiverseBackup\repo"
     New-Item -ItemType Directory -Force -Path $CONF_DIR, $LOG_DIR, $BACKUP_BASE | Out-Null
+    # 初始化向导里也要收一次：口令与 age 私钥是在**这一步**第一次落盘的，等 nightly 才收紧等于
+    # 把敞口留给首备之前的那段时间（backup.sh 侧同理——chmod 在 init 与 nightly 两处都在）。
+    try {
+        [void](Set-PrivateAcl -Tree @($CONF_DIR, $LOG_DIR, $BACKUP_BASE,
+            "$env:USERPROFILE\PartiverseBackup"))
+    } catch {
+        Write-Warning "[perms] 权限面归一化异常退出（不阻断初始化）: $($_.Exception.Message)"
+    }
 
     # 凭证
     $pass1 = Read-Host "  输入备份加密密码" -AsSecureString
