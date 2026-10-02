@@ -102,17 +102,20 @@ $script:stubPath = Join-Path $script:root ("restic-stub." + $script:stubExt)
 if ($script:isWin) {
     @(
         '@echo off'
-        'echo %* >> "%STUB_LOG%"'
+        # 两处形状都是从 test_integrity_logic.ps1 那一份**已在 windows runner 上跑绿**的桩抄来的：
+        # ① `%*>>` 之间不许有空格——`echo %* >> f` 会把重定符前那个空格一起写进文件，argv 逐字
+        #    断言（`…--prune$`）当场差一个尾空格（10-02 首轮 windows job 就是这么红的）；
+        # ② stderr 用 `type 文件 1>&2` 而不是 `set /p MSG<文件` + `echo %MSG% 1>&2`——后者在
+        #    `if exist (…) else (…)` 这种**括号块**里按「块解析时」展开变量，set /p 还没执行，
+        #    echo 打出来的是字面量 `%MSG%`，日志里没有引擎原文（同一轮的第二条红）。
+        'echo %*>> "%STUB_LOG%"'
         'set RCFILE=%~2\.stub_rc'
         'if exist "%RCFILE%" ('
         '  set /p RC=<"%RCFILE%"'
         ') else ('
         '  set RC=0'
         ')'
-        'if exist "%~2\.stub_msg" ('
-        '  set /p MSG=<"%~2\.stub_msg"'
-        '  echo %MSG% 1>&2'
-        ')'
+        'if exist "%~2\.stub_msg" type "%~2\.stub_msg" 1>&2'
         'exit /b %RC%'
     ) | Out-File -FilePath $script:stubPath -Encoding ascii
 } else {
