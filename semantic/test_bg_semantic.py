@@ -80,6 +80,21 @@ class TestParsers(unittest.TestCase):
                   "2026-09-30T09:48:20.337098+0800"):
             self.assertIsNotNone(bg.parse_iso(s), s)
 
+    def test_parse_iso_fraction_digits(self):
+        # restic 的 time/mtime 走 Go 的 RFC3339Nano：末尾零被削掉，所以小数位是 1/4/7/9 位
+        # 都可能，而 py3.9 的 fromisoformat 只认 3 或 6 位。Windows 侧从**第二次**备份起
+        # 才带 --parent-time（有上一份归档时才有），所以这条在「每轮新建仓库只跑首备」的
+        # CI 上永远不露头（10-02 windows 集成段就是这么炸的）
+        self.assertEqual(bg.parse_iso("2026-10-02T06:31:11.447503458+00:00"),
+                         bg.parse_iso("2026-10-02T06:31:11.447503+00:00"))
+        self.assertEqual(bg.parse_iso("2026-10-02T06:31:11.4"),
+                         bg.parse_iso("2026-10-02T06:31:11.400000"))
+        self.assertEqual(bg.parse_iso("2026-10-02T06:31:11.1234567+08:00").utcoffset().total_seconds(),
+                         8 * 3600)
+        # 没有小数秒 / 只有 3 位的原样不动
+        self.assertEqual(bg.parse_iso("2026-10-02T06:31:11+00:00"),
+                         bg.parse_iso("2026-10-02T06:31:11.000+00:00"))
+
     def test_norm_path_backslash_and_strip(self):
         self.assertEqual(bg._norm_path("C:\\Users\\neb\\a.txt", 2), "a.txt")
         self.assertEqual(bg._norm_path("/Users/neb/a.txt", 0), "Users/neb/a.txt")

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prune_local_timeline / prune_run_jsons 单测（隔离临时目录，不触网不碰真实配置）：
-#   默认 14 / 显式 N / 设备级文件不动 / 空日期目录收掉 / <=0 与非数字行为
+#   默认 14 / 显式 N / 设备级文件不动 / 空日期壳**一路收到年**（2b）/ <=0 与非数字行为
 #   run JSON 留档轮转：白名单守卫只放行 run-YYYYMMDD-HHMMSS.json，含空格/分号的名字不误删
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -39,6 +39,23 @@ for d in 01 02 03 04 05 06 07; do
     [[ ! -e "$stage/2026/09/$d" ]] || fail "旧快照 $d 应连空目录一起清理"
 done
 [[ -f "$stage/profile.json" && -f "$stage/rescue-test.txt" ]] || fail "时间轴根级文件被误删"
+
+# 2b) 空壳级联必须**一路收到年**。上面 12 份种子全挤在同一个月（2026/09），月份壳永远不会空，
+#     所以这条断言此前在两侧都不存在——PowerShell 移植版 10-02 正是因此漏过一发：它的级联是
+#     「先筛空、再统一删」，一趟只收掉日期这一层，月份壳照旧留着，而它的守卫也没测到（在 Linux
+#     容器里跑 pwsh 才抓出来）。bash 侧 find -empty -delete 隐含 -depth，天然自深向浅一趟收净，
+#     但「天然正确」没有断言兜着，下一次移植照样会错——补在这里就是把这条口径钉成契约。
+mkdir -p "$stage/2025/03/04/1200-night" "$stage/2026/01/02/1200-morning"
+echo x > "$stage/2025/03/04/1200-night/STORY.md"
+echo x > "$stage/2026/01/02/1200-morning/STORY.md"
+SEM_TIMELINE_KEEP=5 prune_local_timeline "$stage"
+[[ "$(snap_count)" == 5 ]] || fail "跨年补种后 keep=5 应剩 5 份，实际 $(snap_count)"
+[[ ! -e "$stage/2025/03/04" ]] || fail "跨年旧快照的日期壳没收掉"
+[[ ! -e "$stage/2025/03" ]] || fail "旧快照的月份壳没收掉"
+[[ ! -e "$stage/2025" ]] || fail "旧快照的年壳没收掉——级联只走了一层"
+[[ ! -e "$stage/2026/01" ]] || fail "2026/01 的月份壳没收掉"
+[[ -d "$stage/2026/09" ]] || fail "还有现役快照的月份被误删"
+[[ -f "$stage/2026/09/12/1200-morning/STORY.md" ]] || fail "最新快照被误删"
 
 # 3) <=0 跳过清理；非数字回落默认 14（5 份不受影响）
 SEM_TIMELINE_KEEP=0 prune_local_timeline "$stage"
@@ -123,4 +140,4 @@ if grep -nE '^[[:space:]]*[^#]*xargs[[:space:]]+rm' semantic/semantic.sh >/dev/n
     fail "semantic.sh 仍有 ls | xargs rm（删除目标由词分割的 ls 输出决定）"
 fi
 
-echo "PASS: timeline retention（14 全留 / 5 截断 / 时间轴根级文件完好 / 0 与非数字不误删）+ run JSON 轮转白名单守卫"
+echo "PASS: timeline retention（14 全留 / 5 截断 / 空壳一路收到年 / 时间轴根级文件完好 / 0 与非数字不误删）+ run JSON 轮转白名单守卫"

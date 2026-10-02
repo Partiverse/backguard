@@ -242,6 +242,37 @@
   同理：E2E 里直接 source `semantic.sh` 调 `generate_semantic` 时，`SCRIPT_DIR`/`LOG_DIR`/`LOG`
   三个全局都得备好（生产由 `backup.sh` 备好），少一个就死，且死得没有声音——
   现由 `test_restore_e2e.sh` 断言 6c 锁住「缺一个排除数组不得终止备份」这条非致命分层。
+- **`.ps1` 的逻辑先在 Linux 容器里收敛，再交给 windows job 谈接线**：本机没有 pwsh，但
+  `docker run --rm -v "$PWD":/repo:ro mcr.microsoft.com/powershell:lts pwsh -NoProfile -File
+  /repo/test_prune_logic.ps1` 几秒就能把 `semantic.ps1` 的纯逻辑面跑完（同一份 pwsh 7 实现：
+  语法、cmdlet 绑定、排序键、白名单、级联、KEEP 的各分支）。**它不覆盖**反斜杠路径/大小写
+  不敏感（Linux 上造不出来）与 `powershell.exe` 5.1 那台宿主，所以替代不了 CI 的
+  `Assert local timeline retention`；两发分工＝「逻辑 here，接线与环境在 CI」。10-02 就是靠它
+  在**没烧 CI 轮**的情况下抓出移植偏差：PS 侧空壳级联是「先筛空、再统一删」，一趟只收掉日期
+  这一层，月份/年壳照旧留着，而两侧守卫都没测到（bash 12 份种子全挤在同一个月）。补法：
+  bash `test_timeline_retention.sh` 加 2b 段（跨年种子 + 月/年壳，变异 `-empty -print0 | xargs
+  rmdir` 当场咬住），PS 侧改成「排序后再判空」（管道是流式的，子壳先删父壳才可能空，等价于
+  `find -delete` 隐含的 `-depth`），`test_prune_logic.ps1` 与 windows job 那两段守卫同时补跨年断言。
+  同一条容器路还能**只查语法**地验 CI 里那段盲写的 PowerShell：把 step 的 `run:` 块用 python
+  的 `yaml.safe_load` 抽成 `.ps1`，再
+  `[System.Management.Automation.Language.Parser]::ParseFile(path,[ref]$null,[ref]$errs)`——
+  括号配错、`-Parent` 那种半截子表达式当场报出来，不用等 25 分钟。**别拿它跑整段守卫**：
+  `Seed-Snap` 用反斜杠拼路径、`. "$PWD\semantic\semantic.ps1"` 在 Linux 上是找不到的文件名，
+  把分隔符改掉就不再是被测的那份脚本了。
+- **`ConvertFrom-Json` 交回什么类型是宿主版本相关的，凡把引擎 JSON 的字段送上命令行都过
+  `Format-IsoTime`**（10-02 windows 集成段的真凶）：pwsh 7.2 给 String（容器实测），Windows
+  PowerShell 5.1 与 pwsh 7.4+ 给 `[datetime]`——后者一旦拼进参数就是**文化相关**的
+  `10/02/2026 06:31:11`，`bg` 的 `parse_iso` 读不动。它只在「存在上一份归档」的那一轮露头
+  （首备没有 `--parent-time`），而 CI 每轮新建仓库只跑首备，所以真机 nightly 从第二天起就一直在
+  静默降级：`convert` 只存不解析照报成功，`generate` 才崩，而语义层是非致命旁路（§1.3）——
+  表面症状＝**第二次起时间轴整段不产出、备份仍 FULLY COMPLETE**。两侧一起修：PS 边界
+  `Format-IsoTime`（`[datetime]/[datetimeoffset]` → `ToUniversalTime()` + 固定 `yyyy-MM-ddTHH:mm:ss'Z'`，
+  String 原样透传），Python 侧 `parse_iso` 把小数秒补齐/截断到 6 位（restic 是 Go 的 RFC3339Nano，
+  1/4/7/9 位都会出现，而 py3.9 只认 3/6 位——§2「Python 兼容」同一条约束的另一面）。守卫：
+  `test_prune_logic.ps1` 场景 7（变异＝摘掉 datetime 分支，四条当场报出那条文化串）+
+  `test_bg_semantic.py::TestParsers.test_parse_iso_fraction_digits`（变异＝摘掉补齐那行，3.9 上
+  `ValueError` 复现）。**通则：类型/格式随宿主版本漂移的输入，必须在自己的边界上归一，
+  而不是假定上游那台机器给的是原文。**
 - **E2E 夹具要与生产同形**：夹具桩只返回「脚本想要的那种形状」时，会把真 bug 遮掉——
   迁移门禁的 `gh --jq` 版在本机真实 gh 上炸、在桩上却一直「通过」，因为桩直接 echo 结论字符串。
   桩要么吐原始 JSON，要么连被调对象的返回形状一起复刻。
@@ -378,19 +409,23 @@
    powershell.exe 跑一轮**（新 CI step 里子进程特意用 pwsh.exe，就是为了不把这两发混在一起）。
    ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④没有 A2a 完整性（restic `check --read-data`
    同形）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
-   ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，但首轮 CI 判红**
+   ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，两轮 CI 各抓到一条真缺陷**
    （`semantic.ps1` 的 `Prune-LocalTimeline`，四条口径与 `prune_local_timeline` 逐条对齐：第 4 层
    才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收）。
    那一轮报「KEEP=1 却一份都没裁」，而**四种坏法在产物目录上长得一模一样**：函数没被调用（语义层在
    generate 之前就 return 了）、`SEM_TIMELINE_KEEP` 没读到（回落 14 → 5 份 ≤ 14 早退）、第 4 层一个
    没认出（同样早退）、函数内抛终止性异常（`backup.ps1` 的 catch 降成 warning，结论照打 FULLY
    COMPLETE）。对策是**让函数自己报现场**：`timeline-retention window: keep=N snaps=M` 一行三事实。
+   第二轮证据行兑现：报的是第一种，而 `--- 子进程 [semantic] 行 ---` 打出 `generate 失败`——
+   真实成因是 `ConvertFrom-Json` 把 restic 的 `time` 交回成 `[datetime]`（pwsh 7.4+ 与 5.1），
+   拼进命令行即文化格式串，而这条分支**只在有上一份归档的第二轮才走到**（见 §2 的
+   `Format-IsoTime` 一条与 HANDOVER §4.17）。
    **纯 ASCII 是故意的**——守卫在父进程里匹配子进程的 stdout，中文要先过 `[Console]::OutputEncoding`
    那道解码，编码不匹配时中文行糊成乱码，守卫会红得毫无道理（同一理由见 §3 的告警行取 `out.log`）。
    守卫同时改成两段：第一段 dot-source `semantic.ps1` 只调函数本身（先把「逻辑坏了」单独证掉），
    第二段才跑整轮产品（谈「接线」）——两段的失败面不重叠，才分得开上面那四种。**只用 `-First` 这类
    5.1 就有的写法**（没碰 6.0+ 的 `-SkipLast`），并去掉 `-Culture ''`、`StartsWith(…, [StringComparison])`
-   与 `string + [IO.Path]::DirectorySeparatorChar` 这三处 5.1 未验证面）、⑦`restic forget` 不带
+   与 `string + [IO.Path]::DirectorySeparatorChar` 这三处 5.1 未验证面。**同一天还借 Linux 容器里的 pwsh 7 抓出发移植时真坏了的那一发**：PS 侧级联写成「先筛空、再统一删」，一趟只收掉日期壳，月份/年壳照旧留着（bash 侧 `find -empty -delete` 隐含 `-depth` 天然收干净，两侧守卫却都没测到——种子全挤在同一个月）。详见 §3「`.ps1` 的逻辑先在容器里收敛」那条）、⑦`restic forget` 不带
    `--prune`（仓库只 compact 不了）、⑧权限面靠 NTFS 继承，bash 侧那套整树归一化没有对应实现。
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，

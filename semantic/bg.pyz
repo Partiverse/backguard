@@ -83,6 +83,10 @@ def parse_iso(s: str | None) -> datetime | None:
     t = s.strip()
     if t.endswith(("Z", "z")):
         t = t[:-1] + "+00:00"
+    # 小数秒位数补齐/截断到 6 位：restic 用 Go 的 RFC3339Nano，末尾零会被削掉，所以 1/4/7/9
+    # 位都会出现，而 py<3.11 的 fromisoformat 只认 3 或 6 位（3.9 见 9 位直接 ValueError）。
+    # 截到 6 位不改数值（这一层的实际精度是微秒），但「引擎吐什么位数」就不再约束兼容版本了。
+    t = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], t, count=1)
     return datetime.fromisoformat(re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", t))
 
 

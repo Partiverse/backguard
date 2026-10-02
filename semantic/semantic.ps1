@@ -67,16 +67,34 @@ function Prune-LocalTimeline {
             }
         }
 
-        # 腾空日期壳级联删除：先筛「无子项」再按路径长度降序（≈自深向浅），永不命中 stage 根本身
-        # （Get-ChildItem -Recurse -Directory 不含操作数自己）。-Recurse 只为压掉目录提示，此处的
-        # 目录刚被判过空。
+        # 腾空日期壳级联删除：一趟按「深→浅」扫，并且把「是否已空」的判定放在排序**之后**——
+        # 管道是流式的，子壳先被删掉，轮到父壳时它才可能已经空了。这等价于 bash 侧
+        # `find -mindepth 1 -maxdepth 3 -type d -empty -delete`（-delete 隐含 -depth）。
+        # 先筛空、再统一删的写法只会收掉一层：日期壳没了、月份壳还留着（10-02 在 Linux 容器里
+        # 跑 pwsh 7 才抓出来的移植偏差——bash 侧同一条守卫也没测到，因为它所有种子都在同一个月）。
+        # 路径长度降序 ≈ 自深向浅：子路径一定比父路径长，所以父壳永远排在子壳之后。
         Get-ChildItem -LiteralPath $root -Recurse -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.GetFileSystemInfos().Count -eq 0 } |
             Sort-Object -Property { $_.FullName.Length } -Descending |
+            Where-Object { (Test-Path -LiteralPath $_.FullName) -and $_.GetFileSystemInfos().Count -eq 0 } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     } catch {
         Write-Warning "[semantic] timeline-retention aborted by exception: $($_.Exception.Message)"
     }
+}
+
+# 把引擎报告里的时间值转成 bg 认得的 ISO 串。为什么需要这一层：ConvertFrom-Json 对「长得像
+# 日期」的 JSON 字段返回什么类型**取决于宿主版本**——pwsh 7.2 给 String（原文照抄），而
+# Windows PowerShell 5.1 与 pwsh 7.4+ 给 [datetime]，后者一旦进命令行就被 ToString() 转成
+# 文化相关的 `10/02/2026 06:31:11`，bg 的 parse_iso 见它必崩。restic 的 `snapshots --json`
+# 里 time 正是这种字段，所以这条只在**存在上一份归档**时才露头（首备没有 prev）：CI 每轮新建
+# 仓库只跑首备，10-02 第一次让产品跑第二轮（windows job 集成段）才炸出来，而真机 nightly
+# 从第二天起就一直踩在同一条上。ToUniversalTime + 固定 Z 尾巴：不碰文化、不留类型歧义。
+function Format-IsoTime {
+    param($Value)
+    if ($Value -is [datetime] -or $Value -is [datetimeoffset]) {
+        return $Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss'Z'")
+    }
+    [string]$Value
 }
 
 function Invoke-SemanticLayer {
@@ -137,8 +155,11 @@ function Invoke-SemanticLayer {
             [System.IO.File]::WriteAllLines($prevJson, $plines)
             if (Test-Path $prevJson) {
                 $prevArgs += @("--prev", "$($d.cls)=$prevJson")
-                if ($parentArgs.Count -eq 0 -and $prev.time) {
-                    $parentArgs += @("--parent-time", $prev.time)
+                # 过 Format-IsoTime：宿主可能把 time 交回来的是 [datetime]，直接拼进命令行
+                # 会变成文化格式串，bg 在 generate 阶段读它才崩（convert 只存不解析）
+                $pt = Format-IsoTime $prev.time
+                if ($parentArgs.Count -eq 0 -and $pt) {
+                    $parentArgs += @("--parent-time", $pt)
                 }
             }
         }
