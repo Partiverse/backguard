@@ -378,12 +378,19 @@
    powershell.exe 跑一轮**（新 CI step 里子进程特意用 pwsh.exe，就是为了不把这两发混在一起）。
    ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④没有 A2a 完整性（restic `check --read-data`
    同形）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
-   ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 已补**
+   ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，但首轮 CI 判红**
    （`semantic.ps1` 的 `Prune-LocalTimeline`，四条口径与 `prune_local_timeline` 逐条对齐：第 4 层
-   才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收；
-   守卫是 windows job 的 `Assert local timeline retention`，`KEEP=1` 压成确定形状。写它时唯一能
-   静态确定形状的是「5.1 也得跑」——所以只用 `-First`/`Sort-Object -Culture ''` 这类 5.1 就有的
-   写法，没碰 6.0+ 的 `-SkipLast`）、⑦`restic forget` 不带
+   才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收）。
+   那一轮报「KEEP=1 却一份都没裁」，而**四种坏法在产物目录上长得一模一样**：函数没被调用（语义层在
+   generate 之前就 return 了）、`SEM_TIMELINE_KEEP` 没读到（回落 14 → 5 份 ≤ 14 早退）、第 4 层一个
+   没认出（同样早退）、函数内抛终止性异常（`backup.ps1` 的 catch 降成 warning，结论照打 FULLY
+   COMPLETE）。对策是**让函数自己报现场**：`timeline-retention window: keep=N snaps=M` 一行三事实。
+   **纯 ASCII 是故意的**——守卫在父进程里匹配子进程的 stdout，中文要先过 `[Console]::OutputEncoding`
+   那道解码，编码不匹配时中文行糊成乱码，守卫会红得毫无道理（同一理由见 §3 的告警行取 `out.log`）。
+   守卫同时改成两段：第一段 dot-source `semantic.ps1` 只调函数本身（先把「逻辑坏了」单独证掉），
+   第二段才跑整轮产品（谈「接线」）——两段的失败面不重叠，才分得开上面那四种。**只用 `-First` 这类
+   5.1 就有的写法**（没碰 6.0+ 的 `-SkipLast`），并去掉 `-Culture ''`、`StartsWith(…, [StringComparison])`
+   与 `string + [IO.Path]::DirectorySeparatorChar` 这三处 5.1 未验证面）、⑦`restic forget` 不带
    `--prune`（仓库只 compact 不了）、⑧权限面靠 NTFS 继承，bash 侧那套整树归一化没有对应实现。
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，

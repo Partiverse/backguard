@@ -5,54 +5,78 @@
 # 兼容 Windows PowerShell 5.1 与 pwsh 7。
 
 # 兼容 Windows PowerShell 5.1 与 pwsh 7：只用 Skip/First（不用 6.0+ 的 -SkipLast），
-# 排序键显式走 invariant culture，删除一律 -LiteralPath（方括号路径不当通配符）。
+# 删除一律 -LiteralPath（方括号路径不当通配符）。不写 -Culture / 不用 string + char 拼接
+# 这类「5.1 下没验证过的绑定」（10-02 首轮 CI 的教训，见 AGENTS §5 ⑥）。
 
 # 本地暂存保留最近 N 份快照（SEM_TIMELINE_KEEP，默认 14；非数字回落默认，<=0 不清理）。
 # 与 semantic.sh 的 prune_local_timeline 同形，四条口径一条不落：①只认 stage 根下第 4 层
 # （YYYY/MM/DD/HHMM-标签）的目录；②按相对路径排序取「除最后 N 份外」；③删除前逐个过形态
 # 白名单，不匹配就告警跳过——stage 根解析错时宁可漏删不可误删；④清走后把空日期壳自深向浅收掉。
 # 云端那份不动（AGENTS §1.4 只增不减）：调用点在时间轴推送之前，被裁的本来上一轮就上过云。
+#
+# 那行 ASCII 的窗口证据不是装饰，是本函数的**唯一现场信号**。10-02 首轮 CI 报「KEEP=1 却一份
+# 都没裁」，而产物目录上四种坏法长得一模一样：语义层在 generate 之前就 return 了（根本没调用）、
+# SEM_TIMELINE_KEEP 没读到（回落 14 → 5 份 <= 14 早退）、第 4 层一个都没认出来（0 份 <= 14 早退）、
+# 函数内抛了终止性异常（backup.ps1 的 catch 降成 warning，结论照打 FULLY COMPLETE）。只有函数
+# 自己报得出是哪一种。**写成纯 ASCII 是有意的**：守卫在父进程里匹配子进程的 stdout，而中文要
+# 过 `[Console]::OutputEncoding` 这一道解码，编码不匹配时中文行会糊成乱码 → 守卫假红。
 function Prune-LocalTimeline {
     param([Parameter(Mandatory)][string]$Stage)
 
-    $keep = 14
-    if ($env:SEM_TIMELINE_KEEP -match '^\d+$') { $keep = [int]$env:SEM_TIMELINE_KEEP }
-    if ($keep -lt 1) { return }
-    if (-not (Test-Path -LiteralPath $Stage)) { return }
-
-    $prefix = $Stage.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-    $snaps = @(Get-ChildItem -LiteralPath $Stage -Recurse -Directory -ErrorAction SilentlyContinue |
-        ForEach-Object {
-            if (-not $_.FullName.StartsWith($prefix, [System.StringComparison]::Ordinal)) { return }
-            $rel = $_.FullName.Substring($prefix.Length)
-            # 4 层 = 3 个分隔符；与 bash 的 -mindepth 4 -maxdepth 4 同口径
-            if (([regex]::Matches($rel, '[\\/]')).Count -ne 3) { return }
-            [pscustomobject]@{ Full = $_.FullName; Rel = $rel; Leaf = $_.Name }
-        })
-    if ($snaps.Count -le $keep) { return }
-
-    $victims = @($snaps | Sort-Object -Property Rel -Culture '' |
-        Select-Object -First ($snaps.Count - $keep))
-    foreach ($v in $victims) {
-        if ($v.Leaf -notmatch '^[0-9]{4}-[a-z0-9-]+$') {
-            Write-Warning "[semantic] 跳过非快照形态路径: $($v.Rel)"
-            continue
+    # 语义层是引擎旁路（AGENTS §1.3）：这里抛异常不得带走整层，所以异常自己吞掉并留下证据。
+    try {
+        $keep = 14
+        if ($env:SEM_TIMELINE_KEEP -match '^\d+$') { $keep = [int]$env:SEM_TIMELINE_KEEP }
+        if ($keep -lt 1) {
+            Write-Host "[semantic] timeline-retention window: keep=$keep snaps=0 (disabled)"
+            return
         }
-        Remove-Item -LiteralPath $v.Full -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $v.Full) {
-            Write-Warning "[semantic] 本地暂存没删掉（被占用？）: $($v.Rel)"
-        } else {
-            Write-Host "[ OK ] [semantic] 本地暂存保留最近 $keep 份，清理: $($v.Rel)"
+        if (-not (Test-Path -LiteralPath $Stage)) {
+            Write-Host "[semantic] timeline-retention window: keep=$keep snaps=0 (no-stage)"
+            return
         }
+
+        $root = $Stage.TrimEnd('\', '/')
+        $snaps = @(Get-ChildItem -LiteralPath $root -Recurse -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                if ($_.FullName.Length -le $root.Length) { return }
+                # 分隔符先归一成 '/' 再数段数：Windows 下 '\' 与 '/' 混排时「按相对路径排序」
+                # 才有唯一答案（bash 侧同一份树只有 '/'，移植时最容易漏的就是这一步）
+                $segs = @($_.FullName.Substring($root.Length + 1) -split '[\\/]')
+                # 4 段 = YYYY/MM/DD/HHMM-标签；与 bash 的 -mindepth 4 -maxdepth 4 同口径
+                if ($segs.Count -ne 4) { return }
+                [pscustomobject]@{ Full = $_.FullName; Rel = ($segs -join '/'); Leaf = $_.Name }
+            })
+        Write-Host "[semantic] timeline-retention window: keep=$keep snaps=$($snaps.Count)"
+        if ($snaps.Count -le $keep) { return }
+
+        # 排序键是归一化后的相对路径（日期树天然字典序）。不写 -Culture：那是 5.1 下没验证过的
+        # 参数绑定，而这条路径的字符集只有数字、连字符、斜杠，序数与文化比较在此同解。
+        $victims = @($snaps | Sort-Object -Property Rel |
+            Select-Object -First ($snaps.Count - $keep))
+        foreach ($v in $victims) {
+            if ($v.Leaf -notmatch '^[0-9]{4}-[a-z0-9-]+$') {
+                Write-Warning "[semantic] 跳过非快照形态路径: $($v.Rel)"
+                continue
+            }
+            Remove-Item -LiteralPath $v.Full -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $v.Full) {
+                Write-Warning "[semantic] 本地暂存没删掉（被占用？）: $($v.Rel)"
+            } else {
+                Write-Host "[ OK ] [semantic] 本地暂存保留最近 $keep 份，清理: $($v.Rel)"
+            }
+        }
+
+        # 腾空日期壳级联删除：先筛「无子项」再按路径长度降序（≈自深向浅），永不命中 stage 根本身
+        # （Get-ChildItem -Recurse -Directory 不含操作数自己）。-Recurse 只为压掉目录提示，此处的
+        # 目录刚被判过空。
+        Get-ChildItem -LiteralPath $root -Recurse -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.GetFileSystemInfos().Count -eq 0 } |
+            Sort-Object -Property { $_.FullName.Length } -Descending |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Warning "[semantic] timeline-retention aborted by exception: $($_.Exception.Message)"
     }
-
-    # 腾空日期壳级联删除：先筛「无子项」再按路径长度降序（≈自深向浅），永不命中 stage 根本身
-    # （Get-ChildItem -Recurse -Directory 不含操作数自己）。-Recurse 只为压掉目录提示，此处的
-    # 目录刚被判过空。
-    Get-ChildItem -LiteralPath $Stage -Recurse -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.GetFileSystemInfos().Count -eq 0 } |
-        Sort-Object -Property { $_.FullName.Length } -Descending |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 function Invoke-SemanticLayer {

@@ -610,13 +610,19 @@ jobs:
           exit 0
 
       # Windows 侧本地暂存保留策略（semantic.ps1 的 Prune-LocalTimeline，与 semantic.sh 的
-      # Windows 侧本地暂存保留策略（semantic.ps1 的 Prune-LocalTimeline，与 semantic.sh 的
       # prune_local_timeline 同一条口径）。此前 Windows 只有 run JSON 留档有保留上限，时间轴根
-      # 越长越厚——本地暂存的意义是「云端丢了能重建」，不是无限历史。KEEP=1 把裁剪压成确定形状：
-      # 铺开 3 个旧种子 + 1 个形态不合规的目录，跑完之后必须只剩「本轮那份 + 不合规那份」，
-      # 且被裁快照腾空的日期壳一并消失。断言顺序照 §3：先证本轮真跑完（否则整轮崩在别处会伪装成
-      # 「保留策略坏了」）、再问哪条检查抓到了它、退出码放最后；成功路径显式 exit 0（上一条守卫
-      # 实测的坑：pwsh -Command 没有 exit 语句时拿最后一条原生命令的 rc 当宿主 rc）。
+      # 越长越厚——本地暂存的意义是「云端丢了能重建」，不是无限历史。
+      #
+      # 分成两段是 10-02 首轮 CI 教出来的：那一轮报「KEEP=1 却一份都没裁」，可「保留逻辑坏了」与
+      # 「保留逻辑根本没被调用」（语义层在 generate 之前就 return 了，或函数内抛了终止性异常被
+      # backup.ps1 的 catch 降成 warning）在产物目录上长得一模一样，只跑产品链路分辨不出来。
+      # 第一段 dot-source semantic.ps1 只调函数本身（该文件全是函数定义、无顶层副作用），先把
+      # 「逻辑」单独证掉；第二段才跑整轮，谈「接线」。两段的失败面不重叠。
+      # KEEP=1 把裁剪压成确定形状：3 个按当天回推的种子 + 1 个形态不合规的目录，跑完之后必须只剩
+      # 「窗口内那份 + 不合规那份」，且被裁快照腾空的日期壳一并消失。断言顺序照 §3：先证本轮真跑完
+      # （否则整轮崩在别处会伪装成「保留策略坏了」）、再读函数自己打的窗口证据行、最后才是退出码；
+      # 成功路径显式 exit 0（上一条守卫实测的坑：pwsh 在没有 exit 语句时拿最后一条原生命令的 rc
+      # 当宿主 rc）。
       - name: Assert local timeline retention
         timeout-minutes: 25
         shell: pwsh
@@ -627,9 +633,15 @@ jobs:
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
           $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
           $env:SEM_TIMELINE_KEEP = "1"
-          $stage = "$env:RUNNER_TEMP\repos\timeline"
+          $stage = "$env:BACKUP_BASE\timeline"
 
-          # stage 根下第 4 层（YYYY/MM/DD/HHMM-标签）的目录，与 bash 的 -mindepth 4 -maxdepth 4 同口径
+          # 先把 stage 清空：上游两步（首轮 backup、云端失败守卫）各留了一份真快照，不清掉的话
+          # 「窗口里该剩哪几份」取决于上游跑了几轮，断言就不是确定形状了。这是 runner 的一次性
+          # 临时目录，且本步是 windows job 最后一个断言步，被删的产物没有下游读者。
+          if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+          [void][System.IO.Directory]::CreateDirectory($stage)
+
+          # 快照 = stage 根下第 4 层（YYYY/MM/DD/HHMM-标签），与 bash 的 -mindepth 4 -maxdepth 4 同口径
           function Get-SnapDirs {
               param([string]$Root)
               $n = $Root.Length
@@ -637,55 +649,122 @@ jobs:
                   Where-Object { $_.FullName.Length -gt $n -and
                       (($_.FullName.Substring($n).TrimStart('\', '/') -split '[\\/]').Count) -eq 4 })
           }
-
-          # 种子日期按当天回推，别写死年份：runner 时钟走到 2027 年那些目录就变成「未来快照」，
-          # 排序时留在最后，断言当场变成随机红
-          $seedDays = @(1, 2, 3 | ForEach-Object { (Get-Date).AddDays(-60 * $_) })
-          function New-SnapDir {
-              param([string]$Root, [string]$Rel)
+          function Seed-Snap {
+              param([datetime]$When, [string]$Leaf = '0900-seed')
+              $rel = 'timeline/' + $When.ToString('yyyy/MM/dd') + '/' + $Leaf
+              $p = Join-Path $env:BACKUP_BASE ($rel -replace '/', '\')
               # 用 .NET 直接建整棵树：New-Item -Force 对「多级父目录不存在」的行为在 5.1/7 之间
               # 不一致，种子铺不全的话后面每一句都会假绿
-              $p = Join-Path $Root ($Rel -replace '/', '\')
               [void][System.IO.Directory]::CreateDirectory($p)
               'seed' | Out-File (Join-Path $p 'marker.txt')
               $p
           }
-          foreach ($d in $seedDays) {
-              [void](New-SnapDir $stage ($d.ToString('yyyy/MM/dd') + '/0900-seed'))
-          }
-          # 形态不合规的那一个（叶子不是 HHMM-标签）必须**活着**——白名单是「宁可漏删不可误删」
-          $badDay = (Get-Date).AddDays(-61)
-          $badDir = Join-Path $stage (($badDay.ToString('yyyy/MM/dd') + '/notes') -replace '/', '\')
-          [void][System.IO.Directory]::CreateDirectory($badDir)
-          'keep me' | Out-File (Join-Path $badDir 'marker.txt')
+          # 种子日期按当天回推，别写死年份：runner 时钟走到 2027 年这些目录就变成「未来快照」，
+          # 排序时留在最后，断言当场变成随机红
+          $dNew = (Get-Date).AddDays(-60)
+          $dMid = (Get-Date).AddDays(-120)
+          $dOld = (Get-Date).AddDays(-180)
+          $dBad = (Get-Date).AddDays(-61)   # 与 dNew 同月：级联时该月的壳不许被收走
 
+          # ---------- 第一段：只调函数本身 ----------
+          . "$PWD\semantic\semantic.ps1"
+          $pNew = Seed-Snap $dNew
+          $pMid = Seed-Snap $dMid
+          $pOld = Seed-Snap $dOld
+          $pBad = Seed-Snap $dBad 'notes'   # 叶子不合规：白名单必须让它活着
+          $uBefore = @(Get-SnapDirs $stage)
+          if ($uBefore.Count -ne 4) {
+              Write-Host "::error::第一段种子没铺齐（第 4 层 $($uBefore.Count) 个，该 4 个），后面全是空转"
+              exit 1
+          }
+          Prune-LocalTimeline -Stage $stage
+          if (Test-Path -LiteralPath $pOld) {
+              Write-Host "::error::第一段：最旧的快照没删（$pOld 还在）——窗口或排序本身没生效"
+              exit 1
+          }
+          if (Test-Path -LiteralPath $pMid) {
+              Write-Host "::error::第一段：第二旧的快照没删（$pMid 还在）"
+              exit 1
+          }
+          if (-not (Test-Path -LiteralPath $pNew)) {
+              Write-Host "::error::第一段：窗口内的最新快照被删了——保留的是「除最后 N 份外」，删过头"
+              exit 1
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $pBad 'marker.txt'))) {
+              Write-Host "::error::第一段：形态不合规的目录连内容一起没了——叶子白名单没起作用"
+              exit 1
+          }
+          foreach ($gone in @($pOld, $pMid)) {
+              $shell = Split-Path $gone -Parent          # YYYY/MM/DD
+              if (Test-Path -LiteralPath $shell) {
+                  Write-Host "::error::第一段：快照裁了但日期壳还在（$shell）——空壳级联那段没跑"
+                  exit 1
+              }
+          }
+          Write-Host "=== 第一段（函数本身）OK：裁两份、留一份、不合规那份活着、空壳收掉 ==="
+
+          # ---------- 第二段：整条产品链路（backup.ps1 作子进程）----------
+          # 重新铺被第一段裁掉的种子：这一步之后「旧快照消失」只能由本轮产品完成。
+          # 此刻 stage 里是 4 个第 4 层目录（dNew、dMid、dOld、notes），产品那轮再加 1 份真快照。
+          [void](Seed-Snap $dMid)
+          [void](Seed-Snap $dOld)
+          [void](Seed-Snap $dBad 'notes')
           $before = @(Get-SnapDirs $stage)
-          if ($before.Count -lt 5) {
-              Write-Host "::error::种子没铺开（第 4 层只有 $($before.Count) 个目录），下面全是空转"
+          if ($before.Count -ne 4) {
+              Write-Host "::error::第二段种子没铺齐（第 4 层 $($before.Count) 个，该 4 个）"
               exit 1
           }
 
+          # 必须是**子进程**：脚本内的 exit 会终结整个宿主会话（同上一条守卫的理由）。
           $out = & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
           $code = $LASTEXITCODE
           $text = $out | Out-String
-          $after = @(Get-SnapDirs $stage)
-          $leaves = @($after | ForEach-Object { $_.Name })
+          # 这一段是盲写的 PowerShell（本机无 pwsh），失败时全靠子进程这几行分清四种坏法：
+          # 没被调用 / keep 没读到 / 第 4 层没认出 / 函数内抛异常
+          $sem = @($out | Where-Object { "$_" -match 'semantic' } | Select-Object -First 20)
+          Write-Host "--- 子进程 [semantic] 行（$($sem.Count) 条）---"
+          Write-Host ($sem -join "`n")
+          Write-Host "--- 子进程末尾 15 行 ---"
+          Write-Host ((@($out | Select-Object -Last 15)) -join "`n")
 
           if ($text -notmatch 'FULLY COMPLETE') {
               Write-Host "::error::这一轮没跑到 FULLY COMPLETE，保留策略的判定无从谈起"
-              Write-Host (($out | Select-Object -Last 25) -join "`n")
               exit 1
           }
-          $leftover = @($leaves | Where-Object { $_ -like '*-seed' })
-          if ($leftover.Count -gt 0) {
-              Write-Host "::error::KEEP=1 却没裁掉种子的旧快照，残留 $($leftover -join ', ')——保留策略没生效"
+          # 窗口证据行：一行三个事实（函数被调用过 / keep 读到了 / 第 4 层认出几个）。
+          # 匹配串是纯 ASCII，为的就是不过 [Console]::OutputEncoding 那道解码——中文一旦糊成
+          # 乱码，这条守卫会红得毫无道理。
+          $ev = @($out | Where-Object { "$_" -match 'timeline-retention window' } | Select-Object -First 1)
+          if ($ev.Count -eq 0) {
+              Write-Host "::error::子进程没打窗口证据行 → Prune-LocalTimeline 根本没被调用（语义层在 generate 之前就返回了）。第一段已证明函数本身正确。"
+              exit 1
+          }
+          $seenKeep = -1; $seenSnaps = -1
+          if ("$($ev[0])" -match 'keep=(\d+) snaps=(\d+)') {
+              $seenKeep = [int]$Matches[1]; $seenSnaps = [int]$Matches[2]
+          } else {
+              Write-Host "::error::窗口证据行形状不合（实得: $($ev[0])）"
+              exit 1
+          }
+          if ($seenKeep -ne 1) {
+              Write-Host "::error::产品没读到 SEM_TIMELINE_KEEP（keep=$seenKeep，该 1）——环境变量没传进子进程，或默认窗口撑过了快照数"
+              exit 1
+          }
+          if ($seenSnaps -ne 5) {
+              Write-Host "::error::产品只认出 $seenSnaps 个第 4 层快照（该 5：4 份种子 + 本轮 1 份真快照）——深度判定与守卫不同形"
+              exit 1
+          }
+          $after = @(Get-SnapDirs $stage)
+          $leaves = @($after | ForEach-Object { $_.Name })
+          if ((Test-Path -LiteralPath $pMid) -or (Test-Path -LiteralPath $pOld)) {
+              Write-Host "::error::种子没被裁掉（$pMid / $pOld 至少一份还在），而证据行说看到了 $seenSnaps 个——认得出却删不掉"
               exit 1
           }
           if ($leaves -notcontains 'notes') {
               Write-Host "::error::形态不合规的目录被删了（叶子白名单没起作用），剩 $($leaves -join ', ')"
               exit 1
           }
-          if (-not (Test-Path -LiteralPath (Join-Path $badDir 'marker.txt'))) {
+          if (-not (Test-Path -LiteralPath (Join-Path $pBad 'marker.txt'))) {
               Write-Host "::error::不合规目录里的文件也没了——连内容一起消失说明删的是路径而不是判定"
               exit 1
           }
@@ -694,7 +773,7 @@ jobs:
               Write-Host "::error::合规快照该只剩 1 份（KEEP=1），实剩 $($kept.Count) 份：$($kept -join ', ')"
               exit 1
           }
-          $seedShell = Join-Path $stage ((Get-Date).AddDays(-180).ToString('yyyy/MM/dd'))
+          $seedShell = Split-Path $pOld -Parent
           if (Test-Path -LiteralPath $seedShell) {
               Write-Host "::error::快照裁了但日期壳还在（$seedShell）——空壳级联那段没跑"
               exit 1
@@ -703,7 +782,7 @@ jobs:
               Write-Host "::error::保留策略都对了，退出码却不是 0（$code）——结论行与判定脱节"
               exit 1
           }
-          Write-Host "=== 本地暂存保留策略 OK（合规剩 $($kept.Count) 份、不合规那份在、日期壳已收）==="
+          Write-Host "=== 第二段（产品链路）OK：keep=$seenKeep snaps=$seenSnaps、合规剩 $($kept.Count) 份、不合规那份在、日期壳已收 ==="
           exit 0
 
       - name: Push debug logs
