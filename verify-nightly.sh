@@ -52,7 +52,7 @@ chk fail "四件套 + 密封清单" "无快照，无从核对"
 fi
 
 echo "== A4：run 边界行（当日恰好一行） =="
-today_lines=$(grep -a "^\\[$DAY .*/ run 边界: sha=" "$L/backup.log" 2>/dev/null || true)
+today_lines=$(grep -a "^\\[$DAY .* run 边界: sha=" "$L/backup.log" 2>/dev/null || true)
 today_n=$(printf '%s' "$today_lines" | grep -ac 'run 边界' || true)
 line=$(printf '%s\n' "$today_lines" | tail -1)
 if [[ -n "$line" ]]; then
@@ -83,8 +83,16 @@ if [[ -f "$cv" ]]; then
   healed=$(printf '%s' "$sums" | grep -aoE 'HEALED=[0-9]+' | tail -1 | tr -dc '0-9')
   [[ "${healed:-0}" == "0" ]] && chk ok "HEALED=0（首轮预期）" "" \
                              || chk warn "HEALED>0" "HEALED=${healed}，连续两晚>0 就是推送清单有问题"
-  grep -aq 'rescue-test.txt' "$cv" && chk fail "自证清单未含本地-only 的 rescue-test.txt" "会每晚假报" \
-                                   || chk ok "自证清单未含 rescue-test.txt" ""
+  # rescue-test.txt 这个名字**该**出现在报告里——它自带完整文件名所以只留本地，而自证的
+  # privacy 那条就是去云端把它「证否」（PASS：云端时间轴没有 rescue-test.txt）。所以这里判的
+  # 不是「字符串在不在」，而是「它有没有出现在某条 FAIL 里」（那才是每晚假报：本地清单没把它
+  # 摘掉、或云端真躺着历史副本），以及「privacy 那条还在不在」（不在了＝这层自证没人做了）。
+  rt_fail=$(grep -aE '^FAIL .*rescue-test\.txt' "$cv" || true)
+  [[ -z "$rt_fail" ]] && chk ok "rescue-test.txt 未进任何 FAIL 行" "" \
+                     || chk fail "rescue-test.txt 未进任何 FAIL 行" "$rt_fail"
+  grep -aqE '^(PASS|FAIL|HEALED|UNKNOWN) +privacy @ ' "$cv" \
+    && chk ok "privacy 自证条目在册（云端证否本地-only 件）" "" \
+    || chk fail "privacy 自证条目在册（云端证否本地-only 件）" "报告里没有 privacy 那条——本地-only 这层没人核了"
 else
   chk fail "文件存在" "$cv 不存在"
 fi
