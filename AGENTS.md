@@ -163,7 +163,14 @@
   窗口节流用**产物自身的 mtime**当标记（与 `rescue-test.txt` 同一条机制，不另养状态文件）；
   低频路径的节流本身要被测，否则「月度」只是文档里的形容词。`INTEGRITY_DAYS=0` 是人工立刻跑的入口；
   没登记任何仓库时**不写报告**（一份 checks=0 的「完整性通过」比没有更坏）。守卫 `test_integrity.sh`
-  （linux + macos 双 CI；restic 侧未接入，与 `backup.ps1` 的自证同批欠账）。
+  （linux + macos 双 CI）。**restic 侧 10-02 也接上了**（`backup.sh` 的 windows 分支登记
+  `类别:restic:路径`，`run_integrity_check` 按引擎分派 `restic -r <仓库> check --read-data`）：
+  它的退出码**本来就分档**（引擎 EXIT STATUS：0 成功 / 1 有错 / 10 仓库不存在 / 11 已被锁 /
+  12 口令不对），所以不需要 borg 那套「读错误原文猜是不是锁」，只有 11 记 UNKNOWN 不改退出码，
+  10/12 与其余非零按最坏情况判 FAIL。而 `--read-data` **不是可选项**：不带它时 check 只查
+  快照/树/blob 的结构，10-02 实测「翻掉某个 pack 数据段的一个字节」之后 `restic check` 仍 rc=0，
+  只有 `--read-data` 看得见（对位 borg 的 `--verify-data`）。守卫 `test_restic_retention.sh` 第 7 段。
+  `backup.ps1` 侧的自证与完整性仍是同批欠账。
 - **restic 的三件事与 borg 不同，移植时逐条对表**（10-02 实测，`test_restic_retention.sh` 锁住）：
   ①`-r <repo>` 是**每条子命令各要一次**，`init` 带了不等于 `backup` 认得它，少了直接 rc=1
   「Please specify repository location」；②`forget` **只删快照对象、不删数据**——引擎帮助页原话
@@ -309,9 +316,11 @@
    `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）/
    `test_log_rotation.sh`（日志轮转 + run 边界行）/
    `test_cloud_verify.sh`（云端副本自证：单向包含 + config 内容哈希 + HEALED/UNKNOWN 分档）/
-   `test_integrity.sh`（存储完整性：窗口节流 + 锁 flake 记 UNKNOWN / 非锁 fatal 判 FAIL / 真损坏）/
+   `test_integrity.sh`（borg 侧存储完整性：窗口节流 + 锁 flake 记 UNKNOWN / 非锁 fatal 判 FAIL /
+   真损坏；restic 侧的三档在 `test_restic_retention.sh` 第 7 段）/
    `test_restic_retention.sh`（restic 引擎侧：`-r` 在位 + `forget --prune` 真的回收字节 +
-   回收后 `restic check` 过 + rc=3 只告警 + rc=12 判败 + `backup.ps1` 同形）/
+   回收后 `restic check` 过 + rc=3 只告警 + rc=12 判败 + `backup.ps1` 同形 + A2a 完整性的
+   restic 三档：健康轮 checks=3 且节流生效 / pack 数据段翻坏只有 `--read-data` 看得见 / rc=11 记 UNKNOWN）/
    `test_month_jump.sh`（把时间推过一个月：两个 30 天窗口同夜重开 + 真实保留策略裁出的云端
    单向包含 + 报告晚一轮上云 + 轮转，四条低频路径的**组合面**）/
    `test_bsd_probe.sh`（零备份轮探针：把纯函数从生产文件里**切**出来对着 python3 现算的真相
@@ -437,8 +446,10 @@
    新探针红的时候不该把同一轮「保留策略修好了没」那条结论带走（runner 一轮一小时起，
    §3「步骤顺序就是优先级」）。（另一发：云端失败守卫的子进程特意用 `pwsh.exe`，
    就是为了不把「宿主 5.1」与「被测脚本」两件事混在一起——那条不变。）
-   ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④没有 A2a 完整性（restic `check --read-data`
-   同形）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
+   ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④~~没有 A2a 完整性~~ **10-02 接了 bash 侧**
+   （`backup.sh` 的 windows 分支登记 `类别:restic:路径` 并按引擎跑 `restic check --read-data`，
+   守卫 `test_restic_retention.sh` 第 7 段），**`backup.ps1` 那一份仍是同批欠账**（ps1 里连
+   `check` 都没出现过）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
    ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，两轮 CI 各抓到一条真缺陷**
    （`semantic.ps1` 的 `Prune-LocalTimeline`，四条口径与 `prune_local_timeline` 逐条对齐：第 4 层
    才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收）。

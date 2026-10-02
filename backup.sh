@@ -469,10 +469,11 @@ integrity_due() {
     (( now - last >= days * 86400 ))
 }
 
-# integrity_pairs 由 main 登记（元素 `类别:本地仓库路径`）。规矩与 repo_pairs 完全一样：
+# integrity_pairs 由 main 登记（元素 `类别:引擎:本地仓库路径`，引擎取 borg|restic）。
+# 规矩与 repo_pairs 完全一样：
 # 忘了登记＝这一类根本没跑，而整轮结论照样全绿（A6 第一版就是这么把缺陷藏过去的）。
 run_integrity_check() {
-    local pair cls repo rc out dur t0
+    local pair cls rest engine repo rc out dur t0 check_cmd
     INTEGRITY_REPORT="$BACKUP_BASE/timeline/INTEGRITY.txt"
     integrity_due || {
         info "[integrity] 未到校验窗口（${INTEGRITY_DAYS:-30} 天内已跑过，或 INTEGRITY_VERIFY=0），跳过"
@@ -480,27 +481,53 @@ run_integrity_check() {
     }
     INTEGRITY_LINES=()
     integrity_failed=0
+    # 报告落在时间轴根。borg 那一路由语义层建这个目录，restic 这一路（Windows 的 backup.sh）
+    # 不跑语义层——没人建它就写不出来，而「报告没落盘」在这一步的语义等于「这月的证据没了」
+    mkdir -p "$(dirname "$INTEGRITY_REPORT")" 2>/dev/null || true
     if [[ ${#integrity_pairs[@]} -eq 0 ]]; then
-        # restic 侧（Windows）没有接：backup.ps1 连自证层都还没有（AGENTS §6 的 Windows 欠账
-        # 同批）。这里**不写报告**——一份 checks=0 的「完整性通过」比没有更坏，它会被下一个人读成绿。
-        warn "[integrity] 本轮没有可校验的 borg 仓库（restic 侧尚未接入），未做存储完整性校验"
+        # 这里**不写报告**——一份 checks=0 的「完整性通过」比没有更坏，它会被下一个人读成绿
+        warn "[integrity] 本轮没有登记任何引擎仓库，未做存储完整性校验"
         INTEGRITY_REPORT=""
         return 0
     fi
     for pair in ${integrity_pairs[@]+"${integrity_pairs[@]}"}; do
         cls="${pair%%:*}"
-        repo="${pair#*:}"
-        [[ -d "$repo" ]] || { note_integrity "borg:$cls" "UNKNOWN" "本地仓库目录读不到，这一项没证成也没证败"; continue; }
+        rest="${pair#*:}"
+        engine="${rest%%:*}"
+        repo="${rest#*:}"
+        [[ -d "$repo" ]] || { note_integrity "${engine}:$cls" "UNKNOWN" "本地仓库目录读不到，这一项没证成也没证败"; continue; }
         t0="$(date +%s)"
         rc=0
-        out="$("$BORG" check --verify-data "$repo" 2>&1)" || rc=$?
+        if [[ "$engine" == restic ]]; then
+            # --read-data 才是「把整仓读一遍」：不带它时 restic check 只查快照/树/blob 的**结构**
+            # （它自己的帮助页：To also verify the integrity of the actual backed-up data, use
+            # the --read-data flag），与 borg 侧的 --verify-data 对位
+            out="$("$RESTIC" -r "$repo" check --read-data 2>&1)" || rc=$?
+            check_cmd="restic check --read-data"
+        else
+            out="$("$BORG" check --verify-data "$repo" 2>&1)" || rc=$?
+            check_cmd="borg check --verify-data"
+        fi
         dur=$(( $(date +%s) - t0 ))
         # 引擎原文只进本地日志（600、不上云）。明文报告一个字节都不抄：10-01 实测那类
         # 锁错误里带着**仓库绝对路径**，而这份文件随时间轴推上网盘。
         {
             printf '%s\n' "$out"
-            printf '[integrity] borg check --verify-data %s -> rc=%s (%ss)\n' "$cls" "$rc" "$dur"
+            printf '[integrity] %s %s -> rc=%s (%ss)\n' "$check_cmd" "$cls" "$rc" "$dur"
         } >>"$LOG"
+        if [[ "$engine" == restic ]]; then
+            # restic 的退出码**本来就分档**（引擎 EXIT STATUS：0 成功 / 1 有错 / 10 仓库不存在 /
+            # 11 已被锁 / 12 口令不对），所以这边不需要 borg 那套「读错误原文猜是不是锁」。
+            # 只有 11 记 UNKNOWN：并发的手工操作不该改变本轮结论；10/12 是真问题（仓库没了、
+            # 凭据不对），和「发现坏数据」一样按最坏情况判 FAIL
+            case "$rc" in
+                0) note_integrity "restic:$cls" "PASS" "${dur}s 逐包读取校验通过（存储没腐化）" ;;
+                11) note_integrity "restic:$cls" "UNKNOWN" "${dur}s 拿不到仓库锁（有别的 restic 在跑），这一项没证成也没证败" ;;
+                1) note_integrity "restic:$cls" "FAIL" "${dur}s 后 rc=1：逐包读取发现坏数据或结构不一致，详见 ${LOG}" ;;
+                *) note_integrity "restic:$cls" "FAIL" "${dur}s 后 rc=${rc}：非锁类失败（10 仓库不存在 / 12 口令不对），详见 ${LOG}" ;;
+            esac
+            continue
+        fi
         case "$rc" in
             0) note_integrity "borg:$cls" "PASS" "${dur}s 逐块解密校验通过（存储没腐化）" ;;
             1) note_integrity "borg:$cls" "FAIL" "${dur}s 后 rc=1：逐块校验发现坏数据，详见 ${LOG}" ;;
@@ -524,9 +551,11 @@ run_integrity_check() {
         printf '# 生成时间: %s   代码基: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${RUN_GIT_SHA}"
         printf '# 它证明的是「存着的字节没坏、还能解密解压缩」；「取回路径可用」由 rescue-test.txt\n'
         printf '#   那条恢复演练负责，两者不互相替代。\n'
-        printf '# 判据: rc=0 通过；rc=1 逐块校验发现坏数据＝FAIL（会告警）；rc>=2 是 borg 的\n'
-        printf '#   fatal/用法/拿不到锁共用档，其中明确报 Lock timeout 的记 UNKNOWN（并发手工\n'
-        printf '#   演练不该改变本轮结论），其余按最坏情况判 FAIL。\n'
+        printf '# 判据（borg check --verify-data）: rc=0 通过；rc=1 逐块校验发现坏数据＝FAIL（会告警）；\n'
+        printf '#   rc>=2 是 fatal/用法/拿不到锁共用档，其中明确报 Lock timeout 的记 UNKNOWN（并发\n'
+        printf '#   手工演练不该改变本轮结论），其余按最坏情况判 FAIL。\n'
+        printf '# 判据（restic check --read-data）: rc=0 通过；rc=11（引擎表里的「已被锁」）记 UNKNOWN；\n'
+        printf '#   rc=1 逐包读取发现坏数据，rc=10/12（仓库不存在/口令不对）与其余非零按最坏情况判 FAIL。\n'
         printf '# 引擎原文**不抄进本文件**：它是随时间轴上云的明文产物，而 borg 的错误行里会带\n'
         printf '#   仓库绝对路径。细节看本地日志（600、不上云）。\n'
         local line
@@ -794,6 +823,10 @@ main() {
             local repo_path="$BACKUP_BASE/restic-$cls"
             backup_restic_class "$cls" "$repo_path" "$archive_name" || { failed=$((failed+1)); continue; }
             repo_pairs+=("$cls:$repo_path")
+            # restic 侧的存储完整性从 10-02 起接入（`restic check --read-data`）：这一发原先
+            # 压着不动的理由是「CI 从不跑 restic，写上去就是永远不被执行的死代码」，现在
+            # test_restic_retention.sh 在 linux job 上跑真 restic，它有了被测来源
+            integrity_pairs+=("$cls:restic:$repo_path")
             if [[ "${SKIP_WEBDAV:-0}" != "1" ]]; then
                 local tgt
                 for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$repo_path" "${tgt}/${SYSTEM_ID}/${cls}"; done
@@ -803,7 +836,7 @@ main() {
             backup_borg_class "$cls" "$repo" "$archive_name" || { failed=$((failed+1)); continue; }
             sem_archives+=("$cls:$repo:$archive_name")
             repo_pairs+=("$cls:$repo")
-            integrity_pairs+=("$cls:$repo")
+            integrity_pairs+=("$cls:borg:$repo")
             if [[ "${SKIP_WEBDAV:-0}" != "1" ]]; then
                 local tgt
                 for tgt in "${BACKUP_TARGETS[@]}"; do sync_target "$repo" "${tgt}/${SYSTEM_ID}/${cls}"; done
@@ -857,7 +890,7 @@ main() {
     run_integrity_check || warn "[integrity] 存储完整性校验流程异常退出（少一份证据，不改备份结论）"
     if [[ $integrity_failed -gt 0 ]]; then
         error "=== 存储完整性校验 $integrity_failed 项失败——仓库里有解密/校验不过的数据（详见 ${LOG}） ==="
-        notify_alert "存储完整性校验失败 ${integrity_failed} 项（设备 ${DEVICE_ID}）：borg check --verify-data 在本地仓库发现坏数据。详见 ${LOG}"
+        notify_alert "存储完整性校验失败 ${integrity_failed} 项（设备 ${DEVICE_ID}）：整仓读取校验（borg check --verify-data / restic check --read-data）在本地仓库发现坏数据。详见 ${LOG}"
         exit 1
     fi
     success "=== Backup FULLY COMPLETE ($(date '+%Y-%m-%d %H:%M:%S')) ==="
