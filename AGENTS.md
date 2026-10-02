@@ -364,7 +364,17 @@
 
 1. ~~rescue 单文件脚本独立版~~ bash 版已完成：`rescue.sh`（08 章 T3.2，无 Python 依赖，
    两种目录布局 + 引擎自动判定 + age 双路径；`test_rescue_e2e.sh` 锁行为）。
-   **PowerShell 版 `rescue.ps1` 仍待做**——只在能挂上 CI 验证时写（本机无 pwsh）
+   **PowerShell 版 `rescue.ps1` 仍待做**——只在能挂上 CI 验证时写（本机无 pwsh）。
+   **10-02 起的 Windows 差距清单**（对着 `backup.sh` 逐条读出来的，T1.6 上真机前先补这几发）：
+   ①`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是**在 powershell.exe 5.1 下的未验证面**——
+   Task Scheduler 注册的正是 powershell.exe，而 5.1 里原生命令的 stderr 一旦重定向
+   （`restic … 2>&1 | Tee-Object`、`rclone mkdir … 2>$null`）会变成终止性异常，把成功的类别
+   记成失败；CI 的 windows job 跑的是 pwsh 7，所以这条永远不会在 CI 现形，**上真机前先手用
+   powershell.exe 跑一轮**（新 CI step 里子进程特意用 pwsh.exe，就是为了不把这两发混在一起）。
+   ②没有 A4 日志轮转/run 边界行、③没有 A6 云端自证、④没有 A2a 完整性（restic `check --read-data`
+   同形）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、
+   ⑥`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）、⑦`restic forget` 不带
+   `--prune`（仓库只 compact 不了）、⑧权限面靠 NTFS 继承，bash 侧那套整树归一化没有对应实现。
 2. ~~`bg drill` 独立 CLI 入口~~ 已完成：`drill.sh`（复用 `run_drill`，不复制判定逻辑）；
    顺带修掉演练结论误报——判定式 `grep 'RESULT: .*FAIL'` 会匹配汇总行的字面「0 FAIL」，
    全通过也报失败；30 天节流让这个 bug 在生产里从未露头（现由 `drill_has_failure` 只认

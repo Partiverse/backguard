@@ -574,11 +574,13 @@ jobs:
           $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
           $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
           $env:BACKUP_TARGETS = "nosuchremote:backguard-ci"
-          # 必须是**子进程**：PowerShell 里脚本内的 `exit` 会终结整个宿主会话，
-          # 用 & 直调产品脚本的话，产品一 exit 本 step 就跟着死——「判红」和「没断言」撞成
-          # 同一件事，正好把这条守卫自己变成假绿。powershell.exe 也与 Task Scheduler
-          # 注册的那发同解释器。
-          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
+          # 必须是**子进程**：PowerShell 里脚本内的 `exit` 会终结整个宿主会话，用 & 直调产品
+          # 脚本的话产品一 exit 本 step 就跟着死——「判红」与「没断言」撞成同一件事，正好把这条
+          # 守卫自己变成假绿。解释器用 pwsh.exe（与本 job 的 shell: pwsh 同一个），因为
+          # powershell.exe 5.1 在 $ErrorActionPreference=Stop 下会把原生命令的 stderr 重定向
+          # （restic … 2>&1 | Tee-Object、rclone mkdir … 2>$null）变成终止性异常——那是 #20
+          # 另记的一发未验证面，不该混进这条红线断言里。
+          $out = & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
           $code = $LASTEXITCODE
           $text = $out | Out-String
           $rlog = "$env:LOCALAPPDATA\PartiverseBackup\logs\rclone.log"
