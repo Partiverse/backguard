@@ -503,6 +503,34 @@ jobs:
           "RESTIC_PASSWORD='ci-$(-join ((1..24) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) }))'" |
             Out-File "$conf\secrets.env" -Encoding utf8
 
+      - name: Prepare age identity
+        shell: pwsh
+        run: |
+          # 与 linux/macos 那两步同一条理由（本文件 :110 / :335）：没有主身份时 seal_manifest
+          # 静默跳过、Invoke-Drill 直接 return Code 20「未执行」，于是 Windows 的演练这条生产面
+          # 等于从没在 CI 里跑过，修好了也没有断言。一次性密钥，仅存于 runner。
+          # recipients.txt 必须非空：`age -R` 对着空公钥文件会「成功」密封出一份谁也解不开的东西。
+          $ageDir = Join-Path $env:APPDATA "PartiverseBackup\age"
+          New-Item -ItemType Directory -Force -Path $ageDir | Out-Null
+          & age-keygen -o (Join-Path $ageDir "identity.txt") 2>$null
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::age-keygen failed"; throw "age-keygen rc=$LASTEXITCODE" }
+          $id = Get-Content (Join-Path $ageDir "identity.txt") |
+              Where-Object { $_ -match '^# public key: (age1[0-9a-z]*)$' } |
+              ForEach-Object { $Matches[1] }
+          if (-not $id) { Write-Host "::error::public key extraction failed"; throw "no age public key" }
+          [System.IO.File]::WriteAllText((Join-Path $ageDir "recipients.txt"), ($id + "`n"))
+          # 自证一句「身份真的解得开」：建件→解件，两端都过才继续（否则后面每一发红都是歧义的）
+          $probe = Join-Path $env:RUNNER_TEMP "age-probe.txt"
+          [System.IO.File]::WriteAllText($probe, "bg-age-probe")
+          & age -R (Join-Path $ageDir "recipients.txt") -o "$probe.enc" $probe
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::age encrypt failed"; throw "age -R rc=$LASTEXITCODE" }
+          & age -d -i (Join-Path $ageDir "identity.txt") -o "$probe.out" "$probe.enc"
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::age decrypt failed"; throw "age -d rc=$LASTEXITCODE" }
+          if (([System.IO.File]::ReadAllText("$probe.out")) -ne "bg-age-probe") {
+              Write-Host "::error::age roundtrip content mismatch"; throw "age roundtrip"
+          }
+          Write-Host "age identity ready at $ageDir"
+
       - name: Log rotation + run boundary logic
         # A4 的**逻辑**那一半：从 backup.ps1 里按哨兵标记原样切出 Rotate-LogFile /
         # Write-RunBoundary / Get-RunGitSha 跑一遍，几秒收敛。排在产品轮之前是故意的——
@@ -793,6 +821,58 @@ jobs:
           if (-not $manifest) { Write-Host "::error::timeline 无 MANIFEST.txt"; throw "no MANIFEST.txt" }
           Write-Host "--- $($manifest.FullName) ---"
           Get-Content $manifest.FullName
+
+      - name: Assert drill report wiring (A2b)
+        shell: pwsh
+        run: |
+          # 对位 linux/macos 的「Assert restore drill ran clean」（本文件 :151 / :374）。
+          # 为什么逻辑守卫（test_drill_e2e.ps1，90 条断言 15 刀）不够：它再厚也测不到
+          # 「产品轮真的调了 Invoke-Drill 并落了笔」——AGENTS §3 给 A2a 与权限面各补过一条
+          # 运行时接线断言，就是同一条理由。
+          # 判定顺序：先「产物在」→ 再「结论行成立」→ 最后「内容哈希这一维 n>0」。
+          # 反过来的话「演练整段没跑」「跑了但结论行没写成」「跑通但只比大小」会撞成同一句报错。
+          $root = Join-Path $env:RUNNER_TEMP "repos\timeline"
+          $rt = Join-Path $root "rescue-test.txt"
+          if (-not (Test-Path -LiteralPath $rt -PathType Leaf)) {
+              Write-Host "::error::no rescue-test.txt at timeline root (drill never ran, or its path moved)"
+              Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue |
+                  ForEach-Object { Write-Host "  $($_.Name)" }
+              throw "missing rescue-test.txt"
+          }
+          # 5.1 的 Get-Content 默认码页会把中文打成乱码，于是每一条中文断言恒假（AGENTS §2）
+          $rep = [System.IO.File]::ReadAllLines($rt, [System.Text.Encoding]::UTF8)
+          $failLines = @($rep | Where-Object { $_ -match '^FAIL ' -or $_ -match '^RESULT: FAIL' })
+          $results = @($rep | Where-Object { $_ -match '^RESULT: [0-9]+ PASS / [0-9]+ FAIL' })
+          Write-Host "--- report tail ---"
+          $rep | Select-Object -Last 12 | ForEach-Object { Write-Host $_ }
+          if ($failLines.Count -ne 0) {
+              Write-Host "::error::drill has failures: $($failLines -join ' | ')"
+              throw "drill failures"
+          }
+          if ($results.Count -ne 1) {
+              Write-Host "::error::expected exactly one RESULT line, found $($results.Count)"
+              throw "bad RESULT line count"
+          }
+          # 结论行形状（semantic.ps1:316）：
+          #   RESULT: <pass> PASS / <fail> FAIL（抽样 <s>；内容哈希 <h>，仅比大小 <n>）
+          # 取数字用 ASCII 正则而不是匹配中文标签：正文里的中文在 shell: powershell 那档会先过
+          # 控制台代码页（AGENTS §2），这一步只认顺序——五个数按 pass/fail/samples/hashed/sizeOnly 排。
+          $nums = @([regex]::Matches($results[0], '\d+') | ForEach-Object { [int]$_.Value })
+          if ($nums.Count -lt 5) {
+              Write-Host "::error::RESULT line carries $($nums.Count) numbers, expected 5 (pass/fail/samples/hashed/sizeOnly): $($results[0])"
+              throw "RESULT line shape changed"
+          }
+          if ($nums[0] -lt 1) { Write-Host "::error::zero PASS samples: $($results[0])"; throw "no PASS" }
+          if ($nums[1] -ne 0) { Write-Host "::error::FAIL count is $($nums[1]): $($results[0])"; throw "FAIL count nonzero" }
+          # 最后这一维才是 A2b 在 Windows 上的全部意义：只比大小的演练看不见「同长度不同内容」，
+          # 而容器 lane 恒证不到盘符路径那支（test_drill_e2e.ps1 头部登记的 m10 逃逸原因）。
+          # hashed==0 而 samples>0 意味着备份期那次 --hash-drill-samples 一个都没记上——
+          # 「记了没人用」在产物上长得跟「这层证据存在」一模一样，所以它值得单独判红。
+          if ($nums[3] -lt 1) {
+              Write-Host "::error::drill compared sizes only: hashed=$($nums[3]) of samples=$($nums[2]) (source sha256 never recorded)"
+              throw "content-hash dimension degenerated"
+          }
+          Write-Host "drill wiring OK: pass=$($nums[0]) hashed=$($nums[3]) sizeOnly=$($nums[4])"
 
       # 红线 §1.4 在 PowerShell 侧的同一条（bash 侧由 test_cloud_failure.sh 锁）：云端推送失败
       # 必须非零退出并告警，不得宣布 FULLY COMPLETE。整条 Windows 路径此前缺这一发——rclone
