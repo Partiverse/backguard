@@ -244,9 +244,19 @@
    `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）/
    `test_log_rotation.sh`（日志轮转 + run 边界行）/
    `test_cloud_verify.sh`（云端副本自证：单向包含 + config 内容哈希 + HEALED/UNKNOWN 分档）/
-   `test_integrity.sh`（存储完整性：窗口节流 + 锁 flake 记 UNKNOWN / 非锁 fatal 判 FAIL / 真损坏）。
-   十二套都已挂 CI
-   （linux job 全跑；macos job 跑 restore/cloud_failure/drill/rescue/init/log_rotation/cloud_verify/integrity），
+   `test_integrity.sh`（存储完整性：窗口节流 + 锁 flake 记 UNKNOWN / 非锁 fatal 判 FAIL / 真损坏）/
+   `test_month_jump.sh`（把时间推过一个月：两个 30 天窗口同夜重开 + 真实保留策略裁出的云端
+   单向包含 + 报告晚一轮上云 + 轮转，四条低频路径的**组合面**）/
+   `test_bsd_probe.sh`（零备份轮探针：把纯函数从生产文件里**切**出来对着 python3 现算的真相
+   断言——哈希轮流域 / 本地清单摘除与排序 / `rclone lsl` 含空格路径 / 目录级脱敏 / `date -r` /
+   演练 fail-closed）。
+   十四套都已挂 CI，**车道按实测墙钟分，不是按「谁新谁排前面」分**
+   （linux job 全跑，23 步 ≈5 分钟；macos job 只留 backup+三条 assert / restore / rescue /
+   init / log_rotation / bsd_probe，其余四套重夹具 integrity/cloud_verify/cloud_failure/drill
+   退回 linux-only）。缘故写在 docs/HANDOVER §11 的 10-02 午后块：免费 macos runner 上一个整轮
+   `backup.sh` 要 6–13 分钟（本机 9 秒），一个 step 里放六个整轮的 `test_integrity.sh`
+   正好撞满 step 级 `timeout-minutes: 40`，那一轮 macos 跑了 126 分钟仍红，而它后面三步
+   一秒没执行——**这条 runner 上没有一步是便宜的，重排清单救不了，只能分车道**。
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
@@ -256,12 +266,7 @@
    新增生产面脚本就把它加进上面的 shellcheck 清单与 CI；**写文档说「已挂 CI（linux + macos
    各一步）」之前必须 `grep -n <脚本名> .github/workflows/ci.yml` 核对**——10-01 那条就是这么
    写串的：macos 一步从没加过，而 HANDOVER 已经把它记成既成事实；
-   **但 grep 到 ≠ 跑过：免费 macOS runner 上被超时砍掉的永远是清单尾部，而尾部恰好是最新加的
-   守卫**。0b3518a 那轮实测（job 派工 → 1:40:19 被 100 分钟上限砍在「init 向导」）：backup 11m、
-   restore 13m、cloud_failure 30m、drill 28m、rescue 11m，而排在最后的 log_rotation/integrity/
-   cloud_verify 三步**一秒都没执行**。所以「E2E 步骤按什么顺序排」在这条 runner 上就是优先级
-   本身：便宜的、以及这一轮新加的覆盖放前面，30 分钟级的慢桩放最后（本轮已按这条重排，并把
-   预算抬到 180 = 已跑的 100 分钟 + 剩三步余量）。
+   **但 grep 到 ≠ 跑过：先读 `timeout-minutes` 和这一步里有几个整轮**。
    `test_portable_stat.sh` 的断言 4
    会扫全仓 `*.sh` 的变量紧贴非 ASCII——新脚本自动在守卫内，别指望只测本机。
    **改目录形状时 `.github/workflows/ci.yml` 里那些硬编码路径也是被测面**——本机 E2E
