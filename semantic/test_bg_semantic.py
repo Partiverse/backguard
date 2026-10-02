@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
 import json
 import sys
 import tempfile
@@ -472,6 +475,115 @@ class TestDrillSample(unittest.TestCase):
                 bg.main(["sample", "--manifest", str(m), "--count", "5", "--seed", seed])
             seen.add(buf.getvalue())
         self.assertEqual(len(seen), 2)  # 跨天轮换
+
+
+class TestDrillContentHash(unittest.TestCase):
+    """取回校验的「内容」这一维（research/11 A2b）：备份期给当晚抽中的样本记源文件
+    sha256，drill 才有比大小之外的依据。记不上就不记，绝不用 size 冒充内容一致。
+    """
+
+    @staticmethod
+    def _tree(root: Path, files: dict[str, bytes]) -> None:
+        """按归档内路径把源文件落地（size 用真实字节数，别拿字符数冒充）。"""
+        for rel, data in files.items():
+            p = Path(root, rel)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+
+    @staticmethod
+    def _sha(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def _doc(self, entries: list[dict], engine: str = "borg") -> dict:
+        return {"engine": engine,
+                "classes": {"files": {"entries": entries}}}
+
+    def _entries(self, files: dict[str, bytes]) -> list[dict]:
+        return [{"path": rel, "size": len(data), "mtime": 1700000000}
+                for rel, data in sorted(files.items())]
+
+    def test_hashed_set_equals_drill_sample_set(self):
+        """记哈希的样本必须正好是 drill 取回的那一批：两处共用同一个抽样函数。"""
+        root = Path(tempfile.mkdtemp())
+        files = {f"Users/x/Docs/f{i}.txt": f"内容{i}".encode() for i in range(12)}
+        self._tree(root, files)
+        doc = self._doc(self._entries(files))
+        n = bg.hash_drill_samples(doc, 5, bg.DRILL_HASH_MAX_BYTES, "2026-10-02", str(root))
+        self.assertEqual(n, 5)
+        picks = bg.select_drill_samples(doc["classes"], 5, "2026-10-02")
+        self.assertEqual(len(picks), 5)
+        for p in picks:
+            self.assertEqual(p["entry"].get("sha256"), self._sha(files[p["path"]]))
+
+    def test_hash_skips_oversize_missing_and_rewritten(self):
+        root = Path(tempfile.mkdtemp())
+        # 三种「不记」各有各的闸门，别互相顶掉：上一版把被改过的文件写成 999 B，
+        # 它先被超大规则拦下，尺寸校验整段摘掉测试照样绿（变异实验抓出来的）
+        self._tree(root, {"Users/x/big.bin": b"x" * 100,
+                          "Users/x/rewritten.txt": b"AAAABBB"})
+        entries = [
+            {"path": "Users/x/big.bin", "size": 100, "mtime": 1},      # 真实尺寸，但超过 max_bytes
+            {"path": "Users/x/gone.txt", "size": 3, "mtime": 1},       # 源文件已不在
+            {"path": "Users/x/rewritten.txt", "size": 4, "mtime": 1},  # 入库 4 B，之后被写成 7 B
+        ]
+        doc = self._doc(entries)
+        n = bg.hash_drill_samples(doc, 3, 50, "2026-10-02", str(root))
+        self.assertEqual(n, 0)  # 超大 / 读不到 / 尺寸不符，三种都不记
+        for e in doc["classes"]["files"]["entries"]:
+            self.assertNotIn("sha256", e)
+
+    def test_hash_skipped_for_non_borg_engine(self):
+        root = Path(tempfile.mkdtemp())
+        files = {"Users/x/a.txt": b"hello"}
+        self._tree(root, files)
+        doc = self._doc(self._entries(files), engine="restic")
+        self.assertEqual(
+            bg.hash_drill_samples(doc, 1, 1 << 20, "2026-10-02", str(root)), 0)
+
+    def test_sample_passes_sha_through_and_manifest_stays_clean(self):
+        root = Path(tempfile.mkdtemp())
+        files = {"Users/x/Docs/a.txt": b"alpha", "Users/x/Docs/b.txt": b"beta"}
+        self._tree(root, files)
+        doc = self._doc(self._entries(files))
+        bg.hash_drill_samples(doc, 2, bg.DRILL_HASH_MAX_BYTES, "2026-10-02", str(root))
+        mf = Path(root) / "manifest.json"
+        mf.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bg.main(["sample", "--manifest", str(mf), "--count", "2", "--seed", "2026-10-02"])
+        plan = json.loads(buf.getvalue())
+        self.assertEqual([s["sha256"] for s in plan["samples"]],
+                         [self._sha(files["Users/x/Docs/a.txt"]),
+                          self._sha(files["Users/x/Docs/b.txt"])])
+        # 哈希只进密封清单：明文产物（MANIFEST/STORY/…）一个字节都不带
+        hex_a = self._sha(files["Users/x/Docs/a.txt"])
+        run = {"engine": "borg", "time": "2026-10-02T02:34:00+08:00", "device": "d",
+               "classes": {"files": {"entries": [
+                   {"path": "Users/x/Docs/a.txt", "size": 5, "mtime": 1700000000,
+                    "sha256": hex_a}]}}}
+        for name, text in bg.render_snapshot(run).items():
+            self.assertNotIn(hex_a, text,
+                             f"{name} 泄露了内容哈希（它只该待在密封清单里）")
+
+    def test_hashing_does_not_pollute_run_json(self):
+        """哈希只写进密封清单那一份：run JSON 是明文层的输入，被回灌就等于把完整
+        路径+内容指纹一起留给下一个读它的人（而且 Entry(**e) 会因未知字段直接崩）。"""
+        root = Path(tempfile.mkdtemp())
+        files = {"Users/x/Docs/a.txt": b"alpha"}
+        self._tree(root, files)
+        run = {"engine": "borg", "time": "2026-10-02T02:34:00+08:00", "device": "d",
+               "classes": {"files": {"entries": [
+                   {"path": "Docs/a.txt", "raw": "Users/x/Docs/a.txt",
+                    "size": 5, "mtime": 1700000000}]}}}
+        doc = bg.build_manifest_doc(run)
+        self.assertEqual(bg.hash_drill_samples(
+            doc, 1, bg.DRILL_HASH_MAX_BYTES, "2026-10-02", str(root)), 1)
+        self.assertEqual(doc["classes"]["files"]["entries"][0]["sha256"],
+                         self._sha(files["Users/x/Docs/a.txt"]))
+        self.assertNotIn("sha256", run["classes"]["files"]["entries"][0])
+        # 密封清单里出现额外字段之后，明文层渲染仍不认它（red line §1.1）
+        for name, text in bg.render_snapshot(run).items():
+            self.assertNotIn(self._sha(files["Users/x/Docs/a.txt"]), text, name)
 
 
 class TestPreflight(unittest.TestCase):

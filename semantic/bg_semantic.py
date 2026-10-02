@@ -114,6 +114,16 @@ class Entry:
     raw: str | None = None  # 归档内原始路径（strip 前）——drill 取回用；明文层不消费
 
 
+ENTRY_FIELDS = ("path", "size", "mtime", "raw")
+
+
+def entry_from_dict(e: dict) -> Entry:
+    """清单条目 → Entry。JSON 侧可以往条目上加字段（raw、A2b 的 sha256），
+    渲染层只认这几样；写 `Entry(**e)` 等于规定「永远不许加字段」，一崩崩整层。
+    """
+    return Entry(**{k: v for k, v in e.items() if k in ENTRY_FIELDS})
+
+
 @dataclass
 class DiffResult:
     added: list[Entry] = field(default_factory=list)
@@ -733,13 +743,15 @@ rm recovery-identity.txt   # 用完即删
 # 密钥体系（双 X25519 recipient：主身份 + 恢复码包裹的救援身份）见 semantic.sh 注释。
 
 
-def build_manifest_json(run: dict) -> bytes:
-    """加密全量清单（明文形态由调用方密封）：完整文件名/路径只存在这里。"""
+def build_manifest_doc(run: dict) -> dict:
+    """加密全量清单的文档结构（明文形态由调用方密封）：完整文件名/路径只存在这里。"""
     classes = {}
     for cls, spec in run["classes"].items():
-        cur = list(spec.get("entries", []))
+        # 逐项复制：hash_drill_samples 要往条目里加 sha256，不能把哈希回灌进 run
+        cur = [dict(e) for e in spec.get("entries", [])]
         prev = spec.get("prev_entries", [])
-        d = diff_entries([Entry(**e) for e in cur], [Entry(**e) for e in prev])
+        d = diff_entries([entry_from_dict(e) for e in cur],
+                         [entry_from_dict(e) for e in prev])
         classes[cls] = {
             "entries": cur,
             "stats": {
@@ -748,7 +760,7 @@ def build_manifest_json(run: dict) -> bytes:
                 "removed": len(d.removed),
             },
         }
-    doc = {
+    return {
         "format": MANIFEST_FORMAT,
         "snapshot": {"id": run.get("snapshot_id"), "parent": run.get("parent_id"),
                      "time": run.get("time"), "parent_time": run.get("parent_time"),
@@ -758,7 +770,82 @@ def build_manifest_json(run: dict) -> bytes:
         "engine": run.get("engine"),
         "classes": classes,
     }
+
+
+def manifest_bytes(doc: dict) -> bytes:
+    """密封清单的字节形态。序列化口径只这一处：cmd_manifest 与 build_manifest_json
+    各写一份的话，改 indent 那天就会有两份长得不一样的清单。
+    """
     return json.dumps(doc, ensure_ascii=False, indent=1).encode("utf-8")
+
+
+def build_manifest_json(run: dict) -> bytes:
+    return manifest_bytes(build_manifest_doc(run))
+
+
+# 演练样本的内容哈希上限：超过它的文件不记哈希（drill 退回比 size 并如实标注依据）。
+DRILL_HASH_MAX_BYTES = 8 * 1024 * 1024
+
+
+def nonempty_entries(classes: dict) -> dict[str, list[dict]]:
+    """各类别里可抽的条目（零字节文件不入样，drill 取回它证明不了任何事）。"""
+    return {cls: [e for e in spec.get("entries", []) if e.get("size", 0) > 0]
+            for cls, spec in classes.items()}
+
+
+def select_drill_samples(classes: dict, count: int, seed: str) -> list[dict]:
+    """跨类别确定性抽样。cmd_sample 与备份期记哈希**共用这一个函数**——记哈希时抽的
+    样本必须和当晚 drill 实际取回的那一批完全一致，否则记了没人用、用的没记。
+    返回的条目带原 entry 引用，便于回写 sha256。
+    """
+    by_cls = nonempty_entries(classes)
+    rng = random.Random(f"bg-drill/{seed}")
+    n = max(count, len(by_cls) or 1)
+    picked: list[dict] = []
+    total = sum(len(v) for v in by_cls.values()) or 1
+    for cls in sorted(by_cls):
+        pool = sorted(by_cls[cls], key=lambda e: e["path"])  # 排序保证确定性
+        k = max(1, round(n * len(pool) / total))
+        for e in rng.sample(pool, min(k, len(pool))):
+            # path 用归档内原始路径（raw）——drill 要拿它向 borg 取回
+            picked.append({"class": cls, "path": e.get("raw") or e["path"], "entry": e})
+    picked.sort(key=lambda s: (s["class"], s["path"]))
+    return picked
+
+
+def hash_drill_samples(doc: dict, count: int, max_bytes: int, seed: str,
+                       root: str = "/") -> int:
+    """给「当晚 drill 会抽中的那批文件」读源文件 sha256 并写进密封清单（A2b）。
+
+    为什么只记样本、不给全部 ≤N MB 文件记：全量要把每个小文件在夜间多读一遍磁盘，
+    而取回校验永远只用得上抽中的那几个——成本落在样本数上，证据强度一点没少。
+    源路径就是归档内路径补上 root（borg create 吃的是绝对路径，剥掉的只是展示层前缀）。
+
+    记不上的就**不记**（不是记 0 也不是猜）：非 borg 引擎、超过 max_bytes、
+    源文件已不在、尺寸与归档不符（＝borg create 之后、密封之前被人改过，这是唯一
+    会让取回校验假报的窗口）。缺哈希的条目由 drill 退回比 size 并在结论里写明依据。
+    """
+    if doc.get("engine") != "borg":
+        return 0
+    hashed = 0
+    for pick in select_drill_samples(doc.get("classes", {}), count, seed):
+        entry = pick["entry"]
+        size = entry.get("size", 0)
+        if max_bytes and size > max_bytes:
+            continue
+        src = Path(root, pick["path"].lstrip("/"))
+        if not src.is_file() or src.stat().st_size != size:
+            continue
+        h = hashlib.sha256()
+        try:
+            with src.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            continue
+        entry["sha256"] = h.hexdigest()
+        hashed += 1
+    return hashed
 
 
 def load_exclusions(path: str | Path) -> list[dict]:
@@ -843,7 +930,17 @@ def load_exclusions_json_file(path: str) -> list[dict]:
 
 def cmd_manifest(args: argparse.Namespace) -> None:
     run = _load_run(Path(args.run))
-    sys.stdout.buffer.write(build_manifest_json(run))
+    doc = build_manifest_doc(run)
+    if args.hash_drill_samples:
+        seed = args.seed or datetime.now().date().isoformat()
+        picked = len(select_drill_samples(doc.get("classes", {}), args.sample_count, seed))
+        n = hash_drill_samples(doc, args.sample_count, args.hash_max_bytes, seed)
+        # 分母是「当晚实际抽中的个数」而不是传入的 count：count 是上限，抽到几个算几个。
+        # 0/N 是这层证据失效唯一的现场信号（源路径形态对不上时它就静默退化成只比大小），
+        # 所以这行必须留在备份日志里
+        print(f"[manifest] 演练样本内容哈希：{n}/{picked} 个已记入密封清单",
+              file=sys.stderr)
+    sys.stdout.buffer.write(manifest_bytes(doc))
 
 
 # ---------------------------------------------------------------- 预检（research/08 T2.2 / 02 §八.1）
@@ -983,25 +1080,21 @@ def cmd_preflight(args: argparse.Namespace) -> None:
 
 def cmd_sample(args: argparse.Namespace) -> None:
     manifest = json.loads(_read_text(Path(args.manifest)))
-    by_cls: dict[str, list[dict]] = {}
-    for cls, spec in manifest.get("classes", {}).items():
-        by_cls[cls] = [e for e in spec.get("entries", []) if e.get("size", 0) > 0]
-
+    classes = manifest.get("classes", {})
     # seed=当天日期：同一天演练抽同一组（可复现），跨天自然轮换防盲区
     seed = args.seed or datetime.now().date().isoformat()
-    rng = random.Random(f"bg-drill/{seed}")
-    n = max(args.count, len(by_cls) or 1)
-    picked: list[dict] = []
-    total = sum(len(v) for v in by_cls.values()) or 1
-    for cls in sorted(by_cls):
-        pool = sorted(by_cls[cls], key=lambda e: e["path"])  # 排序保证确定性
-        k = max(1, round(n * len(pool) / total))
-        for e in rng.sample(pool, min(k, len(pool))):
-            # path 用归档内原始路径（raw）——drill 要拿它向 borg 取回
-            picked.append({"class": cls, "path": e.get("raw") or e["path"],
-                           "size": e["size"], "mtime": e.get("mtime", 0)})
-    picked.sort(key=lambda e: (e["class"], e["path"]))
-    print(json.dumps({"date": seed, "samples": picked,
+    picks = select_drill_samples(classes, args.count, seed)
+    samples = []
+    for p in picks:
+        e = p["entry"]
+        s = {"class": p["class"], "path": p["path"],
+             "size": e["size"], "mtime": e.get("mtime", 0)}
+        # 清单记了哈希就带上：drill 据此比内容而不是比大小（A2b）
+        if e.get("sha256"):
+            s["sha256"] = e["sha256"]
+        samples.append(s)
+    total = sum(len(v) for v in nonempty_entries(classes).values()) or 1
+    print(json.dumps({"date": seed, "samples": samples,
                       "total_files": total}, ensure_ascii=False))
 
 
@@ -1022,8 +1115,8 @@ def compute_run(run: dict) -> dict:
     per_class_diff: dict[str, DiffResult] = {}
     per_class: dict[str, tuple[list[Entry], DiffResult]] = {}
     for cls, spec in run["classes"].items():
-        cur = [Entry(**e) for e in spec.get("entries", [])]
-        prev = [Entry(**e) for e in spec.get("prev_entries", [])]
+        cur = [entry_from_dict(e) for e in spec.get("entries", [])]
+        prev = [entry_from_dict(e) for e in spec.get("prev_entries", [])]
         d = diff_entries(cur, prev)
         per_class_diff[cls] = d
         per_class[cls] = (cur, d)
@@ -1341,6 +1434,13 @@ def main(argv: list[str] | None = None) -> None:
 
     p_man = sub.add_parser("manifest", help="输出明文全量清单 JSON（供 age 密封为 manifest.json.enc）")
     p_man.add_argument("--run", required=True)
+    p_man.add_argument("--hash-drill-samples", action="store_true",
+                       help="为「当晚 drill 会抽中的那批文件」读源文件 sha256 写进清单（只 borg 侧）")
+    p_man.add_argument("--sample-count", type=int, default=5,
+                       help="抽样数，必须与 drill 侧的 bg sample --count 一致，否则记了没人用")
+    p_man.add_argument("--hash-max-bytes", type=int, default=DRILL_HASH_MAX_BYTES,
+                       help="超过此尺寸的样本不记哈希（0＝不限），drill 对其退回比大小")
+    p_man.add_argument("--seed", help="抽样种子（默认当天日期，与 bg sample 同口径）")
     p_man.set_defaults(func=cmd_manifest)
 
     p_pf = sub.add_parser("preflight", help="备份前预检：占位文件 / .git 排除 / 磁盘 / 引擎 / 凭据链")

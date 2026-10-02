@@ -18,6 +18,21 @@ sem_keys_dir() { echo "${SEM_KEYS_DIR:-$CONF_DIR/age}"; }
 # （Linux 上排除规则变更检测长期失效就是这个原因）。一律走 POSIX：date -r / wc -c。
 file_mtime() { [[ -e "$1" ]] && date -r "$1" +%s 2>/dev/null || echo 0; }
 file_size()  { [[ -f "$1" ]] && wc -c < "$1" | tr -d '[:space:]' || echo -1; }
+# 内容哈希（A2b）：macOS 没有 sha256sum（那是 coreutils 的名字），Linux 上 shasum 不保证在
+# （CI 两边都要跑）。两个名字轮流域。算不出就返回非零，调用方把它写成 FAIL 并带上
+# 「算不出哈希」——演练这一侧的口径是「证明不了就不能算通过」（与 drill_has_failure
+# 「结论行缺失一律判失败」同一条），而不是悄悄退回比大小还标成已验过。
+file_sha256() {
+    [[ -f "$1" ]] || return 1
+    local h=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        h="$( { sha256sum < "$1" || true; } | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        h="$( { shasum -a 256 < "$1" || true; } | cut -d' ' -f1)"
+    fi
+    [[ -n "$h" ]] || return 1
+    printf '%s\n' "$h"
+}
 
 # age 解析：launchd 环境 PATH 无 /opt/homebrew/bin，command -v 扑空 → 密封被静默跳过
 find_age() {
@@ -53,7 +68,15 @@ seal_manifest() {
     [[ -n "$age_bin" ]] || { info "[semantic] 未安装 age，跳过 manifest.json.enc"; return 0; }
     local rec; rec="$(sem_keys_dir)/recipients.txt"
     [[ -f "$rec" ]] || { info "[semantic] 无 recipients.txt（先 init_sem_keys），跳过密封"; return 0; }
-    if semantic_bg manifest --run "$run_file" 2>>"$LOG" | \
+    # A2b：把「当晚 drill 会抽中的那几个文件」的源内容哈希记进密封清单。
+    # 抽样口径两侧必须逐字一致（同一个 count、都默认「当天」种子）——记了没人用、
+    # 用的没记，就等于这层证据从来没存在过，而报告上看着是「有 sha256 字段」的。
+    local -a hash_args=()
+    if [[ "${SEM_DRILL:-1}" == "1" ]]; then
+        hash_args=(--hash-drill-samples --sample-count "${SEM_DRILL_COUNT:-5}"
+                   --hash-max-bytes "${SEM_DRILL_HASH_MAX_BYTES:-8388608}")
+    fi
+    if semantic_bg manifest --run "$run_file" ${hash_args[@]+"${hash_args[@]}"} 2>>"$LOG" | \
         "$age_bin" -R "$rec" -o "$snapshot_dir/manifest.json.enc"; then
         info "[semantic] manifest.json.enc 已密封（双恢复路径）"
     else
@@ -370,7 +393,7 @@ run_drill() {
     local pass=0 failn=0
     {
         echo "# 恢复演练 rescue-test — $(date -Iseconds)"
-        echo "# 方式: 主身份解封 + 仓库实取 + 大小校验（救援路径季度人工演练）"
+        echo "# 方式: 主身份解封 + 仓库实取 + 内容比对（备份期记下的源 sha256；没记的退回比大小，逐条标注依据）"
         if ! "$age_bin" -d -i "$ident" -o "$tmp/manifest.json" "$sdir/manifest.json.enc" 2>/dev/null; then
             echo "RESULT: FAIL（manifest 解封失败）"
         else
@@ -379,12 +402,15 @@ run_drill() {
             semantic_bg sample --manifest "$tmp/manifest.json" --count "${SEM_DRILL_COUNT:-5}" \
                 > "$tmp/plan.json" 2>/dev/null
             local n; n="$(python3 -c "import json,sys;print(len(json.load(open('$tmp/plan.json'))['samples']))" 2>/dev/null || echo 0)"
-            local i=0
+            local i=0 hashn=0 sizeonly=0
             while (( i < n )); do
-                local path size got cls
+                local path size got cls want_sha
                 path="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['path'])")"
                 size="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['size'])")"
                 cls="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i]['class'])")"
+                # 清单记了内容哈希就比内容（A2b）。只比 size 的取证面窄到足以让「取回了
+                # 另一个同尺寸文件」蒙混过关——10-01 那个跨类别错配的 bug 正长这个形状。
+                want_sha="$(python3 -c "import json;print(json.load(open('$tmp/plan.json'))['samples'][$i].get('sha256',''))")"
                 # 样本类别 → 本轮该类的「仓库::归档」。items 形如 cls:repo:arc，
                 # 首尾字段各取一次，中间整段是仓库路径
                 local dr_item dr_rest d_repo="" d_arc=""
@@ -403,14 +429,28 @@ run_drill() {
                 if [[ -z "$d_repo" ]]; then
                     echo "FAIL [$cls] ${path}（本轮没有 ${cls} 类的归档，无从取回）"
                     failn=$((failn+1))
-                elif [[ -n "${got:-}" && "$(file_size "${got:-}")" == "$size" ]]; then
-                    echo "PASS [$cls] $path ($size B)"; pass=$((pass+1))
+                elif [[ -z "${got:-}" || "$(file_size "${got:-}")" != "$size" ]]; then
+                    echo "FAIL [$cls] ${path}（取回失败或大小不符）"
+                    failn=$((failn+1))
+                elif [[ -z "$want_sha" ]]; then
+                    # 清单没记哈希（样本之外的大文件、或抽完之后才被换掉的）：如实写明
+                    # 这一条只证到了大小——不标注，读报告的人会把「7 PASS」当成「取回内容对」
+                    echo "PASS [$cls] $path ($size B, 仅比大小：清单未记内容哈希)"
+                    sizeonly=$((sizeonly+1)); pass=$((pass+1))
                 else
-                    echo "FAIL [$cls] ${path}（取回或大小不符）"; failn=$((failn+1))
+                    local got_sha; got_sha="$(file_sha256 "${got:-}" || true)"
+                    if [[ -n "$got_sha" && "$got_sha" == "$want_sha" ]]; then
+                        echo "PASS [$cls] $path ($size B, 内容哈希一致)"
+                        hashn=$((hashn+1)); pass=$((pass+1))
+                    else
+                        # 大小相同而内容不同＝取回的不是那个文件（或归档里那份已不是当时那份）
+                        echo "FAIL [$cls] ${path}（内容哈希不符：清单 ${want_sha} ≠ 取回 ${got_sha:-算不出哈希}；大小倒是一致（${size} B）——只比大小看不见这一类）"
+                        failn=$((failn+1))
+                    fi
                 fi
                 i=$((i+1))
             done
-            echo "RESULT: $pass PASS / $failn FAIL（抽样 ${n}）"
+            echo "RESULT: $pass PASS / $failn FAIL（抽样 ${n}；内容哈希 ${hashn}，仅比大小 ${sizeonly}）"
         fi
     } > "$rt" 2>/dev/null
     rm -rf "$tmp"

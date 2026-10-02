@@ -164,6 +164,27 @@
   低频路径的节流本身要被测，否则「月度」只是文档里的形容词。`INTEGRITY_DAYS=0` 是人工立刻跑的入口；
   没登记任何仓库时**不写报告**（一份 checks=0 的「完整性通过」比没有更坏）。守卫 `test_integrity.sh`
   （linux + macos 双 CI；restic 侧未接入，与 `backup.ps1` 的自证同批欠账）。
+- **恢复演练按内容校验（roadmap A2b，10-02 落地）**：旧口径取回后**只比 size**，「同长度不同
+  内容」永远 PASS——它是「rclone 只比大小」那一课在取回侧的镜像，也是 10-01 跨类别错配（取回
+  了错仓库的文件）能被放过去的缘故。现在备份期 `seal_manifest` 给**当晚抽中的那几条**样本记
+  源文件 sha256（`bg manifest --hash-drill-samples`），演练期比内容；结果逐条标注依据
+  （`(内容哈希一致)` / `(仅比大小：清单未记内容哈希)`），汇总行带两类的计数。**三条口径规矩**：
+  ①只记样本、不给全量文件算哈希（否则每晚多读一遍盘，取证却只用于 5 个文件——成本理由要写进
+  注释）；②哈希记在**备份期的源文件**上，不记在演练期（30 天后源早变了＝假失败）也不记在归档里
+  （取回时组装一致照样遮得住）；记之前必须验「存在＋是普通文件＋尺寸与归档条目一致」，
+  任一条不满足就**不记**（宁缺毋滥，绝不拿 size 冒充内容）；③**记哈希的抽样与 drill 的抽样
+  必须共用 `select_drill_samples`**（同 count 同种子），两处各算各的就是「记了没人用」，
+  而 stderr 那行 `[manifest] 演练样本内容哈希：n/picked` 是唯一的现场信号，`0/N` 意味着这层
+  证据整段退化（分母是当晚**实际抽中**的条数，count 只是上限，写 `0/99` 等于没信息）。
+  `sha256` 只进**密封**清单（和演练期解封的临时件），run.json 与一切明文产物不许出现它
+  （`hash_drill_samples` 先 `dict(e)` 逐项复制，回灌进 run 就是漏；`MANIFEST_FORMAT` 保持
+  `backguard/manifest/1`，rescue.sh 逐字比对，它的 awk 状态机忽略未知键所以向后兼容）。
+  **夹具的两处死法**（都实测踩过）：`borg create` 必须用**绝对路径** include——相对 include
+  让归档路径变成 `src/…`，`/ + raw` 指向不存在的位置，记哈希静默记成 0 条而全链路仍全绿；
+  `BG` 要指 `semantic/bg.pyz`（可执行入口），直跑 `bg_semantic.py` 在 `semantic_bg()` 里
+  Permission denied。守卫 `test_drill_e2e.sh`（调**生产** `seal_manifest` 而非夹具自拼参数，
+  否则「生产与 drill 口径不一致」这一类测不到；断言 6 把 note.txt 的哈希换成等长另一段内容，
+  要求判红 + 恰好 1 条 FAIL + 报错写明「大小倒是一致」）与 `test_bg_semantic.py::TestDrillContentHash`。
 - **age 密封**：age 只读 /dev/tty 不吃管道——密钥初始化必须 expect 驱动
   （`init-keys.exp`）；passphrase stanza 独占，双恢复路径用双 X25519 recipient 实现。
 - **权限面**：备份产物没有任何需要同机可读的东西——入口脚本（`backup.sh` / `init.sh` /
@@ -213,13 +234,13 @@
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（51 项全绿，
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（56 项全绿，
    3.9/3.14 双版本已验证）→ `shellcheck -S warning backup.sh restore.sh
    semantic/semantic.sh drill.sh rescue.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
    `test_portable_stat.sh`（GNU/BSD 文件属性）/ `test_cloud_copy_only.sh`（云端只增不减红线）/
-   `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报）/
+   `test_drill_e2e.sh`（演练独立入口 + 结论判定不误报 + 内容哈希这一维）/
    `test_rescue_e2e.sh`（逃生恢复：两种布局 + borg/restic 搜取 + age 双路径）/
    `test_log_rotation.sh`（日志轮转 + run 边界行）/
    `test_cloud_verify.sh`（云端副本自证：单向包含 + config 内容哈希 + HEALED/UNKNOWN 分档）/
@@ -268,6 +289,15 @@
    §4/§5a/§7 的注释记着这条规矩）。同理，**新增一类校验对象要先确认它真进了清单**：自证第一版
    borg 分支漏登记 `repo_pairs`，三类仓库根本没被校验，而 E2E 全绿——是报告头部的
    `checks=2` 暴露的，所以**汇总计数行值得单独断言**，别只看「有没有 FAIL」。
+   **变异报「没咬住」有三种成因，别一律当成实现的问题**：①断言被冗余实现救场（上面那条）；
+   ②**断言自己是死的**——10-02 的 m04：夹具取证据计数写成了
+   `basis="$(grep -o '内容哈希 [0-9]*，仅比大小 [0-9]*' "$RT" | head -1)"`，「无命中」正是这条断言
+   要抓的情形，而 grep 的 rc=1 在 `set -euo pipefail` 下让夹具在那一行就退出，后面的
+   `[[ -n "$basis" ]] || fail` 永远轮不到；改成 `{ grep … || true; } | head -1` 之后当场咬住。
+   推论：**`X="$(grep …)"` 里「空结果」是被测情形时必须显式中和退出码**，否则它是一条死断言，
+   而它的死法与「变异没落上」长得一模一样；③同一组用例里多条跳过/失败理由**互相顶掉**——
+   A2b 的单测把「超大 / 缺失 / 被改过」三条写成 size=999，999 先被超大规则拦下，摘掉尺寸闸门
+   仍全绿；要写成每条理由各自的数值都过得了别的闸门。
 2. 提交信息：中文 conventional commits，`feat(scope): 描述` / `fix(scope): 描述`（看 git log）。
 3. push 前自查新增代码注入面（变量子进程、eval、递归删除命令作用于变量路径——删除前
    必须有白名单守卫并按行读入，如 `prune_local_timeline` 的 `^[0-9]{4}-[a-z0-9-]+$`、

@@ -153,8 +153,9 @@ backup/
 | `SEM_PREFLIGHT` | 设 `0` 关闭备份前预检（默认开；预检 error 中止备份，warning 继续并留日志） |
 | `SEM_TIMELINE_KEEP` | 本地 timeline 暂存保留最近 N 份快照（默认 14，`0`=不清理；云端全量历史不受影响） |
 | `SEM_RUN_JSON_KEEP` | 本地 `runs/run-*.json` 保留最近 N 份（默认 60）。这些是渲染前的**全量文件名清单**（真机单个约 20 MB），也是唯一未密封的名单副本，嫌盘上留太多就调小 |
-| `SEM_DRILL` | 设 `0` 关闭夜间恢复演练（默认开；结论写在 `<设备>/rescue-test.txt`，30 天节流） |
+| `SEM_DRILL` | 设 `0` 关闭夜间恢复演练（默认开；结论写在 `timeline/rescue-test.txt`，只留本地不上云，30 天节流） |
 | `SEM_DRILL_COUNT` | 每轮演练的抽样条数（默认 5；`test_drill_e2e.sh` 拉满以求确定性） |
+| `SEM_DRILL_HASH_MAX_BYTES` | 演练样本记内容哈希的尺寸上限（默认 8 MiB）。备份期只给**当晚抽中的那几条**源文件算 sha256 并密封进清单，演练时按内容比对；超过上限或源文件已变动的退回比大小，并在报告里逐条标注依据（`(内容哈希一致)` / `(仅比大小：清单未记内容哈希)`）。调大 = 每晚多读磁盘换更宽的内容取证，调小 = 反之 |
 | `SEM_CLOUD_VERIFY` | 设 `0` 关闭每轮的**云端副本自证**（默认开）。推送全报成功后，再按「本地对象是否都在云端且尺寸一致 + 仓库 `config` 内容哈希」复核一次，结论写 `timeline/CLOUD-VERIFY.txt`。存在的理由：某些网盘（WebDAV）上 rclone 的比较退化成只比大小，原地同长度重写永远推不上云而 copy 照样退出 0——`rclone 没报错` 不等于 `云端有新版` |
 | `INTEGRITY_VERIFY` | 设 `0` 关闭**存储完整性校验**（默认开，按月）。对每个引擎仓库跑一次 `borg check --verify-data`（整仓逐块解密校验），结论写 `timeline/INTEGRITY.txt`。存在的理由：仓库里的字节腐化**不会**让 `borg create` 失败，也不影响恢复演练取回的那几个文件——不主动整仓读一遍就永远不会发现 |
 | `INTEGRITY_DAYS` | 存储完整性校验的窗口天数（默认 30；`INTEGRITY_DAYS=0` 是「现在立刻跑一遍」的人工入口） |

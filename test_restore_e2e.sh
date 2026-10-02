@@ -99,7 +99,13 @@ source "$CONF/config.sh"
 SCRIPT_DIR="$V0_DIR"
 LOG_DIR="$T/logs"
 LOG="$T/logs/sem.log"
-generate_semantic "config:$REPO:$newest" >"$T/gen.log" 2>&1 \
+# SEM_TIME 必须写死：generate_semantic 不传 --time 时用**真实现在**，快照就落在
+# `<今天>/<现在HHMM>-<时段>`。断言 7 要验的是「时间轴上上一份快照」取自目录名，而它
+# 按 `sort | tail -1` 挑最后一份——只要今天恰好就是那天的日期（10-01 写这条时种子是
+# 2026-10-02，一切正常；到 10-02 当天，这两发没写时间的快照就排到了种子目录**后面**，
+# 于是「上一次备份」变成跑测试的那一刻，断言当场红）。CI runner 同理：它红不红取决于
+# 派工时刻，这种「按日期腐化」的夹具等于给未来埋雷。
+SEM_TIME="2026-09-30T09:48:00" generate_semantic "config:$REPO:$newest" >"$T/gen.log" 2>&1 \
     || fail "断言 6 前置：generate_semantic 失败：$(tail -5 "$T/gen.log")"
 sdir_all="$(find "$BASE/timeline" -mindepth 4 -maxdepth 4 -type d)"
 [ -n "$sdir_all" ] || fail "断言 6：没生成深度 4 的快照目录"
@@ -136,7 +142,7 @@ bash "$T/guide.sh" >"$T/guide.log" 2>&1 || fail "断言 6b：照抄 restore.md �
 # 它不是 return，`backup.sh` 那句 `|| warn` 根本兜不住，整轮备份当场退出且无一条错误消息。
 ( set -e
   unset BORG_EXCLUDES_files
-  SEM_LABEL=partial generate_semantic "config:$REPO:$newest" >"$T/gen2.log" 2>&1 ) \
+  SEM_TIME="2026-10-01T08:00:00" SEM_LABEL=partial generate_semantic "config:$REPO:$newest" >"$T/gen2.log" 2>&1 ) \
     || fail "断言 6c：缺 BORG_EXCLUDES_files 时语义层终止了备份（应只跳过该类别的排除清单）：$(tail -3 "$T/gen2.log")"
 find "$BASE/timeline" -maxdepth 4 -type d -name '*-partial' | grep -q . \
     || fail "断言 6c：降级后仍应产出快照（partial 标签目录不存在）"

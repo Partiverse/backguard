@@ -2,7 +2,7 @@
 # E2E：drill.sh 独立恢复演练入口（隔离 HOME/CONF/仓库/age 密钥，不碰真实配置、不触网）。
 # 覆盖：无身份时的失败可见 → 主身份 + 真实 age 密封 + 真实 borg 取回 → 30 天节流。
 # 链路刻意用真实产物形态：清单由 bg convert 从 borg list --json-lines 生成，
-# 再由 age -R 密封——和 seal_manifest 走的是同一条路，夹具造假会掩盖真问题。
+# 密封直接调语义层的 seal_manifest（照抄它的参数等于给生产留了一处没人看的漂移面）。
 # 用法: ./test_drill_e2e.sh   （需 bash 5、borg、age）
 set -euo pipefail
 V0_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -63,15 +63,21 @@ head -c 2048 /dev/urandom > "$T/src/system-meta/meta.bin"
 bpb init --encryption=repokey "$REPO" >/dev/null 2>&1 || fail "borg init 失败"
 bpb init --encryption=repokey "$REPO_CONFIG" >/dev/null 2>&1 || fail "borg init（config）失败"
 bpb init --encryption=repokey "$REPO_SYSTEM" >/dev/null 2>&1 || fail "borg init（system）失败"
-(cd "$T" && bpb create "$REPO::$DEV-files-20260930-023400" src/Documents src/Pictures >/dev/null 2>&1) \
+# 与生产同形：include 用**绝对路径**（config.sh 的 BORG_INCLUDES_* 就是绝对的），
+# 归档内路径因此是「剥掉前导 / 的绝对路径」——A2b 记源哈希靠的就是这个形态
+# （/ + 归档路径 = 源文件）。夹具当初写相对路径，同一形状下记不到任何哈希，
+# 而报告上看着只是「今天全部退回比大小」，谁都看不出证据面缩了一维。
+(cd "$T" && bpb create "$REPO::$DEV-files-20260930-023400" "$T/src/Documents" "$T/src/Pictures" >/dev/null 2>&1) \
     || fail "borg create 失败"
-(cd "$T" && bpb create "$REPO_CONFIG::$DEV-config-20260930-023400" src/config >/dev/null 2>&1) \
+(cd "$T" && bpb create "$REPO_CONFIG::$DEV-config-20260930-023400" "$T/src/config" >/dev/null 2>&1) \
     || fail "borg create（config）失败"
-(cd "$T" && bpb create "$REPO_SYSTEM::$DEV-system-20260930-023400" src/system-meta >/dev/null 2>&1) \
+(cd "$T" && bpb create "$REPO_SYSTEM::$DEV-system-20260930-023400" "$T/src/system-meta" >/dev/null 2>&1) \
     || fail "borg create（system）失败"
 
-# 密封清单（走 semantic.sh seal_manifest 的同一形态：convert → manifest → age -R）
-BG="$V0_DIR/semantic/bg_semantic.py"
+# 清单：bg convert 从 borg list --json-lines 生成 run.json（密封见下面 seal_manifest）
+# 指到 bg.pyz——生产 semantic_bg 优先跑的就是它（zipapp 产物、可执行），且 CI 有
+# 「pyz 与源不同步就报错」那一步；指到 .py 反而测的是生产不走的那个入口
+BG="$V0_DIR/semantic/bg.pyz"
 bpb list --json-lines "$REPO::$DEV-files-20260930-023400" > "$T/files.jsonl" \
     || fail "borg list --json-lines 失败"
 bpb list --json-lines "$REPO_CONFIG::$DEV-config-20260930-023400" > "$T/config.jsonl" \
@@ -83,8 +89,21 @@ python3 "$BG" convert --engine borg \
     --auto-strip \
     --device "$DEV" --time "2026-09-30T09:48:20" --label morning \
     --out "$T/run.json" >/dev/null || fail "bg convert 失败"
-python3 "$BG" manifest --run "$T/run.json" | age -R "$KEYS/recipients.txt" -o "$SNAP/manifest.json.enc" \
-    || fail "age 密封失败"
+# 密封走**生产那一段 seal_manifest**（不是照抄它的参数）：记哈希的 count/max-bytes
+# 由生产读的同一组环境变量决定。夹具自己拼参数的话，「生产 seal 与 drill 抽样口径不一致」
+# 这一整类缺陷就永远测不到——而那正是这层证据唯一的失效方式（记了没人用）。
+log(){ :; }; info(){ :; }; warn(){ echo "[seal-warn] $*"; }; error(){ echo "[seal-err] $*" >&2; }; success(){ :; }
+SCRIPT_DIR="$V0_DIR"
+CONF_DIR="$CONF"
+LOG="$T/sem.log"
+source "$V0_DIR/semantic/semantic.sh"
+declare -F seal_manifest >/dev/null || fail "semantic.sh 没有 seal_manifest（密封退回夹具自拼参数了）"
+SEM_KEYS_DIR="$KEYS" SEM_DRILL_COUNT=99 SEM_DRILL_HASH_MAX_BYTES=2048 \
+    seal_manifest "$T/run.json" "$SNAP" || fail "seal_manifest 失败"
+[[ -s "$SNAP/manifest.json.enc" ]] || fail "seal_manifest 没产出 manifest.json.enc"
+# 生产的密封必须真的带上记哈希那组参数：日志里那句「N/M 个已记入」是唯一的现场证据
+grep -qE '演练样本内容哈希：[1-9][0-9]*/' "$T/sem.log" \
+    || fail "生产 seal_manifest 没记下任何源哈希（备份日志里那行是 0/…）：$(cat "$T/sem.log")"
 # 明文层不该有清单落进快照目录（隐私红线：完整文件名只进密文账本）
 [[ ! -e "$SNAP/manifest.json" ]] || fail "快照目录残留未密封 manifest.json"
 
@@ -139,6 +158,26 @@ done
 grep -q "^PASS \[config\] .*app.pref" "$RT" \
     || fail "config 的 app.pref 未经由 config 仓库取回：$(cat "$RT")"
 
+# 断言 2.5（A2b）：取回校验现在有「内容」这一维，且**依据逐条写明**。
+# 这三条合起来才咬得住「记了没人用／用的没记」：只测「有 PASS」的话，实现整段退回
+# 只比大小照样全绿（10-01 的跨类别错配就是这么藏过去的）
+grep -q "内容哈希一致)" "$RT" \
+    || fail "清单记了源哈希、drill 却没有一条按内容比对——两处抽样口径已经不一致：$(cat "$RT")"
+grep -qE "^PASS .*photo\.bin \(.*仅比大小：清单未记内容哈希\)" "$RT" \
+    || fail "超过 --hash-max-bytes 的样本没退回比大小、或退回了却没标注依据：$(cat "$RT")"
+# 取依据计数：grep 无命中是**允许的**（这正是这条断言要抓的情况），所以用 `|| true` 中和
+# pipefail——写成 `basis="$(grep -o … | head -1)"` 时 grep 的 rc=1 会整条炸掉 set -e 的夹具，
+# 于是这条断言永远轮不到说话（变异 m04 第一次就是这么「没咬住」的，实际是断言自己先死）。
+basis="$( { grep -o '内容哈希 [0-9]*，仅比大小 [0-9]*' "$RT" || true; } | head -1)"
+[[ -n "$basis" ]] || fail "RESULT 行没交代取证依据的构成：$(cat "$RT")"
+hn="$(printf '%s' "$basis" | sed -n 's/.*内容哈希 \([0-9]*\).*/\1/p')"
+sn="$(printf '%s' "$basis" | sed -n 's/.*仅比大小 \([0-9]*\)/\1/p')"
+# 每条 PASS 要么比了内容、要么如实标注只比了大小：两者之和必须等于 PASS 数
+[[ $((hn + sn)) -eq "$n" ]] \
+    || fail "PASS ${n} 条里内容哈希 ${hn} + 仅比大小 ${sn} 对不上账（有条目的依据没被写进报告）：$(cat "$RT")"
+[[ "$hn" -gt 0 && "$sn" -gt 0 ]] \
+    || fail "两种依据至少要各自走到过一次（哈希 ${hn}、比大小 ${sn}），否则那条分支等于没测"
+
 # 断言 3：不带 --force 时 30 天节流生效（上一步刚写过 rescue-test.txt，不应重写）
 before="$(md5 -q "$RT" 2>/dev/null || cksum "$RT" | tr -d ' ')"
 out="$(run_drill_sh 2>&1)" || fail "节流路径退出非零：$out"
@@ -160,10 +199,47 @@ out="$(run_drill_sh --snapshot "$BASE/timeline/1999/01/01/0000-night" 2>&1)" \
     && fail "不存在的快照目录却成功了"
 printf '%s' "$out" | grep -q "快照目录不存在" || fail "快照不存在的报错不具体：$out"
 
+# 断言 6（A2b 的靶心）：**同长度、不同内容**必须判红。
+# 做法是把清单里 note.txt 那条的 sha256 换成「另一段等长内容」的哈希，size 字段不动——
+# 只比 size 的旧实现在这种清单上会 7 条全 PASS。这正是 rclone「只比大小」那一课
+# 在取回这一侧的镜像：尺寸相同不等于内容相同。
+# 取生产刚密封的那份（不另拼一遍参数：拼第二遍就和生产不是同一份东西了），只改一个哈希
+age -d -i "$KEYS/identity.txt" -o "$T/manifest.plain" "$SNAP/manifest.json.enc" \
+    || fail "解封生产清单失败"
+python3 - "$T/manifest.plain" <<'PY' || fail "改造清单失败（没找到带哈希的 note.txt 条目）"
+import hashlib, json, sys
+p = sys.argv[1]
+doc = json.load(open(p))
+hit = 0
+for spec in doc["classes"].values():
+    for e in spec["entries"]:
+        if e["path"].endswith("note.txt") and e.get("sha256"):
+            # "note-v1\n" 与归档里的 "note-v2\n" 等长而不同内容
+            e["sha256"] = hashlib.sha256(b"note-v1\n").hexdigest()
+            hit += 1
+assert hit == 1, "带哈希的 note.txt 条目数=%d（应为 1）——前面记哈希那步没落地" % hit
+json.dump(doc, open(p, "w"), ensure_ascii=False)
+PY
+SNAP_BAD="$BASE/timeline/2026/09/30/0949-badhash"
+mkdir -p "$SNAP_BAD"
+age -R "$KEYS/recipients.txt" -o "$SNAP_BAD/manifest.json.enc" < "$T/manifest.plain" \
+    || fail "坏清单密封失败"
+out="$(run_drill_sh --snapshot "$SNAP_BAD" --force 2>&1)" \
+    && fail "内容哈希不符却退出 0（这层校验等于没生效）：$out"
+grep -qE "^FAIL .*note\.txt（内容哈希不符" "$RT" \
+    || fail "同长度不同内容没被判红：$(cat "$RT")"
+grep -qE "^RESULT: 6 PASS / 1 FAIL（抽样 7；内容哈希 [0-9]+，仅比大小 [0-9]+）" "$RT" \
+    || fail "判红后其余样本的结论不该被牵连（应恰好 1 条失败）：$(cat "$RT")"
+if grep -q "^PASS .*note\.txt" "$RT"; then
+    fail "note.txt 既被判红又有一条 PASS（逐条判定串了行）：$(cat "$RT")"
+fi
+# 「大小倒是一致」必须写进报错：读的人要立刻知道老口径为什么没抓到它
+grep -q "大小倒是一致（8 B）" "$RT" \
+    || fail "内容哈希不符的报错没交代尺寸其实一致（看不出这是只比大小看不见的那一类）：$(cat "$RT")"
+
 # 断言 5：结论判定函数本身——历史判定式 grep 'RESULT: .*FAIL' 会匹配到汇总行里的
 # 「0 FAIL」，全通过也报失败；30 天节流让这个假告警一直没在生产上露头
-log(){ :; }; info(){ :; }; warn(){ :; }; error(){ :; }; success(){ :; }
-source "$V0_DIR/semantic/semantic.sh"
+# （semantic.sh 与那几个桩函数在密封那一步之前已经 source 过）
 declare -F drill_has_failure >/dev/null || fail "drill_has_failure 未定义（判定仍是内联 grep）"
 mkrt() { printf '%s\n' "$@" > "$T/rt.txt"; }
 mkrt "# 恢复演练 rescue-test" "PASS [files] a.txt (8 B)" "RESULT: 4 PASS / 0 FAIL（抽样 4）"
