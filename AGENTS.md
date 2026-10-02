@@ -512,12 +512,21 @@
   修的时候同形不只是 arity：不剥盘符与反斜杠的路径会原样落进清单，所以也过 `_norm_path`。
   守卫 `test_bg_semantic.py::TestParsers` 的两条新用例，两条变异各摘一处（签名 / 归一化）
   都各自咬住——只测「返回对不对」测不到「这条分支根本没被调过」。
+- **restic 在 Windows 上把盘符的冒号也去掉了**（10-03 真 windows runner 一手证据：清单里是
+  `C/Users/runneradmin/…`，而源文件在 `C:\Users\runneradmin\…`）。`_norm_path` 剥盘符那条正则
+  要的是 `[A-Za-z]:`，在这种形状上根本不触发，所以拿它补不回来。唯一对策是
+  `_source_candidates`：第一档「补 root」在 posix 上够用（borg 走这条），第二档在首段恰好是
+  单个字母时试 `盘符: + 其余段`——Windows 的 pathlib 会把 `Path(root, "C:", "Users", …)` 换成
+  `C:\Users\…`，而 posix 上 `:` 是合法文件名字符，所以这一档**在 Linux 容器里就能测**，
+  不必等真宿主（守卫 `test_bg_semantic.py` 三条新用例；m04 逃逸的那条形状在
+  `test_windows_drive_without_colon_hashes_via_second_candidate` 里钉住）。
+  记不上哈希的后果是**静默**的：不报错，只让每轮演练整段退化成比大小。
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（60 项全绿，
-   3.9/3.14 双版本已验证；10-03 起含 restic 引擎侧两条——白名单外的引擎不记哈希、
-   restic 按归档内路径记）→ `shellcheck -S warning backup.sh restore.sh
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（63 项全绿，
+   3.9/3.14 双版本已验证；10-03 起含 restic 引擎侧五条——白名单外的引擎不记哈希、
+   restic 按归档内路径记、Windows 盘符去冒号的第二档候选×2、`_source_candidates` 形状×1）→ `shellcheck -S warning backup.sh restore.sh
    semantic/semantic.sh drill.sh rescue.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
@@ -765,7 +774,14 @@
    + `restic check --read-data`，守卫 `test_integrity_logic.ps1` 双档宿主各一步；这一句在 10-02 之前写的是
    「ps1 里连 `check` 都没出现过」，已不成立）、⑤~~没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env`
    里没有 age）~~ **10-03 接了**（`semantic.ps1` 的 `Invoke-Drill`：备份期 `seal_manifest` 走 `--hash-drill-samples`
-   记源 sha256、演练期解封后按内容比，判据与 `run_drill` 同形；守卫 `test_drill_e2e.ps1` 双档宿主各一步），
+   记源 sha256、演练期解封后按内容比，判据与 `run_drill` 同形；守卫 `test_drill_e2e.ps1` 双档宿主各一步）。
+   **首轮 windows 真 runner 跑起来之后**：步骤 10（`test_drill_e2e.ps1`）报 11 条 FAIL，根因是
+   restic 在 Windows 上把盘符的冒号去掉了（清单 `C/Users/…` 而源文件 `C:\Users\…`），导致
+   `hash_drill_samples` 每夜记 0 条——详见 §2 的「restic 在 Windows 上去掉盘符冒号」那条。
+   `Restore-DrillFile` 的引擎 stderr 进 `backup.log` 的接线也是这一轮补上的，CI 下次红才看得见
+   具体的 restic 错误文本。修法 `_source_candidates` + 三条单测已提交；CI 的 windows 侧
+   还需两步「Prepare age identity」和「Assert drill report wiring」才能把演练生产面真正纳入断言，
+   这发已挂进 windows job（本轮 step 10 修复，step 18 新增接线断言）。
    ⑥~~`semantic.ps1` 侧没有 `SEM_TIMELINE_KEEP`（本地时间轴只增不减）~~ **10-02 写了，两轮 CI 各抓到一条真缺陷**
    （`semantic.ps1` 的 `Prune-LocalTimeline`，四条口径与 `prune_local_timeline` 逐条对齐：第 4 层
    才算快照、按相对路径排序取除最后 N 份、叶子形态白名单不匹配就告警跳过、腾空日期壳自深向浅收）。
