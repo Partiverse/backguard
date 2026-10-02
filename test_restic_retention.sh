@@ -191,7 +191,10 @@ if ! grep -nE 'restic .*forget[^|]*--prune' "$PS1" > "$T/ps1-forget.txt" 2>/dev/
     fail "第 6 步：backup.ps1 的 forget 没有 --prune——Windows 真机上一旦接入，本地仓库就只增不减（第 2 步已在 bash 侧量过那 4 KiB 与 6 MiB 的差别）"
 fi
 forget_line=$(cut -d: -f1 < "$T/ps1-forget.txt" | head -1)
-after=$(tail -n +"$(( forget_line + 1 ))" "$PS1" | head -8)
+# 取窗口用 sed 而不是 `tail -n +N | head -8`：后者在 pipefail 下是个定时炸弹——文件一大，
+# head 读完 8 行就退出，tail 还在写，SIGPIPE 让整条赋值语句 rc=141 直接炸掉脚本（10-02 给
+# backup.ps1 加完 A6 那 315 行就当场露头，本机 5/5 复现，而 466 行的旧版一直侥幸为 0）。
+after=$(sed -n "$(( forget_line + 1 )),$(( forget_line + 8 ))p" "$PS1")
 grep -q 'LASTEXITCODE -eq 3' <<<"$after" \
     || fail "第 6 步：backup.ps1 的 forget 之后没有 rc=3 的容忍分支（两份实现对同一档退出码判得不一样，第一次真机接入就会看到两种结果）"
 grep -q 'LASTEXITCODE -ne 0' <<<"$after" \

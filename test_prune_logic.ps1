@@ -1,4 +1,4 @@
-# test_prune_logic.ps1 —— semantic.ps1 的 Prune-LocalTimeline + Format-IsoTime 逻辑测试
+﻿# test_prune_logic.ps1 —— semantic.ps1 的 Prune-LocalTimeline + Format-IsoTime 逻辑测试
 # （手工跑，不入 CI）。
 #
 # 怎么跑（本机无 pwsh，用 Linux 容器里的 pwsh 7；仓库根挂成 /repo）：

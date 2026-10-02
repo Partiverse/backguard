@@ -1,4 +1,4 @@
-# Partiverse Backup System — Windows 平台 (PowerShell)
+﻿# Partiverse Backup System — Windows 平台 (PowerShell)
 # 使用 restic 作为备份引擎，rclone 同步 WebDAV
 param([string]$Task = "Backup")
 
@@ -196,6 +196,289 @@ function Get-RunGitSha {
 }
 # END-BOUNDARY
 
+# BEGIN-VERIFY —— 同上约定：这一段被 test_cloud_verify_logic.ps1 按哨兵原样切走单独跑
+# A6 L1 云端副本自证（与 backup.sh 的 run_cloud_verify 同形）。为什么必须有：这条 remote 上
+# rclone 的比较退化成「只比大小」，原地同长度重写永远推不上云而 `copy` 照样退出 0（10-01 实测：
+# 换口令后 config 从 700 B 变 700 B，云端三份 config 全是轮换前那份）。上面推送环节的 rc 只
+# 回答「rclone 没报错」，这一层才回答「云端到底有没有」。
+#
+# 判定口径与 bash 侧逐字对齐，改任何一条前先读那边的注释：
+#   ①单向包含——本地每个对象云端都在且同尺寸；云端多出来的是本地已被保留策略裁掉的历史副本，
+#     按红线 §1.4「只增不减」不计失败（写成双向相等就每晚假报）。
+#   ②仓库 config 单独走内容哈希；不一致当场 forcing 补传再复核，修好了记 HEALED（云端曾躺着
+#     陈旧那份，得留痕），修不好才是 FAIL。
+#   ③差异样本只到**目录**——这份报告随时间轴上云，红线 §1.1 的例外只有 rescue-test.txt。
+#   ④HEALED 只能由「重新读回的内容」换来，`rclone copy` 退出 0 在这条 remote 上什么都没证明。
+#   ⑤先比对、后落笔：报告比的是上一轮那份，从不自指。
+
+# 目标地址的**唯一**拼法：推送用它们，自证也用它们。两处各写一遍归一化看着无害，实际后果是
+# 自证去读一个云端从没被写过的地址并判 FAIL——与 A2b「记哈希的抽样与 drill 的抽样必须共用
+# 同一个函数」是同一条教训。":/" 会被解析成文件系统绝对路径，所以归一为 "remote:设备/子路径"。
+function Format-CloudDest {
+    param([string]$Target, [string]$SystemId, [string]$Sub)
+    ("{0}/{1}/{2}" -f $Target, $SystemId, $Sub) -replace "://", ":"
+}
+
+function Reset-VerifyState {
+    $script:VerifyLines = @()
+    $script:VerifyFailed = 0
+    $script:VerifyUnknown = 0
+    $script:VerifyHealed = 0
+}
+
+function Format-VerifyNote {
+    param(
+        [Parameter(Mandatory = $true)][string]$Status,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$Detail
+    )
+    $script:VerifyLines += ("{0,-8} {1,-30} {2}" -f $Status, $Label, $Detail)
+    switch ($Status) {
+        "FAIL"    { $script:VerifyFailed = $script:VerifyFailed + 1 }
+        "UNKNOWN" { $script:VerifyUnknown = $script:VerifyUnknown + 1 }
+        "HEALED"  { $script:VerifyHealed = $script:VerifyHealed + 1 }
+    }
+}
+
+# 本地清单：相对路径 → 字节。相对路径的分隔符统一成 `/`——`rclone lsl` 打印的就是 `/`，而
+# Windows 的 FullName 带 `\`，不归一等于每一条都算「云端缺失」（这条只有真机能测出来，
+# 所以守卫里有一整套「路径含空格 / 含子目录 / 根带尾分隔符」的形状用例）。
+# rescue-test.txt 天生不进清单：红线 §1.1 规定它只留本地，本地有、云端没有才是对的形状，
+# 留着它对平只会每晚报「云端少一份」。
+function Get-LocalObjectMap {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootLen = $Root.Length
+    while ($rootLen -gt 0 -and ($Root[$rootLen - 1] -eq "\" -or $Root[$rootLen - 1] -eq "/")) { $rootLen-- }
+    $map = @{}
+    foreach ($f in @(Get-ChildItem -LiteralPath $Root -Recurse -Force -File -ErrorAction SilentlyContinue)) {
+        if ($f.Name -eq "rescue-test.txt") { continue }
+        $rel = $f.FullName.Substring($rootLen).Trim("\", "/").Replace("\", "/")
+        $map[$rel] = [long]$f.Length
+    }
+    $map
+}
+
+# `rclone lsl` 每行是「size 日期 时间 路径」，路径可能含空格，所以摘掉前三个字段而不是按空格切。
+# 不匹配的行（进度、警告、空行）跳过——它们不该算成「云端少一个对象」。
+function ConvertFrom-RcloneLsl {
+    param([AllowEmptyCollection()][AllowNull()][string[]]$Lines)
+    $map = @{}
+    foreach ($l in $Lines) {
+        if ($l -match '^\s*(\d+)\s+\S+\s+\S+\s+(.+)$') { $map[$matches[2].Trim()] = [long]$matches[1] }
+    }
+    $map
+}
+
+# 三条计数：缺 / 尺寸不符 / 云端多出来（只记账、不计失败）。纯集合运算所以单独成函数、单独可测——
+# 「双向相等就每晚假报」这一发只能在这里挡。
+function Compare-VerifyMaps {
+    param([hashtable]$Local, [hashtable]$Cloud)
+    $missing = @()
+    $mismatch = @()
+    foreach ($k in $Local.Keys) {
+        if (-not $Cloud.ContainsKey($k)) { $missing += $k }
+        elseif ([long]$Cloud[$k] -ne [long]$Local[$k]) { $mismatch += $k }
+    }
+    $extra = @($Cloud.Keys | Where-Object { -not $Local.ContainsKey($_) })
+    [pscustomobject]@{ Missing = $missing; Mismatch = $mismatch; Extra = $extra.Count }
+}
+
+# 差异样本只到目录（红线 §1.1，与 bash 的 dir_sample 同一口径：取前 3 条所在目录再去重）。
+# 定位到目录已经够用——要补传的是那一棵子树，不是一个神秘文件名。今天被校验的两棵树（时间轴
+# 产物 / 引擎 chunk）名字都是系统生成的，看着无害，但「反正调用点选的是我们自己的目录」不是一道
+# 闸门：校验面哪天扩到 system-meta/（services/hardware 转储，全是用户路径）就顺着这里漏。
+function Get-VerifyDirSample {
+    param([AllowEmptyCollection()][AllowNull()][string[]]$Paths)
+    $seen = @{}
+    $out = @()
+    foreach ($p in @(@($Paths | Select-Object -First 3))) {
+        if (-not $p) { continue }
+        $d = if ($p.Contains("/")) { $p.Substring(0, $p.LastIndexOf("/")) } else { "(root)" }
+        if (-not $seen.ContainsKey($d)) { $seen[$d] = $true; $out += $d }
+    }
+    $out -join " "
+}
+
+# 云端那一份必须落成**字节**再哈希：把 `rclone cat` 的 stdout 收进 PowerShell 字符串会吃掉换行
+# 与尾部空白，而「同长度不同内容」这一档正是靠这些字节区分的。所以走 copyto 落临时件。
+# 用 return 而不是 exit：宿主实测（pwsh 7 与 5.1，见 AGENTS §5）函数内的 `exit` 在 7 上不跑外层
+# finally，而临时件必须保证删掉；`return` 两种宿主都会跑 finally。
+function Get-VerifyCloudHash {
+    param([string]$Dest)
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("bg-verify-" + [guid]::NewGuid().ToString("N"))
+    try {
+        & rclone copyto $Dest $tmp 2>$null
+        if ($LASTEXITCODE -ne 0) { return "" }
+        if (-not (Test-Path -LiteralPath $tmp -PathType Leaf)) { return "" }
+        return (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLowerInvariant()
+    } catch {
+        return ""
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 单个前缀的清单对平。$Privacy 只对时间轴前缀开——引擎仓库是 restic 自己的对象存储，同名文件
+# 不可能由我们推上去，逐类别查只会把报告灌满永远 PASS 的行（bash 同一条）。
+# 推送环节的 --exclude 只挡**新**副本，历史副本得靠这条检查揪出来手工删。
+function Test-VerifyPrefix {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Dest,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$Target,
+        [switch]$Privacy
+    )
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        Format-VerifyNote SKIP $Label "本地没有这一棵树（该类别没备份或路径变了）"
+        return
+    }
+    $lstd = Get-LocalObjectMap -Root $Root
+    $raw = @(& rclone lsl $Dest 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        Format-VerifyNote UNKNOWN $Label ("rclone lsl rc={0}（网盘抖动或该前缀读不出），这一项既没证成也没证败" -f $LASTEXITCODE)
+        return
+    }
+    $cstd = ConvertFrom-RcloneLsl -Lines $raw
+    # 红线 §1.1 的自证面：读的是**同一份**云端清单，不另开一次 rclone 调用——两次读之间网盘
+    # 变了样，就会出现「对平说在、隐私检查说不存在」这种自相矛盾的报告（bash 同理）。
+    if ($Privacy) {
+        $leaked = @($cstd.Keys | Where-Object { $_ -match "(^|/)rescue-test\.txt$" })
+        if ($leaked.Count -gt 0) {
+            Format-VerifyNote FAIL "privacy @ $Target" "云端时间轴里有 rescue-test.txt（红线 §1.1：它带完整文件名，只准留本地；--exclude 挡不住历史副本，得手工删）"
+        } else {
+            Format-VerifyNote PASS "privacy @ $Target" "云端时间轴没有 rescue-test.txt"
+        }
+    }
+    $cmp = Compare-VerifyMaps -Local $lstd -Cloud $cstd
+    if ($cmp.Missing.Count -eq 0 -and $cmp.Mismatch.Count -eq 0) {
+        Format-VerifyNote PASS $Label ("本地 {0} 个对象云端全在且尺寸一致（云端另有 {1} 份本地已裁的历史副本，按只增不减不计失败）" -f `
+            $lstd.Count, $cmp.Extra)
+        return
+    }
+    Format-VerifyNote FAIL $Label ("云端缺 {0} 个 / 尺寸不符 {1} 个；缺失所在目录：{2}；尺寸不符所在目录：{3}" -f `
+        $cmp.Missing.Count, $cmp.Mismatch.Count,
+        (Get-VerifyDirSample -Paths $cmp.Missing), (Get-VerifyDirSample -Paths $cmp.Mismatch))
+}
+
+# 仓库 config 的内容哈希：10-01 那次「同长度重写永远推不上云」的正面对策。发现不一致不能只
+# 一报了事——在这条 remote 上它永远不会自己修好（尺寸相同 → rclone 直接跳过），所以显式 forcing
+# 补传那一个文件再复核。
+# restic 侧与 borg 有个实质差别：真正的密钥材料在 `keys/<id>.key`，且换口令是**新文件名**（对平
+# 那条就看得见缺失），`config` 只是仓库头（version/id）。所以这一项在 restic 上覆盖面比 borg 窄，
+# 但机制必须一样——「同长度不同内容」只有内容哈希抓得住。
+function Test-VerifyConfigHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$Dest,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $local = Join-Path $Repo "config"
+    if (-not (Test-Path -LiteralPath $local -PathType Leaf)) {
+        Format-VerifyNote SKIP $Label "本地仓库没有 config"
+        return
+    }
+    $lhash = ""
+    try { $lhash = (Get-FileHash -Algorithm SHA256 -LiteralPath $local).Hash.ToLowerInvariant() } catch { }
+    if (-not $lhash) { Format-VerifyNote UNKNOWN $Label "本地 config 哈希失败"; return }
+    $chash = Get-VerifyCloudHash -Dest "$Dest/config"
+    if (-not $chash) { Format-VerifyNote UNKNOWN $Label "云端 config 读取失败"; return }
+    $tail = 12
+    if ($chash -eq $lhash) {
+        Format-VerifyNote PASS $Label ("sha256 {0}… 两端一致（仓库头云端有新版）" -f $lhash.Substring(0, $tail))
+        return
+    }
+    # 先把云端那份陈旧证据留下来（报告里要能看出它躺了多久），再补传
+    $stale = $chash
+    & rclone copy -I "$($Repo.TrimEnd('\', '/'))/" $Dest --include config 2>$null
+    $healRc = $LASTEXITCODE
+    $chash = Get-VerifyCloudHash -Dest "$Dest/config"
+    if (-not $chash) {
+        Format-VerifyNote UNKNOWN $Label ("强制补传 (rc={0}) 之后云端 config 反而读不到了" -f $healRc)
+    } elseif ($chash -eq $lhash) {
+        Format-VerifyNote HEALED $Label ("云端原是 {0}…（同长度重写正是被「只比大小」静默丢掉的那类），已强制补传成 {1}…" -f `
+            $stale.Substring(0, $tail), $lhash.Substring(0, $tail))
+    } else {
+        Format-VerifyNote FAIL $Label ("强制补传 (rc={0}) 后仍 本地 {1}… ≠ 云端 {2}…——云端副本不可信" -f `
+            $healRc, $lhash.Substring(0, $tail), $chash.Substring(0, $tail))
+    }
+}
+
+# 报告：明文产物且随时间轴上云，所以内容受红线 §1.1 约束（只有目录，没有文件名）。
+# 中文正文 + 显式 `-Encoding utf8`：semantic.ps1 写 manifest 已经是这个口径，5.1 上不写
+# 编码会落成 ANSI，云端裸文件管理器读出来是糊的。
+function Write-VerifyReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowEmptyCollection()][string[]]$Lines,
+        [int]$Failed = 0,
+        [int]$Unknown = 0,
+        [int]$Healed = 0,
+        [string]$Sha = "nogit"
+    )
+    # 每个格式化元素都单独括起来：数组里 `"..." -f a, b` 的逗号与 `-f` 的结合力在 PowerShell
+    # 里读不准（元素会被拆成两行），而这里一旦拆错就是报告头部少一行、汇总计数变成字符串。
+    $body = @(
+        "# 云端副本自证（A6 L1）——每轮备份后跑一次，零提取流量",
+        ("# 生成时间: {0}   代码基: {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Sha),
+        "# 判定口径: 单向包含。本地每个对象都必须在云端且尺寸一致；云端多出来的是本地",
+        "#   已被保留策略裁掉的历史副本（云端只增不减），不计失败。",
+        "#   同长度不同内容这一档 L1 抓不住，所以仓库 config 单独走内容哈希（下面 config:",
+        "#   那几条）：不一致就当场 forcing 补传那一个文件再复核——修好了记 HEALED（云端曾躺着",
+        "#   陈旧那份，得留痕），修不好才是 FAIL。其余文件由 L2/L3 覆盖。",
+        "# 本文件随**下一轮**时间轴推送上云：比对发生在落笔之前，所以它比的是上一轮那份。",
+        ("# 汇总: checks={0} FAIL={1} UNKNOWN={2} HEALED={3}" -f @($Lines).Count, $Failed, $Unknown, $Healed)
+    ) + @($Lines)
+    try {
+        $body | Out-File -FilePath $Path -Encoding utf8
+        return $true
+    } catch {
+        Write-Host ("VERIFY-REPORT-WRITE-FAILED {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
+# 全量自证：每个目标 × 时间轴 + 每个类别仓库，结论写进时间轴根级 CLOUD-VERIFY.txt。
+# 返回 @{Failed=..;Unknown=..;Healed=..;Report=}——调用点只看这个值，不靠跨作用域的全局，
+# 因为 Start-PartiverseBackup 里的 $script: 状态一旦被 catch 打断就是半旧的。
+function Invoke-CloudVerify {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Targets,
+        [Parameter(Mandatory = $true)][string]$BackupBase,
+        [AllowEmptyCollection()][string[]]$RepoPairs = @(),
+        [Parameter(Mandatory = $true)][string]$ReportPath,
+        [string]$SystemId = $env:SYSTEM_ID,
+        [string]$Sha = "nogit"
+    )
+    # 这是旁路，函数内把 EAP 收到 Continue。Start-PartiverseBackup 顶部是 Stop，而 rclone 只要
+    # 往 stderr 写一个字符，在 Windows PowerShell 5.1 上就会变成终止性异常（真机正是 5.1，CI 是 7）
+    # ——那样每一轮都会走调用点的 catch、自证一次也没跑成，而表面上还是「非致命、不影响备份」，
+    # 没人看得见。守卫里有一条专门喂「rclone 写 stderr」的场景。
+    $ErrorActionPreference = "Continue"
+    Reset-VerifyState
+    foreach ($t in $Targets) {
+        Test-VerifyPrefix -Root (Join-Path $BackupBase "timeline") `
+            -Dest (Format-CloudDest -Target $t -SystemId $SystemId -Sub "timeline") `
+            -Label "timeline @ $t" -Target $t -Privacy
+        foreach ($pair in $RepoPairs) {
+            $cls = $pair.Substring(0, $pair.IndexOf(":"))
+            $repo = $pair.Substring($pair.IndexOf(":") + 1)
+            $dest = Format-CloudDest -Target $t -SystemId $SystemId -Sub $cls
+            Test-VerifyPrefix -Root $repo -Dest $dest -Label "repo:$cls @ $t" -Target $t
+            Test-VerifyConfigHash -Repo $repo -Dest $dest -Label "config:$cls @ $t"
+        }
+    }
+    $ok = Write-VerifyReport -Path $ReportPath -Lines $script:VerifyLines `
+        -Failed $script:VerifyFailed -Unknown $script:VerifyUnknown -Healed $script:VerifyHealed -Sha $Sha
+    @{
+        Failed = $script:VerifyFailed
+        Unknown = $script:VerifyUnknown
+        Healed = $script:VerifyHealed
+        Report = $(if ($ok) { $ReportPath } else { "" })
+    }
+}
+# END-VERIFY
+
 # ---------- 主函数 ----------
 function Start-PartiverseBackup {
     $ErrorActionPreference = "Stop"
@@ -287,8 +570,7 @@ function Start-PartiverseBackup {
             # 云端用 copy 只增不删（本地已 prune，云端保留全部历史）
             if ($env:SKIP_WEBDAV -ne "1") {
                 foreach ($t in $targets) {
-                    # ":/" 会被解析成文件系统绝对路径——归一为 "remote:设备/类"
-                    $dest = ("$t/$($env:SYSTEM_ID)/$cls") -replace '://', ':'
+                    $dest = Format-CloudDest -Target $t -SystemId $env:SYSTEM_ID -Sub $cls
                     & rclone mkdir $dest 2>$null
                     & rclone copy "$repo/" $dest --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
                     if ($LASTEXITCODE -ne 0) {
@@ -312,7 +594,7 @@ function Start-PartiverseBackup {
                 -DeviceId $env:DEVICE_ID -TimeIso (Get-Date -Format "yyyy-MM-ddTHH:mm:ss")
             if ($env:SKIP_WEBDAV -ne "1") {
                 foreach ($t in $targets) {
-                    $tdest = ($t + "/" + $env:SYSTEM_ID + "/timeline/") -replace '://', ':'
+                    $tdest = Format-CloudDest -Target $t -SystemId $env:SYSTEM_ID -Sub "timeline"
                     & rclone copy "$BACKUP_BASE\timeline/" "$tdest" `
                         --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
                     # 明文时间轴是「裸文件管理器可读」这件事的唯一副本，它没上去同样是
@@ -329,8 +611,41 @@ function Start-PartiverseBackup {
     }
 
     if ($failed -eq 0 -and $cloudFailed -eq 0) {
-        Write-Host "=== Backup FULLY COMPLETE ==="
-        $script:RunRc = 0
+        # A6 L1：上面那两条只回答「rclone 没报错」，这一步才回答「云端到底有没有」。只在一切
+        # 自称成功之后跑——本地失败或推送失败时结论已经定了，再花几分钟列云端没意义。
+        # 开关与 backup.sh 同一条：只有显式 SEM_CLOUD_VERIFY=0 之外……照抄 bash 的「== 1 才跑」，
+        # 写成「-ne 0」会让 SEM_CLOUD_VERIFY=no 在两份实现上一个跑一个不跑。
+        $vsw = if ($env:SEM_CLOUD_VERIFY) { $env:SEM_CLOUD_VERIFY } else { "1" }
+        $verifyFailed = 0
+        if ($env:SKIP_WEBDAV -ne "1" -and $vsw -eq "1" -and $targets.Count -gt 0) {
+            $repoPairs = @($semDone | ForEach-Object { "{0}:{1}" -f $_.cls, $_.repo })
+            try {
+                # 自证的是**这一轮推出去的那份**，所以报告必须落在时间轴根级、在推送之后写：
+                # 它自己随下一轮才上云（先比对、后落笔）。
+                $v = Invoke-CloudVerify -Targets $targets -BackupBase $BACKUP_BASE -RepoPairs $repoPairs `
+                    -ReportPath (Join-Path $BACKUP_BASE "timeline\CLOUD-VERIFY.txt") -Sha (Get-RunGitSha)
+                if ($v.Healed -gt 0) {
+                    Write-Warning "[verify] $($v.Healed) 个仓库 config 与云端不一致，已当场强制补传修好——这类不一致推送永远不会自己带走（详见 $($v.Report)）"
+                }
+                if ($v.Unknown -gt 0) {
+                    Write-Warning "[verify] $($v.Unknown) 项 UNKNOWN：网盘读不出清单，这一轮没证成也没证败"
+                }
+                $verifyFailed = $v.Failed
+            } catch {
+                # 旁路没资格终止本体（§1.3）：自证自己炸了只是少一份证据，不改备份结论
+                Write-Warning "[verify] 自证流程异常退出（少一份证据，不改备份结论）: $($_.Exception.Message)"
+            }
+        }
+        if ($verifyFailed -gt 0) {
+            # 同样先落 rc 再打印：EAP=Stop 下 Write-Error 是 throw，脚本末尾的边界行拿不到码。
+            # 用 Write-Host 而不是 Write-Error 与上面 cloudFailed 一条同理——这一层要混进
+            # 「engine=/cloud=」的计数里就把两种坏法说成了一种。
+            $script:RunRc = 1
+            Write-Host "::error::=== 推送都报成功，但云端副本自证 $verifyFailed 项不一致——云端副本不可信（详见 timeline\CLOUD-VERIFY.txt） ==="
+        } else {
+            Write-Host "=== Backup FULLY COMPLETE ==="
+            $script:RunRc = 0
+        }
     } else {
         # 两种坏法分开计数并都写进结论行：引擎类别失败 vs 云端没有可信副本，处置完全不同。
         # 同样先落 rc：EAP=Stop 下这行 Write-Error 就是 throw，`exit` 走不到，结论一律由

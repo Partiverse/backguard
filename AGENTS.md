@@ -128,6 +128,40 @@
   **别拿 `chmod 444` 造「云端那个文件写不进去」**：rclone 默认**非原地写**（目标目录建临时文件
   再 rename），只读的小文件本身挡不住替换，实测反而把不一致修好了 → 假 FAIL 断言踩空；要造
   「补传后仍不一致」就让桩在 `cat` 上撒谎。
+- **A6 的 PowerShell 那一半**（10-02 落地，Windows 欠账 ③）：`backup.ps1` 现在有
+  `Invoke-CloudVerify`，五条判平口径与 bash 侧逐字对齐（单向包含 / 仓库 `config` 走内容哈希 /
+  差异样本只到目录 / `HEALED` 只能由重新读回换来 / 先比对后落笔）。三段专属纪律：
+  ①**目标地址只有一处拼法**——推送与自证共用 `Format-CloudDest`，两处各写一遍归一化就会
+  「自证读了一个云端从没被写过的地址」并每晚假报（守卫是计数断言：源码里 `://` 归一只许出现
+  一次、`Format-CloudDest` 调用点至少三处）；②`Invoke-CloudVerify` 首句必须
+  `$ErrorActionPreference = "Continue"`——5.1 下原生命令写 stderr 会**变成终止性异常**，
+  一句漏写就等于让旁路有能力终止本体（§1.3），pwsh 7 测不到这一档；③**这一层的夹具是「真
+  rclone 读写一个本地目录当云端」，不是桩**——桩会把 `lsl` 的实际字段形状（尺寸 日期 时间
+  带纳秒 路径，路径可含空格，故用 `^\s*(\d+)\s+\S+\s+\S+\s+(.+)$` 而非按空格切）、`copyto`
+  读不到时 rc=3、以及远端不存在时整段非零这三件事全遮掉；rclone 不在 PATH 就整段如实 Skip。
+  **本地目录复现不了网盘语义，两支真的要如实注册为测不到**（10-02 容器实测）：本地后端两端
+  都能算哈希，同尺寸不同内容**不带 `-I` 也照样覆盖**（目标 mtime 更新/相同/更旧三种关系全
+  试过），所以「摘掉 `-I`」与「拿 `copy` 退出 0 当修好」在这里只有**静态**断言守得住
+  （`test_cloud_verify_logic.ps1` 场景10 钉住源码里那两行写法），行为面的证明属于 bash 侧
+  `test_cloud_verify.sh` 的撒谎桩。同理：造不出「写不进去的云端文件」——Linux 宿主上 rclone
+  非原地写 + root 无视只读位（场景8h 因此 Skip），NTFS 的 `IsReadOnly` 才真挡得住；
+  `:zip,...` 这类只读连接串在 rclone 1.75.1 根本不成立。守卫
+  `test_cloud_verify_logic.ps1`（59 条断言；13 条变异**全 CAUGHT**，其中 m7/m8 靠静态那两条，
+  台账里逐条写清是静态还是行为面——别把静态抓住当成网盘语义已验证）。
+- **PowerShell 5.1 按 ANSI 代码页读没有 BOM 的 `.ps1`，而中文会因此炸掉语法面**（10-02 实测，
+  代价最贵的一条）：5.1 只在文件带 UTF-8 BOM 时才按 UTF-8 解码；没 BOM 就用当前 ANSI 代码页。
+  中文注释的 UTF-8 字节里 0x91-0x94 在 CP1252 上正是弯引号 `‘ ’ “ ”`，而 PowerShell 的
+  分析器**把弯引号当字符串定界符**——于是一个没闭合的字符串把后面的 `}` 全吃进去，报
+  `Missing closing '}' in statement block`，且报错行号指向**离病灶最远**的那个块。实测
+  `backup.ps1`（225 行含中文、无 BOM）在 5.1 解析器下报 **18** 个语法错，也就是说
+  **Task Scheduler 注册的 `powershell.exe -File backup.ps1` 在英文代码页的 Windows 上连脚本
+  都载入不了**；中文 locale（CP936）下更阴：弯引号出不来所以语法不炸，但所有中文字面量
+  变乱码——那些乱码会写进随时间轴上云的明文产物。结论口径两条：**仓库里每个 `.ps1` 必须带
+  UTF-8 BOM**（`probe_windows_ps51.ps1` 事实 0 逐个验字节并点名缺的文件），以及
+  **`shell: powershell` 的 step 正文必须纯 ASCII**——GitHub Actions 把 run 正文写成临时 .ps1
+  时不带 BOM，所以中文只能放在 YAML 注释里或放进带 BOM 的仓库文件（这一发的探针自己带着
+  中文注释，于是它想测的那件事一次都没测到：run 36991285809 的 windows job 红在解析器报错，
+  而报的是**探针自己**）。新增 `.ps1` 自动在事实 0 的守卫内（它扫全仓）。
 - **`ls -1t "$f".*` 对目录操作数打印的是「目录的内容」，不是目录本身**——想按 mtime 排「这些
   路径」必须加 `-d`（`ls -1dt`）。10-01 日志轮转的守卫因此没被测到：同名目录压根没进删除候选，
   摘掉「必须是普通文件」那道变异**E2E 全绿**。更阴的是两个 bug 互相掩盖：不加 `-d` 时 ls 给
@@ -351,9 +385,10 @@
    正好撞满 step 级 `timeout-minutes: 40`，那一轮 macos 跑了 126 分钟仍红，而它后面三步
    一秒没执行——**这条 runner 上没有一步是便宜的，重排清单救不了，只能分车道**。
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
-   **PowerShell 侧的 `test_log_rotation_logic.ps1` 是第一套挂进 CI 的 ps1 逻辑测试**（windows
-   job 两步：pwsh 7 排在产品轮之前、Windows PowerShell 5.1 排在最后，两档宿主语义都要过），
-   同族的 `test_prune_logic.ps1` 目前仍是手工跑——加它进 CI 的时机是下一次动 `Prune-LocalTimeline`
+   **PowerShell 侧的逻辑测试现在有两套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）与
+   `test_cloud_verify_logic.ps1`（10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、
+   Windows PowerShell 5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2
+   编码那条）。同族的 `test_prune_logic.ps1` 目前仍是手工跑——加它进 CI 的时机是下一次动 `Prune-LocalTimeline`
    时，别现在顺手写进文档（§3 那条「写『已挂 CI』之前必须 grep ci.yml 核对」就是为这种句子立的）。
    （可选依赖缺失的分支必须打 SKIP 并在末行如实标注「未测」，不得只报 E2E-OK）。
    CI 的 linux/macos 真实备份 job 另配一次性 age 主身份，并断言
@@ -459,7 +494,10 @@
    （`restic … 2>&1 | Tee-Object`、`rclone mkdir … 2>$null`）会变成终止性异常，把成功的类别
    记成失败；CI 的 windows job 跑的是 pwsh 7，所以这条永远不会在 CI 现形，**上真机前先手用
    powershell.exe 跑一轮**——**10-02 已把它编成 CI step**（`Windows PowerShell 5.1 host probe`，
-   `shell: powershell` 就是那台宿主，不必等真机）：报四件事——两份 .ps1 在 5.1 解析器下的语法错数、
+   `shell: powershell` 就是那台宿主，不必等真机）：报四件事——**全部** .ps1 在 5.1 解析器下的
+   语法错数 + 每份是否带 UTF-8 BOM（§2 那条编码教训：10-02 首轮就是探针自己的中文注释让 5.1
+   解析不了，于是它想测的事一次没测到；正文因此搬进带 BOM 的 `probe_windows_ps51.ps1`，
+   step 正文只留 ASCII）、
    `ConvertFrom-Json` 交回的类型（§4.17 的争议点）、`$EAP=Stop` 下三种 stderr 形态
    （`2>&1 | Tee-Object` / `2>$null` / `2>&1 | Out-Null`，正是 `backup.ps1:97/179/22` 用的那三种）
    各自抛不抛、`Format-IsoTime` 在 5.1 上交回的是不是 ISO。**只有第二条和第三条是「先报后断」**
@@ -469,7 +507,9 @@
    就是为了不把「宿主 5.1」与「被测脚本」两件事混在一起——那条不变。）
    ②~~没有 A4 日志轮转/run 边界行~~ **10-02 接了**（`Rotate-LogFile` + `Write-RunBoundary`
    按哨兵切出来测，接线由 windows job 的行为那一步跑真产品轮验；边界行的落点是脚本末尾而
-   **非** `finally`，理由见 §2 那条宿主实测差异）、③没有 A6 云端自证、④~~没有 A2a 完整性~~ **10-02 接了 bash 侧**
+   **非** `finally`，理由见 §2 那条宿主实测差异）、③~~没有 A6 云端自证~~ **10-02 接了**
+   （`Invoke-CloudVerify`，五条判平口径与 bash 侧对齐，守卫 `test_cloud_verify_logic.ps1`；
+   本地目录复现不了「只比大小」那两支已在台账里如实注册为静态覆盖，见 §2 同名单元）、④~~没有 A2a 完整性~~ **10-02 接了 bash 侧**
    （`backup.sh` 的 windows 分支登记 `类别:restic:路径` 并按引擎跑 `restic check --read-data`，
    守卫 `test_restic_retention.sh` 第 7 段），**`backup.ps1` 那一份仍是同批欠账**（ps1 里连
    `check` 都没出现过）、⑤没有恢复演练（A2b 的内容哈希这一维更无从谈起：`secrets.env` 里没有 age）、

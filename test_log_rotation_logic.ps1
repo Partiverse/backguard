@@ -1,4 +1,4 @@
-# test_log_rotation_logic.ps1 —— backup.ps1 的日志轮转 + run 边界行逻辑测试
+﻿# test_log_rotation_logic.ps1 —— backup.ps1 的日志轮转 + run 边界行逻辑测试
 #
 # 怎么跑（本机无 pwsh，用 Linux 容器里的 pwsh 7；仓库根挂成 /repo）：
 #   docker run --rm -v "$PWD":/repo:ro mcr.microsoft.com/powershell:lts \

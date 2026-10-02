@@ -496,6 +496,25 @@ jobs:
               exit 1
           }
 
+      - name: Cloud verify logic (A6)
+        # A6 云端自证的**逻辑**那一半：从 backup.ps1 按哨兵标记切出 Format-CloudDest /
+        # Test-VerifyPrefix / Test-VerifyConfigHash / Invoke-CloudVerify 跑一遍。排在 25 分钟的
+        # 产品轮之前，同上一条的口径：它不碰真实仓库也不碰网络，红了不该把同轮的产品结论带走。
+        # **这里比本地容器跑得更宽**：runner 上 rclone 已由上面的 Install deps 装好并进 PATH，
+        # 所以场景 8 那几段「拿真 rclone 读写一个本地目录当云端」会真的执行，而容器里 rclone
+        # 不在 PATH 时它们整段 Skip；NTFS 上 `IsReadOnly` 是真挡得住替换的（Linux 宿主上 rclone
+        # 非原地写 + root 无视只读位，场景 8h 只能如实 Skip），所以「补传后仍不一致 → FAIL」
+        # 这一支只有在这台宿主上才第一次被走到。网盘语义（比较只看 size）仍然复现不了——
+        # 那部分证明属于 bash 侧 test_cloud_verify.sh 的撒谎桩，见该文件台账。
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_cloud_verify_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::云端自证逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
       - name: Run backup and assert
         timeout-minutes: 40
         env:
@@ -961,97 +980,29 @@ jobs:
           exit 0
 
       - name: Windows PowerShell 5.1 host probe
-        # AGENTS §5 的「①`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是在 powershell.exe
+        # AGENTS §5 的「`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是在 powershell.exe
         # 5.1 下的未验证面」——Task Scheduler 注册的正是这台宿主，而本 job 其余步骤的 shell 都是
-        # pwsh 7（`shell: pwsh` 与 windows runner 的默认 shell）。GitHub 的 `shell: powershell`
-        # 直接把 step 交给 Windows PowerShell 执行，于是「能不能解析 / JSON 交回什么类型 /
-        # stderr 会不会变成终止性异常」三件事第一次有一手事实，而不是从 7.x 的行为外推。
-        # **本步只对「探针自己有没有跑起来」下硬断言**（语法面 + ISO 形状 + 三条 verdict 非空），
-        # 三种 stderr 形态的结论先如实报出来：要断言什么取决于它报回的答案，下一发提交再改成守卫。
+        # pwsh 7。GitHub 的 `shell: powershell` 直接把 step 交给 Windows PowerShell 执行，于是
+        # 「能不能解析 / BOM 在不在 / JSON 交回什么类型 / stderr 会不会变成终止性异常」几件事
+        # 第一次有一手事实，而不是从 7.x 的行为外推。
+        # **正文必须纯 ASCII（10-02 实测）**：Actions 把 run 正文写成临时 .ps1 时不带 BOM，5.1
+        # 于是按 ANSI(CP1252) 解码；中文注释的 UTF-8 字节里 0x91-0x94 正是弯引号，而 PowerShell
+        # 把弯引号当字符串定界符——一个没闭合的字符串吃掉后面的 `}`，整步炸在
+        # `Missing closing '}'`（run 36991285809 的 windows job 就是这么死的，探针自己带着中文
+        # 注释，于是「产品 .ps1 在 5.1 下能不能载入」一次都没测到）。所以所有中文都搬进
+        # probe_windows_ps51.ps1（那份带 BOM），并新增「事实 0：仓库每个 .ps1 必须带 BOM」。
+        # **本步只对「探针自己有没有跑起来」下硬断言**（BOM + 语法面 + ISO 形状 + verdict 非空）；
+        # 三种 stderr 形态的结论先如实报出来，要断言什么取决于它报回的答案。
         # 分工也说清楚：它验的是**宿主**，不是备份产物，所以不重复跑 backup.ps1（那要再花 25 分钟，
         # 而 windows job 预算 60 分钟已经装了三轮产品链路）。
         shell: powershell
         timeout-minutes: 10
         run: |
-          $ErrorActionPreference = 'Stop'   # 与被测产品顶部同一档，探的就是这一档下的行为
-          Write-Host "probe51: host=WindowsPS $($PSVersionTable.PSVersion) clr=$($PSVersionTable.CLRVersion) 64bit=$([Environment]::Is64BitProcess)"
-          if ($PSVersionTable.PSVersion.Major -ne 5) {
-              Write-Host "::error::shell: powershell 没落在 Windows PowerShell 上（实得 $($PSVersionTable.PSVersion)）——本步的全部意义就是那台宿主，落错就等价于没测"
+          & "$PWD\probe_windows_ps51.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 host probe rc=$LASTEXITCODE - see the probe51-* lines above"
               exit 1
           }
-
-          # ---- 事实 1：产品侧的 .ps1 在这台宿主的解析器下必须 0 语法错 ----
-          # pwsh 7 能载入不代表 5.1 能载入（7 里合法的语法面比 5.1 宽）。本步排在所有产品断言
-          # **之后**：它是新探针，红的话不该把同一轮里「保留策略修好了没」那条结论一起带走
-          #（免费 windows runner 一轮一小时起，见 §3「runner 上步骤顺序就是优先级」）
-          foreach ($f in @('backup.ps1', 'semantic\semantic.ps1')) {
-              $p = Join-Path $PWD $f
-              $tok = $null; $perr = $null
-              [void][System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$tok, [ref]$perr)
-              $n = @($perr).Count
-              Write-Host "probe51-parse: $f errors=$n"
-              if ($n -gt 0) {
-                  foreach ($e in (@($perr) | Select-Object -First 5)) {
-                      Write-Host "  line $($e.Extent.StartLineNumber): $($e.Message)"
-                  }
-                  Write-Host "::error::$f 在 Windows PowerShell 的解析器下报 $n 个语法错——Task Scheduler 那台连脚本都载入不了"
-                  exit 1
-              }
-          }
-
-          # ---- 事实 2：ConvertFrom-Json 在这台宿主上交回什么类型 ----
-          # 7.2 → String、7.4+ → DateTime（§4.17 就是被这一发绊的），5.1 落在哪一档今天才有答案
-          $tp = @('[{"time":"2026-10-02T06:31:11.447503458+00:00"}]' | ConvertFrom-Json)[0].time
-          Write-Host "probe51-json: type=$($tp.GetType().Name) interp=`"$tp`""
-
-          # ---- 事实 3：$EAP=Stop 下，三种 stderr 形态会不会把 rc=0 的原生命令判成异常 ----
-          # 形 a = backup.ps1:97 `& restic @resticArgs 2>&1 | Tee-Object`（restic 的正常进度就写在 stderr）
-          # 形 b = backup.ps1:179 `& rclone mkdir $dest 2>$null`
-          # 形 c = backup.ps1:22/80/259 `… 2>&1 | Out-Null`
-          # 探针用 cmd.exe：写 stderr 且退出 0，与被测形状一致；每条都套 try/catch，因为在这台宿主上
-          # 「抛」本身就是被测结果，让它在 try 外面等于把答案变成 step 红
-          $comspec = $env:ComSpec
-          $sink = Join-Path ([System.IO.Path]::GetTempPath()) ('probe51-a-' + [guid]::NewGuid().ToString('N') + '.log')
-          $resA = ''
-          try {
-              & $comspec /c 'echo oops 1>&2' 2>&1 | Tee-Object -FilePath $sink -Append | Out-Null
-              $resA = "no-throw rc=$LASTEXITCODE"
-          } catch { $resA = "THREW $($_.Exception.GetType().Name)" }
-          Remove-Item $sink -Force -ErrorAction SilentlyContinue
-          $resB = ''
-          try {
-              & $comspec /c 'echo oops 1>&2' 2>$null
-              $resB = "no-throw rc=$LASTEXITCODE"
-          } catch { $resB = "THREW $($_.Exception.GetType().Name)" }
-          $resC = ''
-          try {
-              & $comspec /c 'echo oops 1>&2' 2>&1 | Out-Null
-              $resC = "no-throw rc=$LASTEXITCODE"
-          } catch { $resC = "THREW $($_.Exception.GetType().Name)" }
-          Write-Host "probe51-stderr: tee2>&1=$resA  redirect2null=$resB  pipeOutNull=$resC"
-          # 三条 verdict 缺一即红：空的含义是「探针自己被宿主挡在外面」，那比任何一条结论都糟——
-          # 它会伪装成绿（同一条理由见 §3「断言自己是死的」）
-          foreach ($r in @($resA, $resB, $resC)) {
-              if ($r -notmatch '^(no-throw|THREW)') {
-                  Write-Host "::error::stderr 形态探针没拿到 verdict（实得 '$r'）——本步等于没跑"
-                  exit 1
-              }
-          }
-
-          # ---- 事实 4：Format-IsoTime 在这台宿主上确实交出 ISO（§4.17 那条修复就是为它写的）----
-          # dot-source 产品脚本没有副作用，这一点由本 job 的保留策略守卫先证过（它也 dot-source）
-          . (Join-Path $PWD 'semantic\semantic.ps1')
-          $iso4 = '2026-10-02T06:31:11.447503458+00:00'
-          $dt4 = [datetime]::new(2026, 10, 2, 6, 31, 11, [DateTimeKind]::Utc)
-          $s4 = Format-IsoTime $iso4
-          $t4 = Format-IsoTime $dt4
-          Write-Host "probe51-isotime: stringPass=$($s4 -ceq $iso4) dateTimeOut=$t4 bareToString=$($dt4.ToString())"
-          if ($t4 -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') {
-              Write-Host "::error::Format-IsoTime 在这台宿主上交回的不是 ISO 形状（实得 $t4）——bg 那边照样读不动，§4.17 的修复没落地"
-              exit 1
-          }
-          Write-Host "=== 5.1 宿主探针 OK：语法 0 错、JSON 类型与三种 stderr 形态的结论已上报、Format-IsoTime 交回 ISO ==="
-          exit 0
 
       - name: Log rotation logic on Windows PowerShell 5.1
         # 同一份逻辑测试，换到 Task Scheduler 真正注册的那台宿主上再跑一遍（几秒）：
@@ -1066,7 +1017,23 @@ jobs:
         run: |
           & "$PWD\test_log_rotation_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::Windows PowerShell 5.1 上这份逻辑测试 rc=$LASTEXITCODE——宿主语义分歧，见上面的 FAIL 行"
+              Write-Host "::error::Windows PowerShell 5.1 cannot run log rotation logic: rc=$LASTEXITCODE"
+              exit 1
+          }
+
+      - name: Cloud verify logic on Windows PowerShell 5.1
+        # 同一份自证逻辑换到 Task Scheduler 真正注册的那台宿主（powershell.exe 5.1 + .NET
+        # Framework）再跑一遍。这里要探的分歧是**具体**的：产品函数顶部第一句就是
+        # `$ErrorActionPreference = "Continue"`，因为 5.1 下原生命令（rclone）写 stderr 会
+        # 变成终止性异常——而 pwsh 7 不会。pwsh 那一步测不到「这句没生效 / 写错位置」这类回归，
+        # 5.1 上一句就能把整条自证炸成异常（AGENTS §1.3：旁路没资格终止本体）。
+        # 同上一条排在 job 末尾的理由：新覆盖红了不该带走这轮已经拿到的产品结论。
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          & "$PWD\test_cloud_verify_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run cloud verify logic: rc=$LASTEXITCODE"
               exit 1
           }
 
