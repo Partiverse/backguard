@@ -155,6 +155,12 @@ function Start-PartiverseBackup {
     if ($targets.Count -eq 0) { Write-Warning "未配置备份目标（BACKUP_TARGETS/WEBDAV_REMOTE 均空）——本次仅本地备份" }
 
     $failed = 0
+    # 红线 §1.4：「本地成功」不等于「云端有可信副本」。云端推送失败必须计入退出码，
+    # 不得宣布 FULLY COMPLETE——bash 侧同一件事由 test_cloud_failure.sh 锁住（a1ad332 那发），
+    # PowerShell 移植时漏了，此前只 Write-Warning 就继续走 COMPLETE。
+    # 这里用 Write-Host 而不是 Write-Error：本函数顶部 $ErrorActionPreference = "Stop"，
+    # Write-Error 会变成终止性异常被下面的 catch 接走，把「云端没副本」混计成「引擎类别失败」。
+    $cloudFailed = 0
     $semDone = @()
     $classes = @("config", "files", "system")
     foreach ($cls in $classes) {
@@ -172,7 +178,10 @@ function Start-PartiverseBackup {
                     $dest = ("$t/$($env:SYSTEM_ID)/$cls") -replace '://', ':'
                     & rclone mkdir $dest 2>$null
                     & rclone copy "$repo/" $dest --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
-                    if ($LASTEXITCODE -ne 0) { Write-Warning "[rclone] $dest 同步失败" }
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "::error::[rclone] $dest 同步失败 (rc=$LASTEXITCODE)——云端没有这一类的可信副本"
+                        $cloudFailed++
+                    }
                 }
             }
         } catch {
@@ -193,6 +202,12 @@ function Start-PartiverseBackup {
                     $tdest = ($t + "/" + $env:SYSTEM_ID + "/timeline/") -replace '://', ':'
                     & rclone copy "$BACKUP_BASE\timeline/" "$tdest" `
                         --transfers 2 --bwlimit 10M --log-file $RCLONE_LOG
+                    # 明文时间轴是「裸文件管理器可读」这件事的唯一副本，它没上去同样是
+                    # 云端没有可信副本（§1.4），不能只把引擎仓库的对平当数
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "::error::[rclone] $tdest 时间轴同步失败 (rc=$LASTEXITCODE)"
+                        $cloudFailed++
+                    }
                 }
             }
         } catch {
@@ -200,10 +215,11 @@ function Start-PartiverseBackup {
         }
     }
 
-    if ($failed -eq 0) {
+    if ($failed -eq 0 -and $cloudFailed -eq 0) {
         Write-Host "=== Backup FULLY COMPLETE ==="
     } else {
-        Write-Error "=== Backup FINISHED WITH ERRORS ($failed failed) ==="
+        # 两种坏法分开计数并都写进结论行：引擎类别失败 vs 云端没有可信副本，处置完全不同
+        Write-Error "=== Backup FINISHED WITH ERRORS (engine=$failed cloud=$cloudFailed) ==="
         exit 1
     }
 }
@@ -242,7 +258,10 @@ function Initialize-PartiverseBackup {
     & rclone config create "Universal Backups" webdav `
         url "$webdavUrl" vendor other user "$webdavUser" pass "$webdavPasstxt" 2>&1 | Out-Null
 
-    $deviceId = "$env:COMPUTERNAME-Windows11"
+    # 设备标识 = <设备名>-<系统>，全小写、不含 OS 版本（AGENTS §2：大小写不敏感网盘的安全交集，
+    # 且系统升级不应分裂备份历史；OS 版本进 system-meta）。原先写死 "-Windows11" 与 init.sh 的
+    # 小写规则不一致——同一台机器两侧会生成两个设备目录，云端历史被劈开。
+    $deviceId = ("$env:COMPUTERNAME-Windows").ToLower()
     $systemId = $deviceId
 
     # 生成配置（三档案默认路径）

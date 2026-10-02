@@ -561,6 +561,47 @@ jobs:
           Write-Host "--- $($manifest.FullName) ---"
           Get-Content $manifest.FullName
 
+      # 红线 §1.4 在 PowerShell 侧的同一条（bash 侧由 test_cloud_failure.sh 锁）：云端推送失败
+      # 必须非零退出并告警，不得宣布 FULLY COMPLETE。整条 Windows 路径此前缺这一发——rclone
+      # 失败只 Write-Warning，结论照打 COMPLETE。这里指向一个不存在的 remote 让推送当场失败
+      # （不碰网盘、不依赖网络），断言顺序照 §3 的规矩：**先证明确实尝试过推送、再问「哪条检查
+      # 抓到了它」、最后才是退出码**——反过来的话「整轮崩在别处」和「守卫没生效」会撞成同一句报错。
+      - name: Assert cloud push failure is visible
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          $env:BACKUP_BASE = "$env:RUNNER_TEMP\repos"
+          $env:BACKUP_TARGETS = "nosuchremote:backguard-ci"
+          # 必须是**子进程**：PowerShell 里脚本内的 `exit` 会终结整个宿主会话，
+          # 用 & 直调产品脚本的话，产品一 exit 本 step 就跟着死——「判红」和「没断言」撞成
+          # 同一件事，正好把这条守卫自己变成假绿。powershell.exe 也与 Task Scheduler
+          # 注册的那发同解释器。
+          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PWD\backup.ps1" -Task Backup 2>&1
+          $code = $LASTEXITCODE
+          $text = $out | Out-String
+          $rlog = "$env:LOCALAPPDATA\PartiverseBackup\logs\rclone.log"
+          if (-not (Select-String -Path $rlog -Pattern "nosuchremote" -Quiet -ErrorAction SilentlyContinue)) {
+            Write-Host "::error::rclone.log 里没有 nosuchremote 这条 remote——这一轮根本没尝试推送，下面三条断言全是空转"
+            exit 1
+          }
+          if ($text -notmatch 'cloud=[1-9]') {
+            Write-Host "::error::推送失败没进结论行（没有 cloud=<非零>），实得 rc=$code"
+            Write-Host "--- 输出尾部 ---"
+            Write-Host (($out | Select-Object -Last 25) -join "`n")
+            exit 1
+          }
+          if ($text -match 'FULLY COMPLETE') {
+            Write-Host "::error::云端一个对象都没推上去，却宣布 FULLY COMPLETE（红线 §1.4）"
+            exit 1
+          }
+          if ($code -eq 0) {
+            Write-Host "::error::推送失败仍退出 0：上层拿不到非零就等于「成功」"
+            exit 1
+          }
+          Write-Host "=== 云端失败可见性 OK (rc=$code) ==="
+
       - name: Push debug logs
         if: failure()
         shell: pwsh
