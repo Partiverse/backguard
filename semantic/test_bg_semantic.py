@@ -99,6 +99,29 @@ class TestParsers(unittest.TestCase):
         self.assertEqual(bg._norm_path("C:\\Users\\neb\\a.txt", 2), "a.txt")
         self.assertEqual(bg._norm_path("/Users/neb/a.txt", 0), "Users/neb/a.txt")
 
+    def test_parse_generic_matches_other_parsers_arity(self):
+        # cmd_convert.load() 只有一处调用 `parser(text, args.strip, known_dirs)`，三个引擎
+        # 共用——parse_generic 少收两个参数时 `--engine generic` 炸在 TypeError 上而不是
+        # 结果不对，这类 arity 漂移只有真的调一次才看得见（10-02 最小夹具复现）
+        entries = json.dumps([{"path": "C:\\Users\\neb\\Docs\\a.pdf", "size": 5, "mtime": 1}])
+        got = bg.parse_generic(entries, 2, set())
+        self.assertEqual([e.path for e in got], ["Docs/a.pdf"])
+        self.assertEqual(bg.parse_generic('{"entries": []}', 0, None), [])
+
+    def test_convert_engine_generic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "entries.json"
+            src.write_text(json.dumps([{"path": "home/neb/Docs/a.pdf", "size": 5,
+                                         "mtime": 1790000000}]), encoding="utf-8")
+            run_path = tmp / "run.json"
+            bg.main(["convert", "--engine", "generic", "--class", f"files={src}",
+                     "--strip", "2", "--time", "2026-10-02T15:00:00",
+                     "--out", str(run_path)])
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+            self.assertEqual(run["classes"]["files"]["entries"][0]["path"], "Docs/a.pdf")
+            self.assertIn("MANIFEST.txt", bg.render_snapshot(run))
+
 
 class TestDiffAndClassify(unittest.TestCase):
     def test_diff_added_modified_removed(self):

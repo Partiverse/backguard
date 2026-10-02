@@ -276,6 +276,13 @@
 - **E2E 夹具要与生产同形**：夹具桩只返回「脚本想要的那种形状」时，会把真 bug 遮掉——
   迁移门禁的 `gh --jq` 版在本机真实 gh 上炸、在桩上却一直「通过」，因为桩直接 echo 结论字符串。
   桩要么吐原始 JSON，要么连被调对象的返回形状一起复刻。
+- **同一处调用点喂多个分支时，每个分支都要各调一次**：`cmd_convert.load()` 用一句
+  `parser(text, args.strip, known_dirs)` 喂 restic/borg/generic 三个 parser，前两个后来加过
+  参数、generic 没跟——`--engine generic` 从来没有跑通过（`TypeError: takes 1 positional
+  argument but 3 were given`），而生产只走 borg/restic，所以一直没露头（10-02 最小夹具复现）。
+  修的时候同形不只是 arity：不剥盘符与反斜杠的路径会原样落进清单，所以也过 `_norm_path`。
+  守卫 `test_bg_semantic.py::TestParsers` 的两条新用例，两条变异各摘一处（签名 / 归一化）
+  都各自咬住——只测「返回对不对」测不到「这条分支根本没被调过」。
 
 ## 3. 改动与验证流程
 

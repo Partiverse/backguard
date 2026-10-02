@@ -281,11 +281,26 @@ def parse_borg_ls(text: str, strip: int = 0,
     return out
 
 
-def parse_generic(text: str) -> list[Entry]:
-    """run JSON 的 classes.<k>.entries 切片。"""
+def parse_generic(text: str, strip: int = 0,
+                  dirs: set[str] | None = None) -> list[Entry]:
+    """run JSON 的 classes.<k>.entries 切片。
+
+    签名必须与 restic/borg 两个 parser 同形：`cmd_convert.load()` 用同一处
+    `parser(text, args.strip, known_dirs)` 喂三个引擎，这里少收两个参数等于
+    `--engine generic` 从来没跑通过（TypeError: takes 1 positional argument
+    but 3 were given，10-02 用最小夹具复现）。同形不只是 arity——路径也要过
+    _norm_path，否则反斜杠与盘符段原样落进清单，而 generic 的输入正是别处已经
+    剥过前缀的 entries 切片，strip 默认 0 时行为与原来一致。
+    """
     obj = json.loads(text)
     items = obj if isinstance(obj, list) else obj.get("entries", [])
-    return [Entry(i["path"], int(i.get("size", 0)), float(i.get("mtime", 0))) for i in items]
+    out: list[Entry] = []
+    for i in items:
+        p = _norm_path(str(i.get("path", "")), strip)
+        if not p:
+            continue
+        out.append(Entry(p, int(i.get("size") or 0), float(i.get("mtime") or 0)))
+    return out
 
 
 def meta_from_restic_snapshots(text: str, snap_id: str | None) -> dict:
