@@ -105,6 +105,10 @@ hl=$(grep -a '演练样本内容哈希' "$L/backup.log" 2>/dev/null | tail -1)
 if [[ "$hl" =~ 哈希：([0-9]+)/([0-9]+) ]]; then
   [[ "${BASH_REMATCH[1]}" -gt 0 ]] && chk ok "已记哈希 n>0" "n=${BASH_REMATCH[1]} picked=${BASH_REMATCH[2]}" \
                                    || chk fail "已记哈希 n>0" "n=0 ＝这层证据整段退化（路径形态/抽样口径漂移）"
+elif [[ -n "$hl" ]]; then
+  # 有那行却抽不出 n/N＝措辞漂了。不另加分支的话这一节既不记 ok 也不记 fail，
+  # 「A2b 已验收」就会从一份没解析成功的报告里被读出来（fail-closed：解析不出来就是失败）
+  chk fail "n/N 行可解析" "行在但正则没命中：$hl"
 fi
 if [[ -n "$snap" ]]; then
   hex=$(grep -alE '[0-9a-f]{64}' "$snap"/MANIFEST.txt "$snap"/STORY.md "$snap"/COVERAGE.txt "$snap"/restore.md 2>/dev/null)
