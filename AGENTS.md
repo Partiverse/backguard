@@ -216,15 +216,20 @@
 - **交替模式一律 `grep -E 'a|b'`**：BSD grep（macOS / CI 的 macos runner）**不支持** BRE 的
   `\|`——它按字面量找，匹配不到就返回空。用它判断「文档里有没有这段话」会得出「文件被人改过」
   的假结论（10-01 就是这样误判了一次 AGENTS.md 被改动，而 `git status` 其实是干净的）。
-- **PowerShell 侧同样受 §1.4 约束，且有两个反直觉的坑**：`backup.ps1` 的云端推送此前只
+- **PowerShell 侧同样受 §1.4 约束，且有三个反直觉的坑**：`backup.ps1` 的云端推送此前只
   `Write-Warning` 就照打 `FULLY COMPLETE`（bash 侧 a1ad332 修过的那发没移植过来），现在
   两处 `rclone copy`（引擎仓库 + timeline）的 rc 都汇进 `$cloudFailed` 并驱动结论行
   `(engine=… cloud=…)`。写这条守卫时踩到的：**①脚本内的 `exit` 会终结宿主会话**——CI 里用
   `& "$PWD\backup.ps1"` 直调产品脚本，产品一 exit 整个 step 跟着死，「判红」与「没断言」撞成
-  同一件事（正好把守卫自己变成假绿），必须 `& powershell.exe -File …` 起子进程拿 `$LASTEXITCODE`；
+  同一件事（正好把守卫自己变成假绿），必须 `& pwsh.exe -File …` 起子进程拿 `$LASTEXITCODE`；
   **②`Start-PartiverseBackup` 顶部 `$ErrorActionPreference = "Stop"`**，那里 `Write-Error` 是
   终止性异常、会被类别循环的 `catch` 接走，把「云端没副本」混计成「引擎失败」，所以告警行走
   `Write-Host`（GH Actions 的注解流，且不被改写）。
+  **③宿主自己会漏产品的退出码**：`pwsh -Command` 在脚本末尾**没有 `exit` 语句**时，拿「最后一条
+  原生命令的退出码」当宿主退出码——8eddf05 那轮实测：四条断言全过、`=== 云端失败可见性 OK (rc=1) ===`
+  都打印了，step 仍然红，因为被测产品**本该**返回 1，那个 1 直接漏成了守卫的 rc。不显式
+  `exit 0` 这条守卫永远不可能绿（而「守卫恒红」在 CI 里长得和「产品坏了」一模一样）。成功路径
+  末尾写 `exit 0`，让结论只由断言给出。
 - **`gh ... --jq '.[0].a + "/" + .[0].b'` 会当场报错**（`expected an object but got: array`），
   而 `--jq '.[0].headSha'` 同一份输出却不报错——别拿 `--jq` 的字符串拼接版当可用查询。
   迁移驱动的门禁改成「取原始 JSON + `python3` 解析」，并**逐 job、逐 step 读 conclusion**：

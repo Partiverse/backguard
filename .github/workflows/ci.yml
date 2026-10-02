@@ -603,6 +603,11 @@ jobs:
             exit 1
           }
           Write-Host "=== 云端失败可见性 OK (rc=$code) ==="
+          # 必须显式 exit 0：pwsh -Command 在没有 exit 语句时把**最后一条原生命令的退出码**
+          # 当作宿主退出码（8eddf05 那轮实测：四条断言全过、打了 OK 行，step 仍 rc=1，因为
+          # $code 就是被测产品该有的 1）。不写这行，「产品按红线判崩」会直接把本 step 判崩——
+          # 守卫永远只可能红，等于没有守卫。
+          exit 0
 
       - name: Push debug logs
         if: failure()
