@@ -123,11 +123,15 @@ backup_borg_class() {
     fi
     [[ $create_rc -eq 1 ]] && warn "[$cls] 部分路径不存在（已归档）"
 
-    info "[$cls] 清理旧归档 (7d/4w/6m)..."
+    info "[$cls] 清理旧归档 (7d 内全留 + 7d/4w/6m)..."
+    # --keep-within=7d（10-03 定）：--keep-daily 同一天只保最新，一次手工补跑/预演就把当晚
+    # 02:34 那份顶掉（10-02 真机量到：时间轴留着 0234-night，引擎侧只剩 1353-noon），
+    # 「每份快照一个恢复点」的语义层承诺因此破口。keep-within 让近 7 天每次运行都留下
+    # 自己的归档；borg 内容寻址，同日第二份实测增量 190 B（system 仓库），代价可忽略
     # prune rc=1 = warning 级（tam 提示等），pipefail 下裸管道会炸整个备份——与 create 同等容忍
     set +e
     "$BORG" prune \
-        --stats --keep-daily=7 --keep-weekly=4 --keep-monthly=6 \
+        --stats --keep-within=7d --keep-daily=7 --keep-weekly=4 --keep-monthly=6 \
         "$repo" 2>&1 | tee -a "$LOG"
     prune_rc=${PIPESTATUS[0]}
     set -e
@@ -172,7 +176,9 @@ backup_restic_class() {
         error "[$cls] restic backup 失败 (exit $rc)"; return 1
     fi
 
-    info "[$cls] 清理旧归档 (7d/4w/6m，含 prune 回收)..."
+    info "[$cls] 清理旧归档 (7d 内全留 + 7d/4w/6m，含 prune 回收)..."
+    # --keep-within=7d 与 borg 侧同一条决定（10-03）：时间轴的「每份快照一个恢复点」要求
+    # 近 7 天每次运行都留下自己的归档，--keep-daily 的「同日只保最新」不够
     # forget 只删快照对象、不删数据——restic 帮助页原话「In order to remove the
     # unreferenced data after "forget" was run successfully, see the "prune" command」。
     # 不带 --prune 时实测（9 份日快照、每份 6 MiB 独有数据）：forget 退出 0、快照少一份，
@@ -182,7 +188,7 @@ backup_restic_class() {
     # 的唯一后果是仓库无限增长，观察期里没人会主动去查
     set +e
     "$RESTIC" -r "$repo_path" forget \
-        --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune 2>&1 | tee -a "$LOG"
+        --keep-within=7d --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune 2>&1 | tee -a "$LOG"
     local forget_rc=${PIPESTATUS[0]}
     set -e
     if [[ $forget_rc -eq 3 ]]; then

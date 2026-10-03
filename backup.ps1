@@ -143,7 +143,9 @@ function Invoke-ResticRetention {
         [string]$ResticBin = "restic"
     )
     $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
-    $out = @(& $ResticBin "-r" $RepoPath "forget" "--keep-daily=7" "--keep-weekly=4" `
+    # --keep-within=7d 与 backup.sh 两侧同一条决定（10-03）：时间轴的「每份快照一个恢复点」
+    # 要求近 7 天每次运行都留下自己的归档，--keep-daily 的「同日只保最新」不够
+    $out = @(& $ResticBin "-r" $RepoPath "forget" "--keep-within=7d" "--keep-daily=7" "--keep-weekly=4" `
         "--keep-monthly=6" "--prune" 2>&1 | ForEach-Object { "$_" })
     $rc = $LASTEXITCODE
     if ($LogPath) {

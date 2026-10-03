@@ -35,7 +35,9 @@ fail() { echo "E2E-FAIL: $1"; tail -30 "$T/out.log" 2>/dev/null || true; exit 1;
 
 mkdir -p "$T/src/文档" "$T/conf/partiverse-backup" "$T/home"
 echo hello > "$T/src/文档/tiny.txt"
-export RESTIC_PASSWORD='e2e-pass'
+# 夹具口令运行期生成：一次性、只活在 mktemp 仓库里，别在源码里留字面量（扫描器与历史皆然）
+E2E_PW="e2e-$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20)"
+export RESTIC_PASSWORD="$E2E_PW"
 
 # 配置每次重写：BACKUP_BASE 按场景分仓库根，RESTIC 可指到桩（场景 5 要它只对 forget 改口令）
 write_config() {   # $1=BACKUP_BASE  $2=restic 可执行路径
@@ -57,7 +59,7 @@ RESTIC_EXCLUDES_files=()
 RESTIC_INCLUDES_system=("$T/src")
 RESTIC_EXCLUDES_system=()
 CONF
-    printf "RESTIC_PASSWORD='e2e-pass'\n" > "$T/conf/partiverse-backup/secrets.env"
+    printf "RESTIC_PASSWORD='%s'\n" "$E2E_PW" > "$T/conf/partiverse-backup/secrets.env"
     chmod 600 "$T/conf/partiverse-backup/secrets.env"
 }
 
@@ -159,14 +161,21 @@ fi
 # 桩只把**口令**换掉（转发真实二进制），复现引擎 EXIT STATUS 表里的 12 = 口令不对：
 # 这一档若被静默吞掉，后果是仓库无限增长而每晚都报成功
 mkdir -p "$T/bin"
-cat > "$T/bin/restic-badpw-forget" <<STUB
+# 引擎真身与 forget 侧的第二口令都经环境传进桩，配 <<'STUB' 引号定界符：桩体零转义（AGENTS §2）。
+# 第二口令的落点也是运行期生成：桩只负责 source 指定的 env 文件，桩体里不出现口令 token；
+# env 文件由 printf '%s' 生成（真口令加后缀，恒不等真口令）
+export RESTIC_REAL="$REAL_RESTIC"
+export E2E_FORGET_ENV="$T/bin/forget.env"
+printf 'export RESTIC_PASSWORD="%s"\n' "${E2E_PW}-x" > "$E2E_FORGET_ENV"
+cat > "$T/bin/restic-badpw-forget" <<'STUB'
 #!/usr/bin/env bash
-for arg in "\$@"; do
-    if [ "\$arg" = "forget" ]; then
-        export RESTIC_PASSWORD='wrong-on-purpose'
-    fi
-done
-exec "$REAL_RESTIC" "\$@"
+# forget 不在 $1（前面还有 -r <repo>），按整条 argv 匹配——原桩的逐参循环同款口径
+case " $* " in
+    *" forget "*)
+        [ -r "$E2E_FORGET_ENV" ] && . "$E2E_FORGET_ENV"
+        ;;
+esac
+exec "$RESTIC_REAL" "$@"
 STUB
 chmod 755 "$T/bin/restic-badpw-forget"
 write_config "$T/badpw/repos" "$T/bin/restic-badpw-forget"
@@ -198,7 +207,7 @@ PS1="$V0_DIR/backup.ps1"
 ps1_body=$(sed -n '/^function Invoke-ResticRetention/,/^}/p' "$PS1" | tr -d '`\r' | tr '\n' ' ')
 [[ -n "$ps1_body" ]] \
     || fail "第 6 步：backup.ps1 里切不到 Invoke-ResticRetention（函数名或收尾大括号变了，这一段读不到被测面——静态守卫自己死了不等于实现没问题）"
-for want in '"-r"' '"forget"' '"--keep-daily=7"' '"--keep-weekly=4"' '"--keep-monthly=6"' '"--prune"'; do
+for want in '"-r"' '"forget"' '"--keep-within=7d"' '"--keep-daily=7"' '"--keep-weekly=4"' '"--keep-monthly=6"' '"--prune"'; do
     [[ "$ps1_body" == *"$want"* ]] \
         || fail "第 6 步：backup.ps1 的 forget argv 少了 ${want}（实得：$(grep -o '"-[^"]*"' <<<"$ps1_body" | tr '\n' ' ')）——Windows 真机一旦接入，本地仓库就只增不减，第 2 步已在 bash 侧量过那 4 KiB 与 6 MiB 的差别"
 done

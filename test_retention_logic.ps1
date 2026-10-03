@@ -25,8 +25,10 @@
 #   - `--keep-weekly/--keep-monthly` 的分档算法本身不在这条断言里：10-02 在容器里量到
 #     「9 份**跨 9 个不同日**的快照，`--keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune`
 #     一份都不裁」（daily 掉的那 2 份正好被 weekly/monthly 各接回去）。所以场景4 的夹具是
-#     **同一天 9 个钟点**（实测 9 → 2、字节回收 ~935 KiB），它证的是「策略真的执行 + prune
-#     真的回收」，不是分档算术。
+#     **同一天 9 个钟点**。10-03 起生产策略加了 `--keep-within=7d`（「时间轴每份快照一个恢复点」，
+#     10-02 真机量到的「预演顶掉当晚归档」那发的对策），夹具随之改成**双簇**（详见场景4 注释）：
+#     最新簇 9 份同日全留（keep-within 的咬点）、老簇 9 份同日裁到 2 份（prune 的咬点），
+#     实测 18 → 11、字节回收 ~2 MiB。它证的是「两个方向各自真的执行」，不是分档算术。
 #
 # 变异台账（摘 backup.ps1 的实现、这份必须报 FAIL；10-02 容器 + 真 restic 逐刀跑完，
 # 驱动 /tmp/mut_retention*.py，判定口径同 bash 侧：变异先验证落上、变异后先过语法面、
@@ -42,6 +44,9 @@
 #   m08 调用点整条摘掉（函数在没人调）   CAUGHT（4 条：场景5 三根静态钉 + 一条取不到上下文的说明）
 #   m09 调用点漏掉本轮仓库路径           CAUGHT（1 条：场景5「把本轮的仓库路径交进去」）
 #   合计 9/9 CAUGHT、0 MISS。
+#   m10（10-03，keep-within 落地后）摘掉 --keep-within=7d
+#       CAUGHT（3 条：场景1 argv 逐字 + 场景4 keep-within 全留断言塌回 2 份 + 总数 11 → 4）
+#       ——「同日只保最新」的旧行为在双簇夹具上留下的形状，正是这条变异要咬的。
 #
 # **其中三刀第一次交回的是 UNDETERMINED，而病灶在守卫自己身上**（这比 MISS 更值得记）：
 #   - m02/m05 首轮崩在 `Chk` 的参数绑定：`(Get-Content …) -match 'x'` 的左操作数是**命令表达式**，
@@ -169,8 +174,8 @@ $argv = @(Get-Content -LiteralPath $script:stubLog -ErrorAction SilentlyContinue
 Chk '场景1 只调了一次引擎' (@($argv).Count -eq 1) "实得 $(@($argv).Count) 行：$($argv -join ' | ')"
 $want1 = '-r'
 $line1 = if (@($argv).Count -ge 1) { $argv[0] } else { '' }
-Chk '场景1 argv 逐字：-r <仓库> forget --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune' `
-    ($line1 -match ('^-r\s+' + [regex]::Escape($repo1) + '\s+forget\s+--keep-daily=7\s+--keep-weekly=4\s+--keep-monthly=6\s+--prune$')) `
+Chk '场景1 argv 逐字：-r <仓库> forget --keep-within=7d --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune' `
+    ($line1 -match ('^-r\s+' + [regex]::Escape($repo1) + '\s+forget\s+--keep-within=7d\s+--keep-daily=7\s+--keep-weekly=4\s+--keep-monthly=6\s+--prune$')) `
     "实得: $line1"
 # `--prune` 是这一发的本体：forget 只删快照对象，字节要 prune 才回收。它只能出现在**这一处代码**
 # （两处各写一遍＝漏的那处将来会被当成「已覆盖」），所以是计数断言而不是「有没有」。
@@ -236,41 +241,45 @@ if (-not $realRestic) {
     $ErrorActionPreference = 'Continue'
     [void](& restic -r $repo4 init 2>&1 | Out-Null)
     $initRc = $LASTEXITCODE
-    # 9 份快照**同一天、不同钟点**（日期写死，不用相对天数：跨月/跨年时「相对今天」会让分档变成
-    # 运气，同一课见 §4.15「夹具按日期腐化」）。restic 的 --time **只认** "2006-01-02 15:04:05"，
-    # 给 RFC3339（T 分隔 + 时区）反而报解析失败——见 AGENTS §2 restic 三件事那条。
-    # **为什么不能用「9 个不同日」**（10-02 在容器里对着真 restic 量的，不是推的）：
-    # keep-daily=7 会掉最早的 2 份，而那 2 份恰好各自是本週/本月的第一份，被 keep-weekly=4 与
-    # keep-monthly=6 接回来——`forget --keep-daily=7 --keep-weekly=4 --keep-monthly=6 --prune`
-    # 在跨 9 天的夹具上**一份都不裁**（实测 9 → 9，字节 2 276 036 → 2 276 036）。同一天 9 个钟点
-    # 才是 9 → 2、字节 2 276 030 → 1 340 722。bash 侧的 test_restic_retention.sh 用跨日夹具还能
-    # 裁出 2 份，是因为它跑的是**生产链路**：本轮新增的那一份「今天」快照自己占了新的一周/月，
-    # 于是 9/10、9/11 两份没了代言人。这里调的是单独切出来的保留函数，没有「今晚」那一份，
-    # 所以夹具必须自己落在同一个日档里。
+    # **双簇夹具**（10-03 随 `--keep-within=7d` 重设计，数字是容器里对着真 restic 0.16.4 量的）：
+    # restic 的 keep-within 锚定**最新快照的时间**，不是现在——这一条是实测钉的（两份都落在
+    # 2026-08-01 的仓库加 keep-within=7d，一份都不裁）。所以「9 份同一天」的旧夹具在新策略下
+    # 会 9 → 9、字节零回收，prune 断言整段死掉。双簇各 9 份同日、各份独有数据用完即删：
+    #   A 簇 2026-08-01（最新簇）：keep-within=7d 锚在它身上 ⇒ **9 份全留**——这正是
+    #     「时间轴每份快照都有同名归档」那个决定的直接形状，旧策略（同日只保最新）只会留 2 份；
+    #   B 簇 2026-06-22（窗外的老簇）：keep-within 管不着，daily/weekly/monthly 裁到
+    #     **2 份**（17:00 归 daily、01:00 归 weekly+monthly）——prune 必须真的在裁、字节真的回收。
+    # 日期写死不用相对天数：跨月/跨年时「相对今天」会让分档变成运气（§4.15 同一课），
+    # 而锚定「最新快照」恰恰让写死日期变得确定。期望：18 → **11**（A 9 + B 2），字节掉 ≥1 MiB。
+    # restic 的 --time **只认** "2006-01-02 15:04:05"，给 RFC3339（T 分隔 + 时区）反而报解析
+    # 失败——见 AGENTS §2 restic 三件事那条。
     # 每份的独有数据必须在**下一份备份之前**从磁盘删掉：只往同一个目录累加的话，后一份快照
     # 仍引用全部旧内容，prune 无可回收，「没带 --prune」与「带了」在字节数上长得一样（§4.19 末
     # 记的那处夹具死法）。
     $hours = @('01', '03', '05', '07', '09', '11', '13', '15', '17')
     $seedRc = @()
-    foreach ($h in $hours) {
-        $uniq = Join-Path $src4 ("u-$h.bin")
-        $bytes = New-Object byte[] 262144
-        # 种子必须**按钟点变**：固定种子的话九份快照存的是同一串字节，restic 去重之后仓库里
-        # 只有一个 pack，prune 无字节可回收（10-02 首次跑实测 280 990 → 266 773，只有索引的
-        # 14 KiB），于是「没带 --prune」与「带了」又长得一样——这条夹具死法是 §4.19 那一发的
-        # 第二个变体：上一版是「忘了从磁盘删掉」，这一版是「忘了让它们不一样」。
-        (New-Object System.Random ($h -as [int])).NextBytes($bytes)
-        [System.IO.File]::WriteAllBytes($uniq, $bytes)
-        [void](& restic -q -r $repo4 backup --time "2026-08-01 $h`:00:00" $src4 2>&1 | Out-Null)
-        $seedRc += $LASTEXITCODE
-        Remove-Item -LiteralPath $uniq -Force
+    foreach ($d in @('2026-06-22', '2026-08-01')) {
+        foreach ($h in $hours) {
+            $uniq = Join-Path $src4 ("u-$h.bin")
+            $bytes = New-Object byte[] 262144
+            # 种子必须**按簇+钟点都变**：只按钟点变的话，两簇同钟点那份是同一串字节，restic
+            # 去重后 B 簇的数据 A 簇照样引用着——prune 裁了 7 份快照却几乎无字节可回收
+            # （10-03 首跑实测 2 396 390 → 2 380 618，只有索引的 15 KiB），「没带 --prune」
+            # 与「带了」又长得一样。这是 §4.19 那发夹具死法的第三个变体：第一版「忘了从磁盘
+            # 删掉」、第二版「忘了让九份不一样」，这一版「九份一样了但两簇之间又一样了」。
+            (New-Object System.Random ((($(($d -replace '-', '')) + $h)) -as [int])).NextBytes($bytes)
+            [System.IO.File]::WriteAllBytes($uniq, $bytes)
+            [void](& restic -q -r $repo4 backup --time "$d $h`:00:00" $src4 2>&1 | Out-Null)
+            $seedRc += $LASTEXITCODE
+            Remove-Item -LiteralPath $uniq -Force
+        }
     }
     $snapsBefore = (& restic -r $repo4 snapshots --json 2>&1 | Out-String)
     $countBefore = ([regex]::Matches($snapsBefore, '"short_id"')).Count
     $size = ([int64] (Get-ChildItem -LiteralPath $repo4 -Recurse -File |
         Measure-Object -Property Length -Sum).Sum)
     $ErrorActionPreference = $eap4
-    if ($initRc -ne 0 -or @($seedRc | Where-Object { $_ -ne 0 }).Count -gt 0 -or $countBefore -ne 9) {
+    if ($initRc -ne 0 -or @($seedRc | Where-Object { $_ -ne 0 }).Count -gt 0 -or $countBefore -ne 18) {
         # Skip 的理由带现场数字：一条「建夹具失败」而无信息的 Skip 与假通过只差一句没人读的理由
         Skip '场景4 真 restic 的保留与回收' ("夹具没备好（init=$initRc backup rc=$($seedRc -join ',') 快照=$countBefore）")
     } else {
@@ -280,12 +289,22 @@ if (-not $realRestic) {
         $r4 = Run-Retention $repo4 $log4 'restic'
         $snapsAfter = (& restic -r $repo4 snapshots --json 2>&1 | Out-String)
         $countAfter = ([regex]::Matches($snapsAfter, '"short_id"')).Count
+        $rowsAfter = @(& restic -r $repo4 snapshots --compact 2>$null | ForEach-Object { "$_" })
+        $augAfter = @($rowsAfter | Where-Object { $_ -match '2026-08-01' }).Count
+        $junAfter = @($rowsAfter | Where-Object { $_ -match '2026-06-22' }).Count
         $sizeAfter = ([int64] (Get-ChildItem -LiteralPath $repo4 -Recurse -File |
             Measure-Object -Property Length -Sum).Sum)
         Chk '场景4 生产函数对真仓库跑成（rc=0）' ($r4.rc -eq 0) "实得 rc=$($r4.rc) threw=$($r4.threw)"
-        Chk '场景4 快照按口径真的被裁掉（9 份同日的裁到实测 2 份）' `
-            ($countAfter -lt $countBefore -and $countAfter -ge 1) `
-            "实得 $countBefore -> $countAfter"
+        Chk '场景4 快照数精确落在双簇口径（18 → 11，多裁少裁都算坏）' `
+            ($countAfter -eq 11) "实得 $countBefore -> $countAfter"
+        # keep-within 这一半：锚在最新簇（2026-08-01）上 ⇒ 9 份同日的**全留**——
+        # 「时间轴每份快照都有同名归档」那个决定的直接形状；摘掉 --keep-within=7d 它就塌回 2 份
+        Chk '场景4 keep-within：最新簇 9 份全留（同日不再只保最新）' `
+            ($augAfter -eq 9) "实得 8月簇剩 $augAfter"
+        # 裁剪这一半：窗外的老簇不受 keep-within 保护，daily/weekly/monthly 照常裁到 2 份——
+        # keep-within 若被写成「什么都不裁」（比如错锚到现在），这一条与上一条一起把两个方向都钉死
+        Chk '场景4 老簇照常被裁（9 份同日 → 2 份，策略没有整体失灵）' `
+            ($junAfter -eq 2) "实得 6月簇剩 $junAfter"
         # 这一条是整发的本体：forget 只删对象，**字节要 prune 才回来**。少了 --prune，
         # 上一条照样绿（快照数确实少了），而仓库与云端副本一起只增不减——所以断言必须落在字节上。
         Chk '场景4 裁掉的快照真的回收了字节（--prune 生效，不是只藏起快照）' `
