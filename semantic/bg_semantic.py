@@ -994,11 +994,13 @@ def cmd_manifest(args: argparse.Namespace) -> None:
         # 分母是「当晚实际抽中的个数」而不是传入的 count：count 是上限，抽到几个算几个。
         # 0/N 是这层证据失效唯一的现场信号（源路径形态对不上时它就静默退化成只比大小），
         # 所以这行必须留在备份日志里。
-        # **锚点是 ASCII（`drill-hash`）而不是中文**：Windows PowerShell 5.1 按控制台代码页解码
-        # 子进程的 stderr，再把它写进 backup.log——10-03 真 windows runner 的实测现场是：同一轮
-        # `hashed=6` 全对、`[drill-dump]` 那条 ASCII 取证行照样读得到，而按中文匹配的两处守卫双双落空
-        #（中文段到日志时已不是原字节）。判据只能落在这档宿主也保得住的那一段上；中文尾串留给人读，
-        # 坏了不影响取证。
+        # **锚点是 ASCII（`drill-hash`）**：这行经 `2>> $env:BACKUP_LOG` 落盘，而「它在日志里读不
+        # 读得出」与后面那串中文无关——10-03 真 windows runner 实测过两次：先是按中文匹配的两处守卫
+        # 双双落空（轮 37097873811），换成 ASCII 锚点后**同样两条**仍落空（轮 37100491221 step 12），
+        # 而同轮 `hashed=6` 全对、`Add-Content` 落的 `[drill-dump]` 那条照样读得到。也就是说坏掉的是
+        # 这行**落进文件时的编码**（新嫌疑：5.1 的 `2>>` 走 Out-File 默认 UTF-16LE，与 Add-Content 的
+        # ASCII 混在同一个文件里），不是中文尾串。守卫的判据只能落在两档宿主都保得住的那一段上，
+        # 中文尾串留给人读——取证办法见 test_drill_e2e.ps1 的 `# log-bytes` 行与其台账 m55/m56。
         print(f"[manifest] drill-hash {n}/{picked} 演练样本内容哈希已记入密封清单",
               file=sys.stderr)
     sys.stdout.buffer.write(manifest_bytes(doc))
