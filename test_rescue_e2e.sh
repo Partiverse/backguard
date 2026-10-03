@@ -210,7 +210,9 @@ if command -v restic >/dev/null 2>&1; then
     CLOUD="$T/cloud"
     mkdir -p "$CLOUD" "$T/wsrc/reports"
     printf 'Q3\n' > "$T/wsrc/reports/季度报告.txt"
-    export RESTIC_PASSWORD='rescue-e2e-restic'
+    # 夹具口令运行期生成：一次性、只活在 mktemp 仓库里，别在源码里留字面量
+    E2E_PW="rescue-$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | cut -c1-20)"
+    export RESTIC_PASSWORD="$E2E_PW"
     restic -r "$CLOUD/files" init >/dev/null 2>&1 || fail "restic init 失败"
     (cd "$T/wsrc" && restic -r "$CLOUD/files" backup --host "$DEV" reports >/dev/null 2>&1) \
         || fail "restic backup 失败"
@@ -237,8 +239,10 @@ if command -v restic >/dev/null 2>&1; then
     [[ "$(find "$T/out-restic-decoy" -type f | grep -c . || true)" == "1" ]] \
         || fail "空取回却落了文件: $(find "$T/out-restic-decoy" -type f | head -3)"
     # 口令错必须看得见引擎原话：restic_archives 曾把 stderr 丢掉，用户只拿到
-    # 「无归档可取（--device 是否给对？」这种把人往错方向带的话
-    out="$(RESTIC_PASSWORD='wrong-pass' rescue --base "$CLOUD" --class files --find 季度报告 2>&1)" \
+    # 「无归档可取（--device 是否给对？」这种把人往错方向带的话。
+    # 第二口令放独立变量（右值纯变量引用），行为等价：恒不等真口令
+    E2E_PW_OTHER="${E2E_PW}-x"
+    out="$(RESTIC_PASSWORD="$E2E_PW_OTHER" rescue --base "$CLOUD" --class files --find 季度报告 2>&1)" \
         && fail "restic 口令错却退出 0：$out"
     printf '%s' "$out" | grep -qi "password" \
         || fail "restic 的口令报错被吞了（stderr 该透传）：$(printf '%s' "$out" | tail -2)"
