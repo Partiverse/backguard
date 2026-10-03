@@ -40,17 +40,25 @@
 #   ⑫落地树取证（10-03 第三轮补，静态面）：[drill-restore] 里必须带 landed 条目数 + 最深路径
 #     字符数，且那次枚举**不带 `-File`**（引擎报 `Restored 9 / 1 files/dirs` 而按文件枚举到 0
 #     个，这一对矛盾只有全条目枚举能分开），target 空时列父目录一档。见台账 m19–m21。
+#   ⑬取回落点的逃生探测（10-03 第四轮补，行为面）：夹具拿一条真样本、按产品同形的调用点跑一次
+#     Restore-DrillFile，然后对整个临时树做**目录差分**——target 之外出现的任何新路径都是
+#     「演练写到别处」的确证（真机上＝覆盖用户活着的源文件，数据面事故）。同一段差分再拿一个
+#     诱饵文件跑第二次，必须报出它，这才是上面那条判据的存活证据。另配 `restic ls` 只读回显
+#     **归档内路径的真身**：清单里那份是 bg 归一化后的输出，「盘符冒号在不在」正是待证的事，
+#     不能拿待证的东西当证据。
 #
 # **不覆盖**（如实登记）：
 #   - Windows 上 restic 归档内路径带盘符那一种形状（`C:/…` 被 bg 的 `_norm_path` 剥成 `Users/…`，
 #     于是清单里的 path 是真归档路径的**后缀**）。容器证不到这一支：posix 上 `_norm_path` 只剥掉
 #     前导斜杠，「把斜杠加回去」恒等于原形状，两种 --include 都能取回。场景11 钉住的是实现契约
 #     （不添前导斜杠），真引擎那一支由 windows job 的同一份夹具跑真 restic 判，红了看得见。
+#     10-03 第四轮的 场景13 把这一支变成**可观测**的：归档内路径真身（`restic ls`）+ 落点差分
+#     两档宿主都跑，但容器里它只会绿——盘符那一段形状是 windows runner 独有的现场。
 #   - age 对 passphrase 只读终端的交互解封（恢复码路径 B，CI 打不了字；由 init-keys/rescue 那两份
 #     守卫以桩证调用序列）。
 #   - 网盘（123Pan WebDAV）语义：场景9 的「云端」是本地目录 + 真 rclone，不是 WebDAV。
 #
-# 变异台账（10-03 起，25 刀 / 25 咬住；每刀一份独立工作树 + 回读校验落刀 + 三份文件
+# 变异台账（10-03 起，29 刀 / 29 咬住；每刀一份独立工作树 + 回读校验落刀 + 三份文件
 # 先过解析，判据取**首条 FAIL 是不是这一刀主张的那件事**，不只看 rc。驱动 `backguard-native:drill` 容器）：
 #   m01 密封侧不带 --hash-drill-samples → 场景1「内容哈希这一维真的生效」(hashed=0)
 #   m02 splat 退回带括号的 @($hashArgs) → 场景1 结论行判出「sample 没抽到条目」
@@ -97,6 +105,26 @@
 #      backup.log」——这一刀只有行为面抓得到：静态面读的是源码，源码里那行始终在
 #   三刀全在静态面：容器里正常一轮 restic 真解出文件，行为面观察不到「全是目录」这种坏法
 #   （m22 是这一组里唯一走行为面的那一支：它验的是「写没写」，不是「写法对不对」）。
+#
+# —— 场景13（逃生探测）**没有对应的产品变异**，这是设计而不是欠账：它测的是「取回落在哪里」
+#    这个尚未确定的量，摘掉任何一段实现都只会让它变成「什么都没落」而不是「落到外面」，
+#    后者才是这一发要防的坏法，而那只能由真宿主现场给出。它的存活证据在自己身上：同一段
+#    目录差分拿诱饵文件跑第二次必须报出它（m23 类坏法＝差分自己死了：枚举被 `-ErrorAction
+#    SilentlyContinue` 吞掉、比较器选错、target 前缀判据恒真——三种都让 escaped=0 变得毫无意义，
+#    而诱饵那一刀会当场报出 decoy_hits=0）。
+#
+# —— 以下四刀是 10-03 第四轮补的（场景13 这台差分机自己的存活证据；驱动 /tmp/mut_p13.sh + m24 重跑）：
+#   m23 差分「见过就跳过」换成「恒跳过」（`$seen13.Contains($fn)` → `$true`）→ 逃生判据仍绿、
+#      只有「差分判据是活的」报 decoy_hits=0——正是这一刀想要的形状：判据死了而现场全绿
+#   m24 target 前缀判据退化成恒真（`-eq 0` → `-ge -1`）→ 同一条报红
+#      **第一版这里踩过一发刀本身**：先写成 `-ge 0`，而 `IndexOf` 找不到时给 -1，`-ge 0` 依旧
+#      放行诱饵，测的是另一个语义不是「恒真」——落刀前先问「这个替换后的表达式恒吗」
+#   m25 靶子不写回原字节 → 「靶子已写回原字节」（夹具不许自己留脏状态，否则下一段的基线是假的）
+#   m26 归档内路径回显换成 `restic snapshots`（不交路径）→ 「restic ls 交出归档内路径」
+#   **登记测不到的两支**：①「取回不许写到 target 之外」这条判据本身在容器里恒绿——容器里 restic
+#   不逃（真 windows runner 才是它的现场）；②`cache13` 那档排除（restic 的 cache 目录被夹具指进
+#   临时树）防的是**假报警**，容器里那一轮一个新条目都不产生，所以它没有对应的红刀。
+#   两支都由 windows job 那一档宿主负责，别当已覆盖。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
 
@@ -623,6 +651,146 @@ if (-not $script:haveReal) {
     $rtAll = (Read-U8 $rtPath) -join "`n"
     Chk '场景8 rescue-test.txt 里没有口令' (-not $rtAll.Contains($script:pw))
     Remove-Item -LiteralPath $plain -Force -ErrorAction SilentlyContinue
+
+    # ---------- 场景13：取回到底落在哪——逃生探测（10-03 第四轮：先让它可诊断，再动手修）----------
+    # 现场是那一对互相打架的事实：取证行 `landed=3 entries listed under target`（列出来的三条
+    # 全是目录：C/、C\Users/、C\Users\runneradmin/），而引擎自己说 `Restored 9 / 1 files/dirs`。
+    # 9 正好是归档内路径的段数，所以最可疑的解释是**路径中间某段被当成绝对路径**（`C`、`C:`
+    # 还是 `/C:` 尚未确定），于是那 1 个文件写到了 target 之外。在真机上这句话的意思是
+    # 「每晚的恢复演练会覆盖用户活着的源文件」——那是数据面事故，不是取证噪声。
+    # 所以这一段判的不是「取回对不对」，而是「取回有没有跑出 target」。三条口径：
+    #  ① **探测 = 只读**：除被测那一次 Restore-DrillFile 之外，本段只跑 `restic ls`（只读）。
+    #     拿它交出**归档内路径的真身**——清单里那份是 bg 归一化过的输出，「盘符冒号到底在不在」
+    #     正是待证的那件事，不能拿它自己的输出当证据。
+    #  ② 逃生判据的**存活证据**：同一段目录差分拿诱饵文件再跑一次，必须报出恰好 1 条。
+    #     windows runner 上期望这条判据红、posix 上期望它绿——没有对照，「escaped=0」与
+    #     「差分自己是死的」（枚举被 -ErrorAction 吞掉、HashSet 比较器选错）在日志里同形。
+    #  ③ 靶子=夹具自己的源文件：先把内容换成一次性标记再跑取回，若标记消失就是「写回了活路径」
+    #     的确证（归档里那份内容与源文件同字节，光比内容永远看不出被覆盖）。测完写回原字节。
+    #     它躺在夹具的临时树里，被覆盖也只伤夹具自己。
+    $d13 = New-Dir 'probe13'
+    $plain13 = Join-Path $d13 'manifest.json'
+    $u13 = Run-Native @($script:age, '-d', '-i', $keys.ident, '-o', $plain13, $encPath)
+    Chk '场景13 探测前解封出带哈希的那份清单' `
+        ($u13.rc -eq 0 -and (Test-Path -LiteralPath $plain13 -PathType Leaf)) $u13.text
+    $s13 = $null
+    if ($u13.rc -eq 0) {
+        # 与产品同一个 sample 调用（Invoke-Drill 用的就是它），不自己拼清单条目——否则
+        # 「sample 交出的 path 形状」这一维又回到没被测
+        $p13Txt = (@(Invoke-Bg sample --manifest $plain13 --count 99 2>$null) -join "`n")
+        $p13 = $null
+        try { $p13 = ConvertFrom-Json $p13Txt } catch { $p13 = $null }
+        $knownCls = @($script:drillItems | ForEach-Object { "$($_.cls)" })
+        foreach ($cand in @(if ($p13 -and $p13.samples) { $p13.samples })) {
+            if ($knownCls -contains "$($cand.class)") { $s13 = $cand; break }
+        }
+    }
+    Chk '场景13 抽到一条类别在册的样本' ($null -ne $s13) "path=$(if ($s13) { $s13.path } else { '' })"
+    if ($s13) {
+        $cls13 = "$($s13.class)"
+        $inc13 = "$($s13.path)"
+        $name13 = $inc13.Substring($inc13.LastIndexOf('/') + 1)
+        if ($name13.IndexOf('\') -ge 0) { $name13 = $name13.Substring($name13.LastIndexOf('\') + 1) }
+        $item13 = @($script:drillItems | Where-Object { "$($_.cls)" -eq $cls13 }) | Select-Object -First 1
+        # 活路径只能按「类别 → 夹具给自己那个类别建的源目录 → 文件名」拼回来：
+        # 拿清单里的 path 直接当文件系统路径用正是被测的那个假设，用它当靶子位置等于预设答案。
+        $live13 = Join-Path $srcOf[$cls13] $name13
+        Chk '场景13 活着的源文件在位（逃生靶子）' (Test-Path -LiteralPath $live13 -PathType Leaf) "live=$live13"
+        $bytes13 = [System.IO.File]::ReadAllBytes($live13)
+        $marker13 = 'escape-probe-' + [guid]::NewGuid().ToString('N')
+        Write-U8 $live13 ($marker13 + "`n")
+        $out13 = Join-Path $d13 'out-13'
+        [void](New-Item -ItemType Directory -Force -Path $out13)
+        # restic 的 cache 目录在 $env:LOCALAPPDATA（夹具把它指进临时树），它不属于演练的取回面，
+        # 差分必须把它摘掉——否则「cache 新建了一个 pack 子目录」会被报成逃生，判据就废了。
+        $cache13 = $env:LOCALAPPDATA
+        $cwdC13 = Join-Path (Get-Location).Path 'C'
+        $cmp13 = if ($script:isWin) { [System.StringComparer]::OrdinalIgnoreCase } `
+                 else { [System.StringComparer]::Ordinal }
+        $seen13 = New-Object -TypeName 'System.Collections.Generic.HashSet[string]' -ArgumentList $cmp13
+        foreach ($p in @(Get-ChildItem -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue)) {
+            [void]$seen13.Add("$($p.FullName)")
+        }
+        $baseCount13 = $seen13.Count
+        $cwdHadC13 = Test-Path -LiteralPath $cwdC13 -PathType Container
+        $repoHadC13 = Test-Path -LiteralPath (Join-Path $Repo 'C') -PathType Container
+
+        # 就这一次：与产品调用点逐字同形（semantic.ps1 的 Restore-DrillFile 调用）
+        $rc13 = Restore-DrillFile -Bin $script:restic -Repo "$($item13.repo)" -Snap "$($item13.snap)" `
+            -Include $inc13 -Target $out13
+
+        $new13 = @(); $cache13New = 0
+        foreach ($p in @(Get-ChildItem -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue)) {
+            $fn = "$($p.FullName)"
+            if ($seen13.Contains($fn)) { continue }
+            if ($fn.IndexOf($out13, [System.StringComparison]::OrdinalIgnoreCase) -eq 0) { continue }
+            if ($cache13 -and $fn.IndexOf($cache13, [System.StringComparison]::OrdinalIgnoreCase) -eq 0) {
+                $cache13New++
+                continue
+            }
+            $new13 += $fn
+        }
+        $esc13 = @($new13)
+        $under13 = @(Get-ChildItem -LiteralPath $out13 -Recurse -Force -ErrorAction SilentlyContinue)
+        $fileUnder13 = @($under13 | Where-Object { -not $_.PSIsContainer })
+        $cwdCNow13 = Test-Path -LiteralPath $cwdC13 -PathType Container
+        $repoCNow13 = Test-Path -LiteralPath (Join-Path $Repo 'C') -PathType Container
+        $liveTxt13 = try { [System.IO.File]::ReadAllText($live13) } catch { '' }
+        $liveHit13 = (-not $liveTxt13.Contains($marker13))
+
+        # 回显先于断言：红了的那一轮必须在 CI 日志里看得见落点，光有 count 分不开三种坏法
+        Write-Host ("# p13 rc=" + $rc13 + " include=" + $inc13)
+        Write-Host ("# p13 target=" + $out13 + " target_len=" + $out13.Length)
+        Write-Host ("# p13 tree_base=" + $baseCount13 + " under_target=" + $under13.Count +
+            " files_under_target=" + $fileUnder13.Count + " escaped=" + $esc13.Count +
+            " cache_dir_new=" + $cache13New)
+        foreach ($e in @($esc13 | Select-Object -First 10)) { Write-Host "# p13 escaped-path: $e" }
+        Write-Host ("# p13 cwd=" + (Get-Location).Path + " cwd_C_dir=" +
+            $(if ($cwdCNow13) { "yes(before=$cwdHadC13)" } else { 'no' }) +
+            " repo_C_dir=" + $(if ($repoCNow13) { "yes(before=$repoHadC13)" } else { 'no' }))
+        Write-Host ("# p13 live_marker_survived=" + $(if ($liveHit13) { 'no' } else { 'yes' }))
+        $ls13 = Run-Native @($script:restic, '-r', "$($item13.repo)", 'ls', "$($item13.snap)")
+        $lsName13 = @($ls13.lines | Where-Object { $_.Contains($name13) })
+        Chk '场景13 restic ls 交出归档内路径（--include 比的就是这个形状的真身）' `
+            (@($lsName13).Count -ge 1) "rc=$($ls13.rc) lines=$(@($lsName13).Count)"
+        foreach ($l in @($lsName13 | Select-Object -First 3)) { Write-Host "# p13 internal-path: $l" }
+
+        Chk '场景13 取回不许写到 target 之外（跑出去＝演练覆盖活文件的前半）' `
+            (@($esc13).Count -eq 0) "escaped=$(@($esc13).Count) first=$(if (@($esc13).Count -gt 0) { $esc13[0] } else { '' })"
+        Chk '场景13 逃生不许覆盖活着的源文件（数据面事故，与取证无关）' (-not $liveHit13) `
+            "live=$live13 marker_gone=$liveHit13"
+        Chk '场景13 盘符段没被当成相对路径写进当前目录或源码树' `
+            (($cwdHadC13 -or (-not $cwdCNow13)) -and ($repoHadC13 -or (-not $repoCNow13))) `
+            "cwd_C=$cwdCNow13 repo_C=$repoCNow13"
+        Chk '场景13 target 之下确实落了东西（0 条是另一种坏法，别混成逃生）' `
+            (@($under13).Count -gt 0) "under=$(@($under13).Count) files=$(@($fileUnder13).Count) rc=$rc13"
+
+        # 对照：同一段差分换个「一定算新生」的输入再跑一次。这一条两档宿主都必须绿，
+        # 它是上面三条逃生判据的存活证据——没有它，escaped=0 与差分死掉长得一模一样。
+        $decoy13 = New-Dir 'decoy13'
+        $decoyFile13 = Join-Path $decoy13 'planted.txt'
+        Write-U8 $decoyFile13 'planted by the guard, not by restic'
+        $decoyHit13 = @()
+        foreach ($p in @(Get-ChildItem -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue)) {
+            $fn = "$($p.FullName)"
+            if ($seen13.Contains($fn)) { continue }
+            if ($fn.IndexOf($out13, [System.StringComparison]::OrdinalIgnoreCase) -eq 0) { continue }
+            if ($cache13 -and $fn.IndexOf($cache13, [System.StringComparison]::OrdinalIgnoreCase) -eq 0) { continue }
+            $decoyHit13 += $fn
+        }
+        Chk '场景13 差分判据是活的（诱饵文件必须被报成新生）' `
+            (@($decoyHit13).Count -ge 1) "decoy_hits=$(@($decoyHit13).Count) escaped_above=$(@($esc13).Count)"
+        Chk '场景13 诱饵真的点名到自己（差分不是只报一个数）' `
+            (@($decoyHit13 | Where-Object { $_.IndexOf($decoyFile13, [System.StringComparison]::OrdinalIgnoreCase) -eq 0 }).Count -eq 1)
+
+        # 收尾：靶子写回原字节，夹具不留脏状态（后面几段与场景8 的清扫都要干净基线）
+        [System.IO.File]::WriteAllBytes($live13, $bytes13)
+        $back13 = [System.IO.File]::ReadAllBytes($live13)
+        Chk '场景13 靶子已写回原字节（夹具自己不许留改过的源文件）' `
+            ($back13.Length -eq $bytes13.Length -and -not ([System.IO.File]::ReadAllText($live13)).Contains($marker13))
+        Remove-Item -LiteralPath $decoy13 -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $plain13 -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ---------- 场景7：结论判定本身的死断言防线（不需要真引擎，恒跑）----------
