@@ -514,19 +514,51 @@
   都各自咬住——只测「返回对不对」测不到「这条分支根本没被调过」。
 - **restic 在 Windows 上把盘符的冒号也去掉了**（10-03 真 windows runner 一手证据：清单里是
   `C/Users/runneradmin/…`，而源文件在 `C:\Users\runneradmin\…`）。`_norm_path` 剥盘符那条正则
-  要的是 `[A-Za-z]:`，在这种形状上根本不触发，所以拿它补不回来。唯一对策是
-  `_source_candidates`：第一档「补 root」在 posix 上够用（borg 走这条），第二档在首段恰好是
-  单个字母时试 `盘符: + 其余段`——Windows 的 pathlib 会把 `Path(root, "C:", "Users", …)` 换成
-  `C:\Users\…`，而 posix 上 `:` 是合法文件名字符，所以这一档**在 Linux 容器里就能测**，
-  不必等真宿主（守卫 `test_bg_semantic.py` 三条新用例；m04 逃逸的那条形状在
-  `test_windows_drive_without_colon_hashes_via_second_candidate` 里钉住）。
+  要的是 `[A-Za-z]:`，在这种形状上根本不触发，所以拿它补不回来。对策是 `_source_candidates`：
+  第一档「补 root」（posix 上 borg/restic 都走这条），第二档在首段恰好是单个字母时试
+  `盘符: + 其余段`。**这一档在 Linux 容器里可测**（posix 上 `:` 是合法文件名字符），
+  而它在真宿主上是否走到同一形状**未经测量**——守卫 `test_bg_semantic.py` 四条新用例
+  （`test_windows_drive_without_colon_hashes_via_second_candidate` 钉住 m04 逃逸的那条形状，
+  `test_source_candidates_drive_candidate_is_absolute` 钉住下一段那个绝对形式）。
   记不上哈希的后果是**静默**的：不报错，只让每轮演练整段退化成比大小。
+  **生产侧兑现了一半（10-03 第二轮，真 windows runner）**：密封那一步报
+  `[manifest] 演练样本内容哈希：6/6 个已记入密封清单`——**记哈希这一维在这台宿主上已经通了**，
+  而同一轮演练侧仍 `0 PASS / 6 FAIL`，因为六条全卡在「引擎 rc≠0 **或** 取回目录里挑不出文件」
+  那一道门上（那条 FAIL 消息把两种坏法合并成一句，分不开；`内容哈希 0，仅比大小 0` 就是
+  「一条都没走到比对」的现场）。所以**根因在取回侧，不在记哈希侧**，别照上一轮的结论再猜一次。
+  上一轮新加的 `Restore-DrillFile` 引擎 stderr 落 `$env:BACKUP_LOG`，而**CI 日志里一个字都没出现**
+  ——夹具读 BACKUP_LOG 只为自己的断言，从不回显。口径：**先让它可诊断，再动手修**（任务 #45，本轮已落）：
+  取回侧现在分三档各占一条 FAIL——①`restic 退出码 ${rc}≠0：取回命令本身失败`、②`restic 退出 0 但没挑中这条：
+  落地 N 个文件`、③`大小不符：清单 X B，取回 Y B`。**①与②必须分开**，因为「`--include` 没命中归档内形状」
+  与「落地形状变了、后缀比不中」是两种完全不同的坏法，合并版让下一轮拿到 13 条同形消息仍然盲。
+  夹具这边另加**现场回显**（FAIL 逐条 + `$env:BACKUP_LOG` 的 `[drill-restore]` 段末尾若干行），以及一段
+  **静态断言**钉住三条消息的写法（场景12）——理由见 `test_drill_e2e.ps1` 文件头：三种坏法在合并版消息下逐字同形，
+  真宿主那一轮没有任何行为面证据可取，静态面是唯一的闸门。**bash 侧 `semantic.sh:433` 那条合并消息本轮故意没动**
+  （它在 posix 上取回得回来，合并与否不影响判定；改动会让两份守卫的判据不同形，下一轮诊断先纯一档）。
+  **仍未修**：`--include` 的形状与 `semantic.ps1:300` 那个 5.1 上不存在的 `EndsWith(…, StringComparison)` 重载——
+  这两支是剩下的嫌疑人，故意留到下一轮，让拆开后的消息自己说是哪一支。
+- **「归档内路径」的字符串形状与 pathlib 在宿主上算出什么是两件事，凡把两者写死的夹具都只在一档宿主成立**
+  （10-03 第二轮红在 `semantic (windows-latest)` 的 unit tests 才露出来，实测 AssertionError）：
+  `Path("/", "C:", "Users", "x", "a.txt")` 在 posix 上是 `/C:/Users/x/a.txt`，在 Windows 上归一化成
+  **驱动器相对**的 `C:Users\x\a.txt`（root 的 `/` 被吞，相对进程当前盘解析）。推论两条：
+  **① 断言候选形状只能按 `os.sep` 分档，不能拿 posix 字面量当两档宿主的共同期望**；
+  **② 拿盘符形状去 `_tree` 落真文件的夹具必须跳过 Windows 宿主**——`Path(root, "C:/Users/x/a.txt")`
+  在 Windows 上是**绝对路径**（`C:\Users\x\a.txt`），会写到沙箱外、可能真实存在、可能没权限，
+  同一份夹具在 Linux 落在 temp 根里、在 Windows 落在别处，正是「夹具要与生产同形」反过来的坏法。
+  **③（同一条事实的实现侧，不只是夹具侧）**：按盘符切出来的候选必须**自己拼成绝对形式**——
+  `Path(root, 盘符 + ":" + os.sep + 其余段)`，而不是 `Path(root, 盘符, 其余段…)`。前者在 Windows 上
+  得到 `C:\Users\…`，在 posix 上 os.sep 是 `/`、`Path` 把重复分隔符归一掉，所以容器里那一档的可测性
+  一点没丢。守卫 `test_source_candidates_drive_candidate_is_absolute`（root 取 `os.sep`，逐档验
+  `is_absolute()`）是**唯一只有 Windows 车道能证伪的一条**——Linux 上两档都是绝对的，恒绿；
+  第一档不进这条断言，因为 borg 在 Windows 上给的是无盘符形状，那是设计而非缺陷。
+  这条与 §2「时间口径 demo/测试时间一律 naive」是同一类：**跨宿主的字面量形状不能当共同判据**。
 
 ## 3. 改动与验证流程
 
-1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（63 项全绿，
+1. 改代码 → `python3 -m unittest discover -s semantic -p "test_*.py"`（64 项全绿，
    3.9/3.14 双版本已验证；10-03 起含 restic 引擎侧五条——白名单外的引擎不记哈希、
-   restic 按归档内路径记、Windows 盘符去冒号的第二档候选×2、`_source_candidates` 形状×1）→ `shellcheck -S warning backup.sh restore.sh
+   restic 按归档内路径记、Windows 盘符去冒号的第二档候选×2、`_source_candidates` 形状×1，
+   另有一条「盘符档必须自己是绝对形式」跨宿主属性断言（Linux 上恒绿，只有 windows 车道能证伪））→ `shellcheck -S warning backup.sh restore.sh
    semantic/semantic.sh drill.sh rescue.sh` 0 告警 → 相关 shell E2E（均可本机跑，隔离临时目录不触真实配置）：
    `test_init_e2e.sh` / `test_multi_target.sh` / `test_timeline_retention.sh` /
    `test_restore_e2e.sh`（恢复链路四条路径实取）/ `test_cloud_failure.sh`（云端失败可见性）/
@@ -598,7 +630,7 @@
    `type "开关文件" 1>&2`，**不要**用 `if exist (…) (set /p MSG=<文件 & echo %MSG% 1>&2)`——括号块
    按「块解析时」展开变量，`set /p` 还没执行 `%MSG%` 就已经定值，打出来的是字面量 `%MSG%`，
    日志里没有引擎原文。两条都不在 bash 侧存在，别拿 `.sh` 那一份的形状当两档宿主通用。
-   **PowerShell 侧的 E2E 现在有第三套：`test_drill_e2e.ps1`（10-03，11 场景 / 90 条通过断言，15 刀变异台账见文件头）**，
+   **PowerShell 侧的 E2E 现在有第三套：`test_drill_e2e.ps1`（10-03，12 场景 / 95 条通过断言，21 刀变异台账见文件头）**，
    被测面是 `semantic.ps1` 的恢复演练（A2b 的 Windows 那一半，roadmap 差距清单 ⑤）。三条口径是
    这一发新增的：**① 「容器证不到的那一维，用 argv 桩钉实现契约，别假装真引擎测到了」**——
    `bg` 的 `_norm_path` 在 posix 上只剥前导斜杠（盘符段那一支根本不触发），所以 `--include` 加不加
@@ -613,6 +645,12 @@
    首轮三条断言就这样红在一份完全正确的报告上。windows job 里它同样两步（pwsh 7 + 5.1），排在
    `Install deps` 之后、产品轮之前；`Install deps` 缺 restic/age 时真引擎那几段整段 Skip，
    末行如实打 `DRILL-E2E-OK skipped=N`（**看到 OK 还要读 skipped**）。
+   **第四条口径（10-03 第二轮补）：一条只在真宿主才红的路径，夹具必须自己把现场打进 CI 日志**——
+   那一轮 step 11 报 13 条 FAIL，而三条不同坏法被合并消息压成同一句、引擎原文一个字没回显，
+   于是那轮除了「有 13 条坏了」什么都没留下。现在：有任何一条 FAIL 就把 `rescue-test.txt` 的逐条
+   FAIL 行 + `backup.log` 的 `[drill-restore]` 段（末尾 60 行）打到 step 输出里（场景12 用五条静态
+   断言钉住三条消息各自的写法与「不许并回一句」，其中两条是**反断言**——旧合并串与 `-or` 合并判据
+   回来就红）。静态面在这里不是冗余：三种坏法在合并版下逐字同形，真宿主那轮根本没有行为面证据可取。
    A2a 与 ⑧ 各另加
    一步**运行时接线断言**（`Assert integrity report wiring` / `Assert permission surface wiring`），因为逻辑测试无论多少条静态断言都
    证不了「这一轮真的落笔了」（⑧ 那一步的判据取 `AreAccessRulesProtected` 而不是「有没有
