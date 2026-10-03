@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -596,12 +597,22 @@ class TestDrillContentHash(unittest.TestCase):
             self.assertEqual(p["entry"].get("sha256"),
                              self._sha(files[p["path"].lstrip("/")]))
 
+    @unittest.skipIf(os.name == "nt",
+                     "夹具要在 temp 根下造出盘符形状的文件；Windows 的 pathlib 把 "
+                     "root/C:/Users/… 解析成绝对路径 C:\\Users\\…，落点就在沙箱外")
     def test_windows_drive_without_colon_hashes_via_second_candidate(self):
         """10-03 真 windows runner 的一手形状：restic 把盘符的冒号也去掉了，清单里是
         `C/Users/…` 而源文件在 `C:\\Users\\…`。只按「补 root」那一条公式拼，得到的是
         `C:\\C\\Users\\…`（不存在），于是**每夜 hashed=0** 而不报错——演练整段退化成比大小。
         第二档候选 `root/C:/Users/…` 在 posix 上是可创建的（`:` 是合法文件名字符），
-        所以这一维在这里就钉得住，不必等真宿主。"""
+        所以这一维在 Linux 容器里就钉得住，不必等真宿主。
+
+        **但这一档在真 Windows 宿主上到底算出什么形状，是 10-03 第二轮 CI 量出来的**：
+        `Path("/", "C:", "Users", "x", "a.txt")` 在 Windows 上是**驱动器相对**的
+        `C:Users\\x\\a.txt`（root 的 `/` 被吞掉），不是 `C:\\Users\\…`。所以本用例证明的是
+        「两档候选 + 先通用后盘符」这套机制本身，不是「Windows 上取回侧已经对齐」——
+        后者由 `test_drill_e2e.ps1` 的真宿主那一步说话。
+        """
         root = Path(tempfile.mkdtemp())
         data = b"windows payload"
         self._tree(root, {"C:/Users/x/Docs/a.txt": data})
@@ -621,15 +632,49 @@ class TestDrillContentHash(unittest.TestCase):
         self.assertNotIn("sha256", doc["classes"]["files"]["entries"][0])
 
     def test_source_candidates_shapes(self):
-        """候选顺序与触发条件：只有「首段是单个字母且还有后续段」才多出盘符那一档。
-        顺序也要钉——先试通用那档，posix 上真存在名为 `C` 的目录时不该被盘符形状抢走。"""
-        self.assertEqual(bg._source_candidates("/tmp/a/b.txt", "/"),
-                         [Path("/tmp/a/b.txt")])
-        self.assertEqual(bg._source_candidates("C/Users/x/a.txt", "/"),
-                         [Path("/C/Users/x/a.txt"), Path("/C:/Users/x/a.txt")])
-        self.assertEqual(bg._source_candidates("C", "/"), [Path("/C")])
-        self.assertEqual(bg._source_candidates("C:/Users/x/a.txt", "/"),
-                         [Path("/C:/Users/x/a.txt")])
+        """候选条数与顺序：只有「首段是单个字母且还有后续段」才多出盘符那一档。
+        顺序也要钉——先试通用那档，posix 上真存在名为 `C` 的目录时不该被盘符形状抢走。
+
+        **判据只用两档宿主共同的性质**（条数 / 第一档的构造 / 尾段 / is_absolute），
+        不写死 posix 字面量：10-03 第二轮 CI 里这一条红在 `semantic (windows-latest)`，
+        Windows 的 pathlib 把 `Path("/", "C:", "Users", "x", "a.txt")` 归一成**驱动器相对**的
+        `C:Users\\x\\a.txt`（root 的 `/` 被吞掉），字面量在那台宿主上是另一个形状。
+        """
+        # 第一档：剥前导斜杠后补 root。用**相对** root 才测得到「剥」这一步——
+        # Path("/", "/tmp/a.txt") 在两个宿主上都等于 Path("/tmp/a.txt")，斜杠开头那档是死的。
+        rel = "base"
+        self.assertEqual(bg._source_candidates("/tmp/a/b.txt", rel),
+                         [Path(rel, "tmp/a/b.txt")])
+        two = bg._source_candidates("C/Users/x/a.txt", rel)
+        self.assertEqual(len(two), 2)
+        self.assertEqual(two[0], Path(rel, "C/Users/x/a.txt"))
+        self.assertNotEqual(two[0], two[1])
+        # 盘符那一档只补冒号，不许把后面的段丢掉或弄乱（parts 比各宿主自己的分段）
+        self.assertEqual(two[1].parts[-3:], ("Users", "x", "a.txt"))
+        # 首段单个字母但没有后续段 / 形状已带冒号 / 首段不是单字母：都只有一档
+        self.assertEqual(bg._source_candidates("C", rel), [Path(rel, "C")])
+        self.assertEqual(bg._source_candidates("C:/Users/x/a.txt", rel),
+                         [Path(rel, "C:/Users/x/a.txt")])
+        self.assertEqual(bg._source_candidates("Users/x/a.txt", rel),
+                         [Path(rel, "Users/x/a.txt")])
+
+    def test_source_candidates_drive_candidate_is_absolute(self):
+        r"""第二档候选必须是**绝对**路径。10-03 第二轮在 Windows 上量的事实：
+        `Path(root, "C:", *parts)` 交回的是驱动器相对的 `C:Users\x\a.txt`——root 的 `/` 被
+        pathlib 吞掉，它相对**进程当前盘**解析，于是生产里两档候选都指不到 `C:\Users\…`，
+        `hash_drill_samples` 记 0 条而**不报错**（演练整段静默退化成比大小）。
+        实现因此自己拼 `盘符: + os.sep + 其余段`；`is_absolute()` 恰好是两档宿主共同的判据：
+        posix 上得到 `/C:/Users/…`，Windows 上得到 `C:\Users\…`。
+        摘掉实现里那个 `os.sep`，Windows 侧这条当场 False（容器里它照样绿——这一维只有
+        真宿主能证，所以 windows job 的单测步骤就是它的复验现场）。
+        第一档不在这条断言内：borg 在 Windows 上给的是 `\Users\…` 那种无盘符形状，
+        pathlib 的 `is_absolute()` 对「有根无盘符」本来就判 False，那是宿主语义不是缺陷。
+        """
+        for p in ("C/Users/x/a.txt", "D/data/y/b.txt"):
+            cands = bg._source_candidates(p, os.sep)
+            self.assertEqual(len(cands), 2, p)
+            self.assertTrue(cands[1].is_absolute(),
+                            "{0} 的盘符档不是绝对路径：{1}".format(p, cands[1]))
 
     def test_sample_passes_sha_through_and_manifest_stays_clean(self):
         root = Path(tempfile.mkdtemp())

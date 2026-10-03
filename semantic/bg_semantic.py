@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random  # 仅用于演练抽样（可复现性需求，非加密用途；加密随机一律用 secrets）
 import re
 import shutil
@@ -839,15 +840,21 @@ def _source_candidates(p: str, root: str) -> list[Path]:
     Windows：**restic 在 Windows 上把盘符的冒号去掉了**（10-03 真 runner 一手证据——清单里是
     `C/Users/runneradmin/…`，而源文件在 `C:\\Users\\runneradmin\\…`）。`_norm_path` 剥盘符那条
     正则要的是 `[A-Za-z]:`，在这种形状上根本不触发，所以拿它补不回来。
-    `Path(root, "C:", "Users", …)` 在 Windows 上会换成 `C:\\Users\\…`（只给盘符不带反斜杠的段
-    替换掉 drive，root 的其余部分保留），在 posix 上则是 `root/C:/Users/…`——`:` 在 posix 是
+    `Path(root, "C:", "Users", …)` 在 posix 上是 `root/C:/Users/…`——`:` 在 posix 是
     合法文件名字符，所以这一档**在 Linux 容器里可测**，不必等真宿主。
+    **但同一句在 Windows 宿主上算出来的是「驱动器相对」形状**（10-03 第二轮 CI 实测：
+    `Path("/", "C:", "Users", "x", "a.txt")` 得 `C:Users\\x\\a.txt`，root 的 `/` 被吞掉，
+    而它相对**进程当前盘**解析）。也就是说「两档候选在两个宿主上同形」这个推论是错的——
+    那条单测红在 `semantic (windows-latest)` 正是这件事的现场。
+    口径：**按盘符切出来的候选必须自己拼成绝对形式**（`盘符: + os.sep + 其余段`），
+    在 Windows 上得到 `C:\\Users\\…`，在 posix 上 os.sep 是 `/`、形状与原来逐字相同
+    （`Path` 会把 `C://` 那种重复分隔符归一掉），所以容器里那一档的可测性一点没丢。
     """
     cleaned = p.lstrip("/")
     cands = [Path(root, cleaned)]
     parts = cleaned.split("/")
     if len(parts) > 1 and re.fullmatch(r"[A-Za-z]", parts[0]):
-        cands.append(Path(root, parts[0] + ":", *parts[1:]))
+        cands.append(Path(root, parts[0] + ":" + os.sep + "/".join(parts[1:])))
     return cands
 
 
