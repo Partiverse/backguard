@@ -75,11 +75,13 @@
 # 重跑（映射见下）；m14/m15 的被测文件 `backup.ps1` 本轮一行未改，沿用其结论；
 # m10/m11/mA/mB/m16–m21 **随机制一起作废**，逐条写明原因——留着条目不写原因就是死刀。
 #
-# **10-03 第六轮（现场信号行的 ASCII 锚点 + 逐字节取证行）新增 m53–m56，四刀全 CAUGHT**：
+# **10-03 第六轮（现场信号行的 ASCII 锚点 → 逐字节取证 → 定案后修产品）新增 m53–m60，八刀全 CAUGHT**：
 # m53/m54 见下面「ASCII 锚点」那段（两刀各自红在容器两条车道，报的正是「判据落在锚点上」），
 # m55/m56 见「逐字节取证行」那段（m56 的作用是在容器里**复现** 5.1 那一档坏法，让取证行的读法
-# 有本地证据）。本轮 ps1 车道基线 `DRILL-E2E-OK skipped=0 ok=123`（13 场景，比上一轮多的那一条
-# 是取证行自己的存活断言），bash 车道 `E2E-OK`。
+# 有本地证据），m57–m60 见「第六轮定案」那段（钉的是修完之后落笔方式这一维）。
+# 本轮 ps1 车道基线 `DRILL-E2E-OK skipped=0 ok=136`（13 场景，比上一轮多的 13 条＝场景12 那八条
+# 写法钉 + 场景1/场景4 的字节判据与对照；容器实测。真宿主上一档没跑到本轮这份夹具，所以那个数
+# 在两档宿主是否同形**未量**——判据是 `skipped=0` 加「没有 FAIL」，不是 `ok=` 本身），bash 车道 `E2E-OK`。
 #
 # —— 本轮新刀（m27–m39：dump 机制本身 + 三档判据 + 场景12/13 的自证）：
 #   m27 stdout 换成文本读法（`ReadToEnd` + `UTF8.GetBytes`）→ 场景11 落盘字节数：disk=2056
@@ -155,14 +157,71 @@
 #       若两维都是 0 且 `nul=0`，那行根本没进日志，另案。容器基线：
 #       `tag=s1 size=1427 bom=0AE5B7 nul=0 anchor8=1 anchor16=0 dump8=6 dump16=0`、
 #       `tag=s4 size=6449 anchor8=1 dump8=30`、`DRILL-E2E-OK skipped=0 ok=123`（新增那一条在内；
-#       size 随日志长度浮动，别拿它当判据）。
-#   同一处还带**三方写路径对照**（`# host-enc add|red|std …`，只观察、不判红；它数的字节用的正是
-#   Count-ByteSeq，所以它的存活由 m55 那条断言一并担保）：`Add-Content -Encoding UTF8` / `*>>` /
-#   `>` 各写一份含两个 BMP 汉字 + 一对合法代理 + 一个孤立代理的标记，再只用 ASCII 前缀在两种读法里
-#   各读一次。容器（pwsh 7.4.5 / Linux）那一档三行完全相同：`size=25 head=70726F62 nul=0 anchor8=1
-#   anchor16=0 units=4E00 0061 9A4C 0062 DBFF DFFE 0063 FFFD 0064`——单一 UTF-8、无 BOM、合法代理对
-#   保住、孤立代理换成 FFFD。**这一行存在的理由**：`# log-bytes` 只能说「anchor 不在这个文件的
-#   UTF-16 段里」，说不出这台宿主**哪条写路径**会写成 UTF-16；三方一起给，下一轮一次读完就能定案。
+#       这组数是 **m56 那一刀当时**的基线，修完落笔后本轮是 `ok=136`；size 随日志长度浮动，别拿它当判据）。
+#   同一处还带**四档写路径对照**（`# host-enc add|red|std|apnd …`）：`Add-Content -Encoding UTF8` /
+#   `*>>` / `>` / `[IO.File]::AppendAllText`+`UTF8Encoding($false)`（＝**修法选定的那一条**）各写一份
+#   含两个 BMP 汉字 + 一对合法代理 + 一个孤立代理的标记，再只用 ASCII 前缀在两种读法里各读一次。
+#   容器（pwsh 7.4.5 / Linux）实测四行：`add`/`red`/`std` 三行 `size=25 head=70726F62 nul=0 anchor8=1
+#   anchor16=0`，`apnd` `size=26`——**那多出来的一个字节就是行尾**：三条宿主写法在 Linux 上各落一个
+#   `LF`，而选定那一条显式拼 `` `r`n ``（CI 的 Windows 宿主上四行同为 `size=26`，因为那三档本来也写
+#   CRLF）。除行尾外四行**逐字同形**：单一 UTF-8、无 BOM、合法代理对保住、孤立代理换成 `FFFD`
+#   （`units=4E00 0061 9A4C 0062 DBFF DFFE 0063 FFFD 0064`）。**别拿 `size=` 当判据**（它随宿主行尾
+#   约定浮动），判的是 `head` / `nul` / `anchor8` 那三件。**这一组存在的理由**：`# log-bytes` 只能说「anchor 不在这个文件的 UTF-16
+#   段里」，说不出这台宿主**哪条写路径**会写成 UTF-16；四档一起给，下一轮一次读完就能定案（第六轮
+#   正是如此）。它数的字节用的正是 Count-ByteSeq，所以存活由 m55 那条断言一并担保。
+#   **只有 `apnd` 那一行带硬断言**（跨宿主同形：无 BOM、无 NUL、ASCII 前缀在单字节形状里数得到），
+#   另外三行只观察——它们是**证据**不是**判据**：判据落在「选定那条在两档宿主同形」上，而不是
+#   「宿主默认值不许变」上（后者改不了，也不该由守卫去改）。**登记两条未量**：①本轮（37103795583）
+#   跑的还是**三行版**夹具，所以 `apnd` 在真 5.1 上给不给得出同一形状**尚未量**，下一轮才出结论；
+#   ②**裸 `Add-Content`（不带 `-Encoding`）在 5.1 上的默认档位没测**——它现在不在被测面里，
+#   别把「Add-Content 都带 BOM」当成量过的事实。
+#
+# —— **10-03 第六轮定案（轮 37103795583 的 step 12，真 Windows PowerShell 5.1 宿主）：那个嫌疑成立**
+#   两档宿主同一次跑的对照（`# log-bytes` / `# host-enc`，逐字照抄 CI 日志）：
+#     pwsh 7   `tag=s1 size=1891 bom=0D0AE5  nul=0   anchor8=1 anchor16=0 dump8=6 dump16=0`
+#     5.1      `tag=s1 size=2696 bom=EFBBBF  nul=484 anchor8=0 anchor16=1 dump8=6 dump16=0`
+#     pwsh 7   `add/red/std` 三行全同形：`size=26 head=70726F62 nul=0 anchor8=1 anchor16=0`
+#     5.1      `add  size=29 head=EFBBBF70 nul=0  anchor8=1 anchor16=0`（Add-Content -Encoding UTF8＝UTF-8 **带 BOM**）
+#     5.1      `red  size=38 head=FFFE7000 nul=14 anchor8=0 anchor16=1`（`*>>`＝Out-File 默认 **Unicode＝UTF-16LE**）
+#     5.1      `std  size=38 head=FFFE7000 nul=14 anchor8=0 anchor16=1`（`>` 同上）
+#   三件事一次定案：①**重定向操作符在 5.1 上把落盘编码定成 UTF-16LE**，与内容无关（同一份 `units=`
+#   在两档宿主读回完全一致，说明变的是**文件的字节形状**不是字符串）；②`Add-Content -Encoding UTF8`
+#   在 5.1 上是 **UTF-8 带 BOM**（`head=EFBBBF70`），而 `>` / `*>>` 是 UTF-16LE（`head=FFFE7000`）
+#   ——也就是说「一本账两种编码」是这一发实际的现场，`dump8=6` 与 `anchor8=0` 同轮并存就是这么来的；③**同一本 backup.log
+#   的字节形状由「每一条是谁写的、用了哪条操作符」逐条决定**，所以任何跨宿主的产物落笔都必须走
+#   显式编码，不能拿宿主默认值。修法：`semantic/semantic.ps1` 的 `Add-LogLineUtf8`
+#   （`AppendAllText` + `UTF8Encoding($false)`）成为**语义层写这本账的唯一落笔口**，子进程 stderr 先落临时件、
+#   由 `Add-NativeStreamFileToLog` 嗅 BOM 解码后再逐行经同一处写进日志。
+#   登记一条不在本次修复内的相邻事实：`backup.ps1:117` 的 `Tee-Object -Append` 也在同一本账上，
+#   它的默认编码同样随宿主变——那一支的对策是既有的「边界行/契约行一律 ASCII」口径（AGENTS §2），
+#   本轮没有证据说它坏了，也就不动它（别把没量的事写成修掉了）。
+#   修完之后仍**没有**行为面可取的那一维：5.1 把子进程 stderr 按 `[Console]::OutputEncoding` 解码
+#   之后才交给 `2>`，所以那行的**中文尾串**在真机上是否原样，本轮仍未量（runner 的代码页不是产品
+#   属性）。锚点是 ASCII 正是为了让判据不依赖这一维——**别把「anchor8 绿了」读成「中文段完好」**。
+#   本轮新增四刀，**全 CAUGHT**（结果逐条是容器实测，不是我预期的形状——m59 就是把我原先写进
+#   断言文案的理由当场证伪的那一发）：
+#   m57 把 `Invoke-Bg manifest` 那处 `2> $manErr` 退回 `2>> $env:BACKUP_LOG`（定案的坏法本体）
+#       → **只有 1 条红**：场景12「重定向操作符直接进 backup.log 的写法不许回来」。
+#         三条新行为断言一条没红——容器里两条路径都写 UTF-8，所以这一维**没有容器可判的行为面**，
+#         证据只在真 5.1 上（`# host-enc red/std head=FFFE7000`）。这就是判据必须落写法的原因。
+#   m58 `Add-LogLineUtf8` 的编码换成 `System.Text.UnicodeEncoding($false,$false)`（＝UTF-16LE 无 BOM，
+#       **在容器里主动复现真机那一档**）→ **8 条红**，其中三条是本轮新断言：
+#         场景1「backup.log 是单编码本」`nul=1368`、场景4 同名那条 `nul=6396`、
+#         场景4「那行锚点是以 UTF-8 在文件里」`anchor8=0 anchor16=1`（真机形状逐字同形）；
+#         另外场景1「取证行真的落进 backup.log」+ 存活对照 `dump8=0` 也红，
+#         证明「按 UTF-8 文本读」与「按字节数」两套判据在这一档上互相担保。
+#   m59 `UTF8Encoding($false)` 翻成 `($true)` → **只有静态那条红，`bomcnt` 没红**。
+#       这推翻了我原先写进断言文案的理由：.NET 的 `StreamWriter` 只在**流位置 0** 写 preamble，
+#       `AppendAllText` 追加到非空文件时「当作 preamble 已写过」，所以带 BOM 的编码**不会**逐行补 BOM。
+#       文案已按这一刀的判决改掉（判据本身一字未动——它绿是因为这一档真的不出 BOM，不是断言死了）。
+#       教训一条：**「$false 是为了防 BOM 累积」是猜的，m59 才是它的第一手证据**；留 `$false` 的
+#       真实理由是「显式、永不写 preamble、且不随宿主默认值变」。**「跨宿主同形」这一支本轮只量到了
+#       容器那一档**（`apnd` 那行是修完才加进探针的，37103795583 跑的是三档版），真 5.1 上的形状
+#       由下一轮那行给——所以这条是**待证的选择理由**，不是已证的事实。
+#   m60 每行前面显式拼一个 `[char]0xFEFF`（UTF-8 编码后正是 `EF BB BF`）→ **只有 `bomcnt` 那条红**
+#       （`bomcnt=8`，静态那条照常绿）。它与 m59 配对：m60 证明 `bomcnt<=1` 是活的、数的正是
+#       「BOM 出现在文件中间」这一维；m59 证明它**不该**在 $true 那一档红。两条合起来才是这条
+#       新断言的完整存活证据——只做 m59 会把它误判成死断言。
 #
 # —— 沿用（被测文件本轮一行未改，`git status` 只有三行）：
 #   m14 `--exclude` 根本没拼进 rclone 命令行 → 场景10 rescue-test.txt 没上云
@@ -212,6 +271,11 @@ function Read-U8([string]$Path) {
     @([System.IO.File]::ReadAllLines($Path, [System.Text.Encoding]::UTF8))
 }
 function Get-AsciiBytes([string]$S) { , [System.Text.Encoding]::ASCII.GetBytes($S) }
+function Get-Latin1Bytes([string]$S) {
+    # 要的是「码点 <0x100 的字符＝那一个字节」。不能用 ASCII.GetBytes：它把 0xEF 换成 '?'，
+    # 于是 BOM 序列数出来的是 3F3F3F——一条恒 0 的死判据。Latin1 是 1:1 的双射。
+    , [System.Text.Encoding]::GetEncoding('ISO-8859-1').GetBytes($S)
+}
 function Get-Utf16Bytes([string]$S) { , [System.Text.Encoding]::Unicode.GetBytes($S) }
 function Count-ByteSeq([byte[]]$Data, [byte[]]$Pat) {
     # 在**字节**里数一个序列出现几次。不先转字符串：一转就等于先替这台宿主猜了一次编码，
@@ -228,7 +292,10 @@ function Count-ByteSeq([byte[]]$Data, [byte[]]$Pat) {
     return $n
 }
 function Report-LogBytes([string]$Tag) {
-    # 一行全 ASCII 的逐字节取证：backup.log 这一时刻的形状。写这条的理由见文件头台账 m55/m56。
+    # 一行全 ASCII 的逐字节取证：backup.log 这一时刻的形状。写这条的理由见文件头台账 m55/m56，
+    # 而它**读出结论**的那一轮是 37103795583（5.1：`nul=484 anchor8=0 anchor16=1 dump8=6`）。
+    # 返回一份 hashtable 而不是裸数：断言要同时用 nul / 两种编码的锚点计数，而返回裸数组会被
+    # 函数返回摊平（§2 那条 PowerShell 坑，本仓已交过两次学费）。
     $bytes = [byte[]]@()
     if ($env:BACKUP_LOG -and (Test-Path -LiteralPath $env:BACKUP_LOG -PathType Leaf)) {
         $read = [System.IO.File]::ReadAllBytes($env:BACKUP_LOG)
@@ -241,11 +308,17 @@ function Report-LogBytes([string]$Tag) {
     $p16 = Get-Utf16Bytes '[manifest] drill-hash '
     $d8 = Get-AsciiBytes '[drill-dump] rc='
     $d16 = Get-Utf16Bytes '[drill-dump] rc='
-    $line = "# log-bytes tag=$Tag size=$($bytes.Length) bom=$bom nul=$nul" +
-        " anchor8=$(Count-ByteSeq $bytes $p8) anchor16=$(Count-ByteSeq $bytes $p16)" +
-        " dump8=$(Count-ByteSeq $bytes $d8) dump16=$(Count-ByteSeq $bytes $d16)"
-    Write-Host $line
-    return (Count-ByteSeq $bytes $d8)
+    $bomSeq = Get-Latin1Bytes ([string][char]0xEF + [string][char]0xBB + [string][char]0xBF)
+    $bomcnt = Count-ByteSeq $bytes $bomSeq
+    $r = @{
+        size = $bytes.Length; bom = $bom; nul = $nul; bomcnt = $bomcnt
+        anchor8 = (Count-ByteSeq $bytes $p8); anchor16 = (Count-ByteSeq $bytes $p16)
+        dump8 = (Count-ByteSeq $bytes $d8); dump16 = (Count-ByteSeq $bytes $d16)
+    }
+    Write-Host ("# log-bytes tag=$Tag size=$($r.size) bom=$($r.bom) nul=$($r.nul)" +
+        " anchor8=$($r.anchor8) anchor16=$($r.anchor16)" +
+        " dump8=$($r.dump8) dump16=$($r.dump16) bomcnt=$($r.bomcnt)")
+    return $r
 }
 function New-Dir([string]$Rel) {
     $p = Join-Path $script:root $Rel
@@ -456,31 +529,38 @@ if (-not $script:haveReal) {
     }
     $logText = if (Test-Path -LiteralPath $env:BACKUP_LOG -PathType Leaf) {
         (Read-U8 $env:BACKUP_LOG) -join "`n" } else { '' }
-    # 取证行**真的写出去了**才算数：Dump-DrillFile 那段 Add-Content 包在 `try { … } catch { }`
-    # 里（旁路不许把演练带走，§1.3），所以「写失败」与「这一轮没跑取回」在日志里同形。
+    # 取证行**真的写出去了**才算数：`Add-LogLineUtf8` 自己裹着 `try { … } catch { }`（旁路不许把
+    # 演练带走，§1.3），所以「写失败」与「这一轮没跑取回」在日志里同形。
     # 场景1 走的是真 restic、真 BACKUP_LOG，这一条是这条写路径唯一的行为面证据。
     Chk '场景1 取回取证行真的落进 backup.log（catch 吞掉的写失败在这里露）' `
         $logText.Contains('[drill-dump] rc=')
 
-    # 逐字节取证（无条件打印，两个宿主都打）：m55/m56 之后 5.1 那一步仍在**同样两条**上红，
-    # 所以「锚点是 ASCII 就保得住」这个假设已被现场证伪——坏的不是那一行的**内容**，而是它
-    # **落进文件时的编码**。这一行只看字节，不猜编码。四个数怎么读：
-    #   anchor8>0            → 那行以单字节形状在文件里（UTF-8/ASCII），场景1 的判据就该绿
-    #   anchor16>0 且 nul>0  → 那行以 UTF-16LE 落进了同一个文件（`2>>` 在 5.1 上走 Out-File
-    #                          默认 Unicode）→ 逐字符夹 NUL，UTF-8 读法一条都匹配不到
+    # 逐字节取证（无条件打印，两个宿主都打）。它读出结论的那一轮是 37103795583 的 step 12：
+    # `nul=484 anchor8=0 anchor16=1 dump8=6`——现场信号行**确实在文件里**，只是以 UTF-16LE 落盘
+    # （5.1 的重定向操作符走 Out-File 默认编码），而 `[drill-dump]` 那行（当时由 `Add-Content` 写的
+    # 纯 ASCII）以单字节形状落盘，所以 `dump8=6` 与 `anchor8=0` 同轮并存。四个数怎么读
+    # （修法落地后的期望是第一种）：
+    #   nul=0 且 anchor8>0   → 整本账单编码（UTF-8/ASCII），判据与操作员读得到
+    #   anchor16>0 且 nul>0  → 那行以 UTF-16LE 落进了同一个文件 → 逐字符夹 NUL，UTF-8 读法一条不匹
     #   anchor8=0 且 anchor16=0 → 那行根本没进日志（写路径 / 内容问题，与编码无关）
-    #   dump8 / dump16       → 同一份字节扫描器对**已知在位**的 Add-Content 那一行的读数，
-    #                          是这条取证行自己的存活对照（见下面的断言）
-    $dump8 = Report-LogBytes 's1'
-    Chk '场景1 逐字节扫描器是活的（已知在位的 [drill-dump] 必须数得到）' ($dump8 -ge 1) "dump8=$dump8"
+    #   dump8 / dump16       → 同一份字节扫描器对**已知在位**的取回取证行的读数，存活对照（m55）
+    $lb1 = Report-LogBytes 's1'
+    Chk '场景1 逐字节扫描器是活的（已知在位的 [drill-dump] 必须数得到）' ($lb1.dump8 -ge 1) "dump8=$($lb1.dump8)"
+    Chk '场景1 backup.log 是单编码本（没有 UTF-16LE 段夹在中间）' ($lb1.nul -eq 0) "nul=$($lb1.nul)"
+    Chk '场景1 追加写没把 BOM 补进文件中间（只许开头那一个）' ($lb1.bomcnt -le 1) "bomcnt=$($lb1.bomcnt)"
 
-    # ---------- 三方写路径对照（只观察、不判红；它用的字节扫描器由 m55 证明是活的）----------
+    # ---------- 写路径对照表（前三行只观察、不判红；它用的字节扫描器由 m55 证明是活的）----------
     # `# log-bytes` 说得出「anchor 不在这个文件的 UTF-16 段里」，说不出**这台宿主的哪条写路径会
-    # 写成 UTF-16**。所以这里在同一台宿主上，把「写一个含各档非 ASCII 的标记进文件」这件事走三条
+    # 写成 UTF-16**。所以这里在同一台宿主上，把「写一个含各档非 ASCII 的标记进文件」这件事走四条
     # 路径各写一份，然后只用 ASCII 前缀在两种读法（UTF-8 文本 / 逐字节）里各读一次：
-    #   add = Add-Content -Encoding UTF8 —— 产品写 manifest.json / rescue-test.txt 那一档
-    #   red = 字符串 *>> 文件            —— 产品写 bg 那行现场信号用的同一个重定向家族（Out-File 语义）
-    #   std = 字符串 > 文件              —— PowerShell 自己 stdout 重定向那一档
+    #   add  = Add-Content -Encoding UTF8 —— 与产品写 manifest.json 那处（Out-File -Encoding utf8）
+    #          同属「5.1 的 UTF-8 带 BOM」这一档；rescue-test.txt 走的是 [IO.File]::WriteAllLines，
+    #          .NET 那一手默认 UTF-8 **无** BOM，不在此表内
+    #   red  = 字符串 *>> 文件            —— 旧版写 bg 那行现场信号用的同一个重定向家族（Out-File 语义）
+    #   std  = 字符串 > 文件              —— PowerShell 自己 stdout 重定向那一档
+    #   apnd = [IO.File]::AppendAllText + UTF8Encoding($false) —— **修法选定的那一条**（产品侧
+    #          semantic.ps1 的 Add-LogLineUtf8 就是它），所以它不只观察，还带断言：两档宿主必须
+    #          逐字节同形，否则「编码由宿主默认值决定」这件事就没被消除。
     # 标记里故意放四件事：两个 BMP 汉字（4E00 / 9A4C）、一对**合法**代理（DBFF DFFE＝U+10FFFF）、
     # 一个**孤立**代理（D83F，任何编码方案里都不成字符，看这台宿主是换字符还是原样留）。
     # 每行字段：size=字节数 head=前 4 字节（BOM 形状） nul=0 字节个数 anchor8/anchor16=ASCII 前缀
@@ -492,24 +572,39 @@ if (-not $script:haveReal) {
     $pAdd = Join-Path $probeDir 'add.txt'
     $pRed = Join-Path $probeDir 'red.txt'
     $pStd = Join-Path $probeDir 'std.txt'
+    $pApnd = Join-Path $probeDir 'apnd.txt'
     Add-Content -LiteralPath $pAdd -Value "probe8 $probe" -Encoding UTF8
     "probe8 $probe" *>> $pRed
     "probe8 $probe" > $pStd
+    [void][System.IO.File]::AppendAllText($pApnd, ("probe8 $probe" + "`r`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
     $pre8 = Get-AsciiBytes 'probe8 '
     $pre16 = Get-Utf16Bytes 'probe8 '
-    foreach ($pf in @(@('add', $pAdd), @('red', $pRed), @('std', $pStd))) {
+    $encRows = @{}
+    foreach ($pf in @(@('add', $pAdd), @('red', $pRed), @('std', $pStd), @('apnd', $pApnd))) {
         $bytes = [System.IO.File]::ReadAllBytes($pf[1])
         $txt = [System.IO.File]::ReadAllText($pf[1], [System.Text.Encoding]::UTF8)
         $mm = [regex]::Match($txt, 'probe8 ([^\r\n]{0,16})')
         $units = if ($mm.Success) {
             (@([char[]]$mm.Groups[1].Value) | ForEach-Object { ([int]$_).ToString('X4') }) -join ' '
         } else { '-' }
+        $head = (@($bytes | Select-Object -First 4 | ForEach-Object { $_.ToString('X2') }) -join '')
+        $nulc = @($bytes | Where-Object { $_ -eq 0 }).Count
+        $a8 = Count-ByteSeq $bytes $pre8
+        $encRows[$pf[0]] = @{ head = $head; nul = $nulc; anchor8 = $a8 }
         Write-Host ("# host-enc " + $pf[0] + " size=" + $bytes.Length +
-            " head=" + (@($bytes | Select-Object -First 4 | ForEach-Object { $_.ToString('X2') }) -join '') +
-            " nul=" + @($bytes | Where-Object { $_ -eq 0 }).Count +
-            " anchor8=" + (Count-ByteSeq $bytes $pre8) +
+            " head=" + $head + " nul=" + $nulc +
+            " anchor8=" + $a8 +
             " anchor16=" + (Count-ByteSeq $bytes $pre16) + " units=" + $units)
     }
+    # 选定写路径的跨宿主不变性：无 BOM（head 直接是 'prob'）、无 NUL、ASCII 前缀在单字节形状里数得到。
+    # **这一条没有容器产品刀可咬**：探针是夹具自己按同形调那一句写出来的，不经 `Add-LogLineUtf8`，
+    # 所以摘掉实现里任何一行都不会让它红（m58 红的是另外八条，不含这条）。它数的是**宿主属性**——
+    # 存在的理由是「下一轮 5.1 给不给得出同一形状」，而本轮（37103795583）跑的仍是三行版夹具，
+    # 所以这一维在两档宿主都**未量**，登记见文件头「四档写路径对照」那段。
+    Chk '场景1 选定的落笔路径在两档宿主都是 UTF-8 无 BOM 无 NUL' `
+        ($encRows['apnd'].head -eq '70726F62' -and $encRows['apnd'].nul -eq 0 -and
+         $encRows['apnd'].anchor8 -eq 1) ("head=" + $encRows['apnd'].head)
 
     # 现场回显：这一份守卫在真 windows runner 上红过一次（10-03 第二轮 13 条 FAIL），而 CI 日志
     # 里只有「DRILL-E2E-FAIL count=13」和一句分不开成因的 FAIL 行——断言判红却没有证据，
@@ -535,7 +630,7 @@ if (-not $script:haveReal) {
     # 锚点取 `drill-hash`（ASCII）而不是那行中文，判据仍只落在这段两档宿主都保得住的字节上
     # （口径同 rescue.ps1 的 ASCII 契约行）。**但别把这条当成本发 5.1 红起来的解释**：轮
     # 37100491221 的 step 12 在锚点已是纯 ASCII 的情况下仍然红在同样两条上，所以坏的是那行
-    # **落进 backup.log 时的编码**而不是它的中文段落——新嫌疑与取证办法见文件头台账 m54–m56。
+    # **落进 backup.log 时的编码**而不是它的中文段落——定案与取证办法见文件头台账 m54–m60。
     $hm = [regex]::Match($logText, '\[manifest\] drill-hash (\d+)/(\d+)')
     Chk '场景1 现场信号那行真的进了备份日志' $hm.Success
     if ($hm.Success) {
@@ -727,9 +822,13 @@ if (-not $script:haveReal) {
     Chk '场景4 空清单的报告写明原因（读的人知道是 bg 还是清单）' `
         (@(Read-U8 $rtPath | Where-Object { $_.StartsWith('RESULT: FAIL') -and $_.Contains('sample') }).Count -eq 1)
     # 记哈希那行整场只许出现一次：日志是累加的，所以判据是计数，不是「最后一行是什么」。
-    Report-LogBytes 's4' | Out-Null
+    $lb4 = Report-LogBytes 's4'
+    Chk '场景4 两轮之后日志仍是单编码本（UTF-16LE 段一出现，下面那条计数就恒 0）' ($lb4.nul -eq 0) `
+        "nul=$($lb4.nul)"
     $hashLines2 = @([regex]::Matches((Read-U8 $env:BACKUP_LOG) -join "`n", '\[manifest\] drill-hash '))
     Chk '场景4 第二轮的日志里没有记哈希那行（开关真的管着密封侧）' ($hashLines2.Count -eq 1) "count=$($hashLines2.Count)"
+    Chk '场景4 那行锚点是以 UTF-8 在文件里（不是 UTF-16LE 里那一份）' ($lb4.anchor8 -ge 1 -and $lb4.anchor16 -eq 0) `
+        "anchor8=$($lb4.anchor8) anchor16=$($lb4.anchor16)"
 
     # ---------- 场景5：缺主身份 / 缺 age → 20 而不是「跑了 0 条」----------
     # 这一段全部带 FORCE：rescue-test.txt 是刚写过的，不绕开节流的话四种缺料全被读成 Code=10，
@@ -1148,5 +1247,38 @@ Chk '场景12 参数拼法不许换成 ArgumentList（5.1 的 .NET Framework 上
     (-not $drillSrc.Contains('ArgumentList'))
 Chk '场景12 取证行落在 backup.log（[drill-dump] 带 rc 与字节数）' `
     ($drillSrc.Contains('[drill-dump] rc=') -and $drillSrc.Contains('bytes='))
+
+# 落笔编码这一维（10-03 第六轮，轮 37103795583 的 step 12 一手字节证据）：
+# 5.1 的**重定向操作符**走 Out-File 的默认编码＝UTF-16LE（`red/std head=FFFE7000 nul=14`），
+# 而 `Add-Content -Encoding UTF8` 是带 BOM 的 UTF-8（`add head=EFBBBF70`）——于是 `drill-hash`
+# 那行以 UTF-16LE 躺在文件中，按 UTF-8 读出来的整本账里锚点一条都不匹配（实测
+# `nul=484 anchor8=0 anchor16=1`，而同文件那条纯 ASCII 的 `[drill-dump]` 行 `dump8=6` 照读得到；
+# 那个数只说明它**不是** UTF-16LE，`Add-Content` 不带 `-Encoding` 到底落哪一档本轮未量）。
+# **旧版这一维只有静态面**（容器里三条写路径全是 UTF-8，行为面在两档宿主同形，所以坏法在容器里
+# 复现不出来）；修法落地后行为面**有了**——`nul=0` / `anchor8>=1 且 anchor16=0` / `bomcnt<=1`
+# 三条由 m58（容器里主动复现 UTF-16LE 那一档，8 条红）与 m59+m60 配对证明是活的，静态这组钉的
+# 而夹具在两档宿主上都能绿（pwsh 7 三条写路径全是 UTF-8）。所以只能静态钉写法。
+# 逐字节 scanner 那条（场景1/场景4 的 `# log-bytes`）证的是「这一轮真的单编码」，
+# 这一组证的是「写法不许退回那一条会按宿主默认编码落笔的路径」——两者不重叠。
+$appendCalls = @([regex]::Matches($drillSrc, 'AppendAllText\('))
+Chk '场景12 日志落笔只有一处拼法（AppendAllText 恰好一次，多处各写一遍就会漏一处）' `
+    ($appendCalls.Count -eq 1) "count=$($appendCalls.Count)"
+Chk '场景12 显式无 BOM 的 UTF-8（$false；5.1 的 -Encoding utf8 是带 BOM 那一档，而 utf8NoBOM 这个值 5.1 没有）' `
+    ($drillSrc.Contains('System.Text.UTF8Encoding($false)'))
+Chk '场景12 重定向操作符直接进 backup.log 的写法不许回来（5.1＝UTF-16LE 落盘）' `
+    (-not ($drillSrc -match '(2|\*)>>\s*\$env:BACKUP_LOG'))
+Chk '场景12 不许拿 Add-Content 写日志（落笔编码由宿主默认值决定；本轮实测 5.1 上三条写路径三种形状）' `
+    (-not ($drillSrc -match '\bAdd-Content\b'))
+$streamHooks = @([regex]::Matches($drillSrc, 'Add-NativeStreamFileToLog\s+\$'))
+Chk '场景12 每处子进程输出都先落临时件再回读挂进日志（调用点至少 4 处：convert/generate/manifest/age）' `
+    ($streamHooks.Count -ge 4) "count=$($streamHooks.Count)"
+Chk '场景12 取证行走同一处落笔（[drill-dump] 那句也在 Add-LogLineUtf8 上）' `
+    ($drillSrc -match 'Add-LogLineUtf8\s+\("\[drill-dump\]')
+Chk '场景12 回读时先嗅 BOM（FF FE＝Unicode / EF BB BF＝UTF-8，否则会把自己的 BOM 当正文写进账）' `
+    ($drillSrc.Contains('0xFF') -and $drillSrc.Contains('0xFE') -and $drillSrc.Contains('0xEF'))
+# 反面一条（这一刀没有产品变异，是设计而不是欠账）：$PSDefaultParameterValues['Out-File:Encoding']
+# 在 5.1 上 `utf8` 带 BOM、`utf8NoBOM` 不存在，所以它修不了这一维——钉住「不许改用全局默认值」。
+Chk '场景12 不许改用 Out-File 的全局默认编码来修（5.1 无 utf8NoBOM）' `
+    (-not $drillSrc.Contains('PSDefaultParameterValues'))
 
 Result-Line

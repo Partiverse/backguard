@@ -994,13 +994,16 @@ def cmd_manifest(args: argparse.Namespace) -> None:
         # 分母是「当晚实际抽中的个数」而不是传入的 count：count 是上限，抽到几个算几个。
         # 0/N 是这层证据失效唯一的现场信号（源路径形态对不上时它就静默退化成只比大小），
         # 所以这行必须留在备份日志里。
-        # **锚点是 ASCII（`drill-hash`）**：这行经 `2>> $env:BACKUP_LOG` 落盘，而「它在日志里读不
-        # 读得出」与后面那串中文无关——10-03 真 windows runner 实测过两次：先是按中文匹配的两处守卫
-        # 双双落空（轮 37097873811），换成 ASCII 锚点后**同样两条**仍落空（轮 37100491221 step 12），
-        # 而同轮 `hashed=6` 全对、`Add-Content` 落的 `[drill-dump]` 那条照样读得到。也就是说坏掉的是
-        # 这行**落进文件时的编码**（新嫌疑：5.1 的 `2>>` 走 Out-File 默认 UTF-16LE，与 Add-Content 的
-        # ASCII 混在同一个文件里），不是中文尾串。守卫的判据只能落在两档宿主都保得住的那一段上，
-        # 中文尾串留给人读——取证办法见 test_drill_e2e.ps1 的 `# log-bytes` 行与其台账 m55/m56。
+        # **锚点是 ASCII（`drill-hash`）**：守卫的判据只能落在两档宿主都保得住的那一段上，中文尾串
+        # 留给人读。这行的落盘编码已经量过（10-03 真 windows runner，轮 37103795583 的 step 12）：
+        # 同一本 backup.log 里 `2>>` 那份是 **UTF-16LE**（`anchor8=0 anchor16=1 nul=484`），因为
+        # PowerShell 5.1 的重定向操作符走 Out-File 的默认编码 Unicode；而当时由 `Add-Content` 写的
+        # `[drill-dump]` 那行 `dump8=6` 读得到——那行本身就是纯 ASCII，所以这个数**只排除了
+        # UTF-16LE**，说不出 `Add-Content` 在 5.1 上到底是 ASCII 还是 UTF-8（两者对 ASCII 文本字节
+        # 相同），那一档登记为未量。取证行 `# log-bytes` 与写路径对照 `# host-enc` 一起给的就是
+        # 定案证据（台账见 test_drill_e2e.ps1 的 m55–m60）。修的是**落笔那一侧**
+        # （semantic.ps1 的 Add-LogLineUtf8），不是这行的措辞——但锚点保留：它让判据不依赖
+        # 「5.1 把子进程 stderr 按控制台代码页解码后再落盘」这一维，那一维至今未量。
         print(f"[manifest] drill-hash {n}/{picked} 演练样本内容哈希已记入密封清单",
               file=sys.stderr)
     sys.stdout.buffer.write(manifest_bytes(doc))
