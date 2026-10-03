@@ -492,9 +492,12 @@ function Invoke-SemanticLayer {
         # 抽样口径两侧必须逐字一致（同一个 count、种子都默认「当天」）——记了没人用、
         # 用的没记，就等于这层证据从来没存在过，而报告上看着是「有 sha256 字段」的。
         # 那一行 `[manifest] drill-hash n/N …` 是唯一的现场信号，所以 stderr 必须进日志。
-        # 判据锚点取 ASCII 的 `drill-hash`：10-03 真 windows runner 的 5.1 那一步实测——PowerShell
-        # 5.1 按控制台代码页解码子进程 stderr 后才写进 backup.log，同一轮 `[drill-dump]` 那条 ASCII
-        # 取证行读得到、`hashed=6` 也对，而按中文匹配的两处断言双双落空（中文段落进日志后已不是那串字）。
+        # 判据锚点取 ASCII 的 `drill-hash`。**但这一档宿主上「日志里读不读得出」跟中文尾串无关**：
+        # 10-03 真 windows runner 连着两轮实测——按中文匹配的两处守卫双双落空（轮 37097873811），
+        # 锚点换成纯 ASCII 之后**同样两条**再落空一次（轮 37100491221 step 12），而同轮 `hashed=6`
+        # 全对、`Add-Content` 落的 `[drill-dump]` 那条照样读得到。坏的是这一行经 `2>>` 落盘时的
+        # 编码（5.1 的 `2>>` 走 Out-File 默认 UTF-16LE，与 Add-Content 的 ASCII 混在同一个文件里？
+        # ——待 `# log-bytes` 取证行判掉，见 test_drill_e2e.ps1 台账 m55/m56），不是那串中文。
         # 口径同 rescue.ps1 的 ASCII 契约行。
         $hashArgs = @()
         if ((Get-DrillSwitch) -eq "1") {

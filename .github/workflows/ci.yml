@@ -826,7 +826,7 @@ jobs:
         shell: pwsh
         run: |
           # 对位 linux/macos 的「Assert restore drill ran clean」（本文件 :151 / :374）。
-          # 为什么逻辑守卫（test_drill_e2e.ps1，13 场景 / 122 条断言、25 刀，变异台账在文件头）不够：它再厚也测不到
+          # 为什么逻辑守卫（test_drill_e2e.ps1，13 场景 / 123 条断言，变异台账在文件头）不够：它再厚也测不到
           # 「产品轮真的调了 Invoke-Drill 并落了笔」——AGENTS §3 给 A2a 与权限面各补过一条
           # 运行时接线断言，就是同一条理由。
           # 判定顺序：先「产物在」→ 再「结论行成立」→ 最后「内容哈希这一维 n>0」。
