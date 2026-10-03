@@ -765,7 +765,8 @@
    `test_status_line.sh`（A1 状态地基：真 borg 两轮，STATUS.jsonl 每轮一行追加 + 逐行合法
    JSON + 零文件名零绝对路径；变异 s01 摘产出器 / s02 绝对路径入体 / s03 覆写，三刀全咬）/
    `test_webui.sh`（A2 本地只读状态页：白名单路由 404 面 + 最新快照语义 + 隐私诱饵四件
-   （runs、rescue-test、preflight、密封件里埋 token，任何响应不许出现）+ POST 不通 +
+   （诱饵 token 只植进**本地夹具**的 runs、rescue-test、preflight、密封件四样，断言任何
+   HTTP 响应都**不含**它们——防外泄方向的守卫，token 不出夹具、不上网络）+ POST 不通 +
    拒绝非回环绑定；变异 w01 白名单放行，咬住）。
    十七套都已挂 CI，**车道按实测墙钟分，不是按「谁新谁排前面」分**
    （linux job 全跑，26 步；macos job 只留 backup+三条 assert / restore / rescue /
