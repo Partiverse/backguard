@@ -184,6 +184,26 @@
   就是为此而留的 ASCII 信号）。核查手段（每次动 `shell: powershell` 的正文后跑一次）：
   逐 step 取 `run: |` 正文、按字符 >0x7F 报行号——`grep` 在 YAML 里分不出正文与注释。
   新增 `.ps1` 自动在事实 0 的守卫内（它扫全仓）。
+  **同一条编码事实的第三种坏法（10-03 真 windows runner 的 step 12 露头：这次红的是守卫，产品一个字
+  没错）**：5.1 会把**子进程的 stderr 按控制台代码页解码之后**才交给 PowerShell 的重定向（机制是这一档
+  宿主的标准行为；下面那对现场是实测，机制是它对得上的解释），于是
+  `Invoke-Bg … 2>> $env:BACKUP_LOG` 落进日志的中文段不再是原字节，而 ASCII 那一段不受影响。实测的那对
+  现场：同一轮 `hashed=6`、演练 `RESULT: 6 PASS / 0 FAIL`、`[drill-dump]` 那条 **ASCII 取证行**照样被
+  读到（场景12 在 5.1 步骤里是 ok），而两处**按中文匹配**的断言（「现场信号那行真的进了备份日志」/
+  「开关真的管着密封侧」的计数）双双报红。**注意这与 §2
+  「info/warn 只写 stdout」那条 bash 经验不同档**：这里坏掉的是**别的程序**写给 stderr 的字节，
+  不是 PowerShell 自己的输出（同一轮里 `[ OK ] [semantic] manifest.json.enc 已密封` 这种
+  PowerShell 自己写的中文行在 CI 日志里完好），pwsh 7 同一份夹具全绿。后果比 CI 红严重得多——真机注册的正是
+  `powershell.exe -File backup.ps1`，也就是说**在恰好最容易记 0 条哈希的那台宿主上，`0/N` 这唯一的
+  现场信号会先从日志里读不出来**，操作员拿到的是空日志。所以修的是**产品那行的措辞**：
+
+  `bg manifest --hash-drill-samples` 的信号行现在是
+  `[manifest] drill-hash n/N 演练样本内容哈希已记入密封清单`，**ASCII 锚点 `drill-hash` 在前、中文尾串
+  留给人读**，守卫的判据只落锚点（`test_drill_e2e.ps1` 场景1/场景4、`test_drill_e2e.sh:107`），
+  锚点由两刀变异证明是活的（m53 摘掉整句 print、m54 把锚点换回纯中文——两条车道各自报红，
+  且 m54 的 bash 报错里带着那行中文原文，正是「内容没错、只是没有锚点」的形状）。
+  **反面一处**：`verify-nightly.sh` 反过来**两种措辞都认**，因为部署树（`5fb2c79`）今晚还吐旧那行——
+  这是版本漂移容忍，不是判据松掉，`n/N` 的提取也不绑措辞（取行内唯一的 `数字/数字` 串）。
 - **Windows PowerShell 5.1 下，`$ErrorActionPreference="Stop"` 的作用域里原生命令只要往 stderr 写
   一行就抛终止性异常**（10-02 在真宿主上实测，run 37003329872 的 5.1 探针事实 3；宿主
   PS 5.1.26100.33438）：三种形态**全抛**——`2>&1 | Tee-Object`、`2>$null`、`2>&1 | Out-Null`，
@@ -589,8 +609,18 @@
   字节数不符（带两边数）／内容哈希不符」，旧的「退出 0 但没挑中这条：落地 N 个文件」那一档随枚举一起删掉
   ——留着就是一条永远不会被写出的死消息，所以静态面反过来钉它**不许回来**。
   **登记在案的未决**：`rescue.ps1:232` 仍是 `restore --include --target`。这一发的证据**不构成**它坏掉的证据
-  （逃生取回的是人指定的一棵浅树，踩坑的是「产品自己拼出的深 target」），但同一类坏法在那边至今
-  **一手证据都没有**（`test_rescue_e2e.ps1` 在 windows runner 上全绿，而它验的是 rc 与契约行，不是落点）。
+  （逃生取回的是人指定的一棵浅树，踩坑的是「产品自己拼出的深 target」）。**订正一处我先前写错的判断**：
+  「`test_rescue_e2e.ps1` 验的是 rc 与契约行，不是落点」不成立——场景10/12 就在枚举 `-To` 底下的文件并
+  逐条比内容，容器与真 windows runner 上都绿。真正的缺口是**它从来没量过落点的「形状」**，因而
+  「`--include` 命中了、但按 `\C\Users\…` 那种反斜杠形状整棵落进 `<To>/C/Users/…`」这种坏法在它看来
+  完全正常（文件确实在 `-To` 底下，内容也确实一致——而人要的是一棵平铺的树，不是把盘符目录重建出来）。
+  所以 10-03 补 **场景10b**：只观察、不改产品，把落点树本身变成一行取证
+  （`# rescue-landed to_len=… entries=… files=… deepest=…`，全条目枚举**不带 `-File`**，先 `Add-Content`
+  落盘再读回来解析——「只判内存字符串」是死断言），四条判据 `entries>files`（枚举真含目录）/ `files`
+  与产品自报对得上 / `deepest>to_len`（落点在 `-To` 之下而不是别处）。容器实测
+  `to_len=57 entries=6 files=3 deepest=122`。三刀各自咬住（登记为本文件台账的 **m19/m20/m21**，见下）。
+  **长 `-To` 那一档仍未测**——drill 坏在 132 字符的 target，而这里的夹具 target 只有 57，所以真机上
+  这一行给不给得出「只落三个目录」的形状，属于下一轮 windows job 的一手证据，不在这里预设结论。
 - **「归档内路径」的字符串形状与 pathlib 在宿主上算出什么是两件事，凡把两者写死的夹具都只在一档宿主成立**
   （10-03 第二轮红在 `semantic (windows-latest)` 的 unit tests 才露出来，实测 AssertionError）：
   `Path("/", "C:", "Users", "x", "a.txt")` 在 posix 上是 `/C:/Users/x/a.txt`，在 Windows 上归一化成
@@ -643,7 +673,7 @@
    `test_cloud_verify_logic.ps1`、`test_integrity_logic.ps1`、`test_retention_logic.ps1`、
    `test_perms_logic.ps1`（后三套均 10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、Windows PowerShell
    5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2 编码那条）。
-   **第六套 `test_rescue_e2e.ps1`（10-02，24 场景 / 97 条断言）不是逻辑测试而是 E2E**：它起真
+   **第六套 `test_rescue_e2e.ps1`（10-02，25 场景 / 102 条断言）不是逻辑测试而是 E2E**：它起真
    `restic`（`init` + 两次 `backup`，故意让 config 档案只有 1 个快照——单快照那一档正是摊平缺陷的
    靶子）、真 `age`（`age-keygen` 现做身份、密封 `manifest.json.enc`；路径 A 用真 age 验到底，
    路径 B 只验**调用序列**——真 age 只读 /dev/tty，CI 等不到人打字，那一档用桩），
@@ -864,7 +894,7 @@
 1. ~~rescue 单文件脚本独立版~~ bash 版已完成：`rescue.sh`（08 章 T3.2，无 Python 依赖，
    两种目录布局 + 引擎自动判定 + age 双路径；`test_rescue_e2e.sh` 锁行为）。
    PowerShell 版 `rescue.ps1` 已完成（10-02，restic-only + age 账本两条路径；
-   `test_rescue_e2e.ps1` 24 场景 / 97 条断言挂 windows job 两档宿主，见 §3）。
+   `test_rescue_e2e.ps1` 25 场景 / 102 条断言挂 windows job 两档宿主，见 §3）。
    **10-02 起的 Windows 差距清单**（对着 `backup.sh` 逐条读出来的，T1.6 上真机前先补这几发）：
    ①`backup.ps1` 顶部 `$ErrorActionPreference = "Stop"` 是**在 powershell.exe 5.1 下的未验证面**——
    Task Scheduler 注册的正是 powershell.exe，而 5.1 里原生命令的 stderr 一旦重定向
