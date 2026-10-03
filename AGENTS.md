@@ -184,31 +184,75 @@
   就是为此而留的 ASCII 信号）。核查手段（每次动 `shell: powershell` 的正文后跑一次）：
   逐 step 取 `run: |` 正文、按字符 >0x7F 报行号——`grep` 在 YAML 里分不出正文与注释。
   新增 `.ps1` 自动在事实 0 的守卫内（它扫全仓）。
-  **同一条编码事实的第三种坏法（10-03 真 windows runner 的 step 12 露头，随后被自己的证据推翻成因）**：
+  **同一条编码事实的第三种坏法（10-03 真 windows runner 的 step 12 露头；两次误判之后由逐字节取证定案）**：
   现场是两处**按中文匹配**的断言（「现场信号那行真的进了备份日志」/「开关真的管着密封侧」的计数）
   双双报红，而同轮 `hashed=6`、演练 `RESULT: 6 PASS / 0 FAIL`、`[drill-dump]` 那条 **ASCII 取证行**
   照样被读到（场景12 在 5.1 步骤里是 ok）。第一版解释是「5.1 把**子进程的 stderr 按控制台代码页
   解码之后**才交给重定向，于是中文段不再是原字节」，并据此把产品那行的判据锚点改成 ASCII。
   **下一轮这条解释被证伪（轮 37100491221，step 12 仍红，红的仍是同样两条）**：ASCII 字节在任何代码页
-  下都不变形，所以坏的不是那行的**内容**，而是它**落进文件时的编码**。新嫌疑（尚未定案）：5.1 的
-  `2>>` / `*>>` 走 `Out-File` 的默认编码（Unicode = UTF-16LE），而 `[drill-dump]` 那行是
-  `Add-Content` 落的（默认 ASCII/Default），**同一个 backup.log 里两种编码**；按 UTF-8 读时 UTF-16
-  段每个字符夹一个 NUL，`[manifest\] drill-hash` 一条也匹配不到。判掉它的取证手段是一行**只看字节**
-  的 `# log-bytes tag=… size= bom= nul= anchor8= anchor16= dump8= dump16=`（`test_drill_e2e.ps1` 的
-  `Report-LogBytes`，场景1/场景4 各打一次），其解释力由 m56 在容器里**主动复现**这一档坏法来本地验过
-  （`nul=1223 dump8=0 dump16=6`）。同一处还带**三方写路径对照**（`# host-enc add|red|std`：
-  `Add-Content -Encoding UTF8` / `*>>` / `>` 各写一份含两个 BMP 汉字、一对合法代理与一个孤立代理的
-  标记，再只用 ASCII 前缀在两种读法里各读一次）——理由是 `log-bytes` 只说得出「anchor 不在这个文件
-  的 UTF-16 段里」，说不出这台宿主**哪条写路径**会写成 UTF-16；容器（pwsh 7.4.5）那一档三行完全同形
-  （`size=25 head=70726F62 nul=0 anchor8=1 anchor16=0`，孤立代理换成 `FFFD`、合法代理对原样保住），
-  所以下一轮 5.1 那三行如果分开了，就是当场定案的证据，不需要再补一轮。口径两条：**「某段字节进了日志读不出来」先问是哪条写路径写的，
-  别先假设是编码解码**；**只观察的取证行也要配硬断言**（m55：扫描器致盲 → 那条存活断言单独红）。
-  **注意这与 §2「info/warn 只写 stdout」那条 bash 经验不同档**：这里坏掉的是**别的程序**写给 stderr
-  的字节如何落盘，不是 PowerShell 自己的输出（同一轮里 `[ OK ] [semantic] manifest.json.enc 已密封`
-  这种 PowerShell 自己写的中文行在 CI 日志里完好），pwsh 7 同一份夹具全绿。后果比 CI 红严重得多——
-  真机注册的正是 `powershell.exe -File backup.ps1`，如果确认是混合编码，那么**每一个经 `2>>` 进日志的
-  子进程输出行在 Windows 夜间日志里都是半可读状态**（不止这一行），操作员拿到的是一本两种编码混写的账。
-  所以修的是**产品那行的措辞**（锚点这件事仍然成立，两档车道都用它）：
+  下都不变形，所以坏的不是那行的**内容**，而是它**落进文件时的编码**。
+  **定案（轮 37103795583 的 step 12，同一份夹具在两档宿主各跑一次，取证行逐字照抄）**：
+  `# log-bytes tag=s1` —— pwsh 7 `nul=0 anchor8=1 anchor16=0 dump8=6`，5.1 `bom=EFBBBF nul=484 anchor8=0 anchor16=1 dump8=6`；
+  `# host-enc` 写路径对照（**该轮跑到的是三档版夹具**）—— pwsh 7 三行全同形（`size=26 head=70726F62 nul=0 anchor8=1`），
+  5.1 三行分开：`add size=29 head=EFBBBF70 anchor8=1`（`Add-Content -Encoding UTF8`＝UTF-8 **带 BOM**）、
+  `red size=38 head=FFFE7000 nul=14 anchor8=0 anchor16=1`（`*>>`）、`std` 同（`>`）。也就是说
+  **5.1 的重定向操作符走 `Out-File` 的默认编码 Unicode＝UTF-16LE**，而 `Add-Content -Encoding UTF8`
+  是 UTF-8 带 BOM——**同一本 backup.log 的编码逐条由「谁写的、用哪条写路径」决定**（**别把这一行读成
+  「`Add-Content` 不带 `-Encoding` 也是某一档」**：那一档从没进过探针，所以结论只到「量到的这三条
+  互相不同形」为止）。按 UTF-8 读时
+  UTF-16 段每个字符夹一个 NUL，`[manifest] drill-hash` 一条都匹配不到；`[drill-dump]` 那行是纯 ASCII，
+  在两种编码下字节形状相同，所以它 `dump8=6` 与那条 `anchor8=0` 同轮并存。`units=` 那一列在两档宿主
+  读回完全一致（`4E00 0061 9A4C 0062 DBFF DFFE 0063 FFFD 0064`），这是关键对照：变的是**文件的字节
+  形状**，不是字符串内容——所以「代码页解码把中文弄坏了」这一支同时被排除。
+  判掉它靠的是那行**只看字节**的 `# log-bytes tag=… size= bom= nul= anchor8= anchor16= dump8= dump16=`
+  （`test_drill_e2e.ps1` 的 `Report-LogBytes`，场景1/场景4 各打一次）＋ `# host-enc` 三方写路径对照，
+  两者的解释力都由容器验过：m55 证明扫描器不是死的（致盲 → 存活断言单独红），m56 在容器里**主动复现**
+  UTF-16LE 那一档坏法（`nul=1223 dump8=0 dump16=6`），所以真机上那三个数不是新的猜测。
+  **口径三条**：①**「某段字节进了日志读不出来」先问是哪条写路径写的，别先假设是编码解码**；
+  ②**跨宿主的产物落笔一律走显式编码，不要拿宿主默认值**——本仓的落笔口是 `Add-LogLineUtf8`
+  （`[IO.File]::AppendAllText` + `New-Object System.Text.UTF8Encoding($false)`），选它的理由是
+  「显式、两档宿主同形、且永不写 preamble」。**注意「$false 是防 BOM 逐行累积」这句是错的，
+  m59 当场把它证伪**：.NET 的 `StreamWriter` 只在**流位置 0** 写 preamble，`AppendAllText`
+  追加到非空文件时不会补 BOM，所以 `($true)` 那一档在容器里只有静态判据红、`bomcnt` 不红；
+  `bomcnt<=1` 那条的存活证据是配对的 **m60**（显式在每行前拼 `[char]0xFEFF` → `bomcnt=8` 单独红）。
+  **一条新断言的完整存活证据是「该红的红」加「不该红的不红」两刀，只做前者会把它误判成死断言。**
+  ③**只观察的取证行也要配硬断言**（m55），而取证行的**解释力要在本地复现**（m56）。
+  **反面一条（不要这样修）**：`$PSDefaultParameterValues['Out-File:Encoding']` 不用。它的值面在 5.1 上
+  就不干净——`utf8` 那一档**带 BOM**（本轮实测 `-Encoding UTF8` 落 `head=EFBBBF70`），而 `utf8NoBOM`
+  这个值在 PowerShell 6 之前不存在；带 BOM 也不会「逐行累积」（§2 上面 m59 那条：preamble 只写在流
+  位置 0），但它给的仍不是**跨宿主同形的无 BOM UTF-8**。更要紧的是它改的是**全局默认**：这一发的病灶
+  恰恰是「同一本账由多个写入者各自按自己的默认落笔」，而哪些写入者真的绑定 `Out-File` 那个 `-Encoding`
+  是一份读不到的宿主配置（`Tee-Object` 自带 `-Encoding`，它受不受影响本轮**未量**）。既然要修的就是
+  「默认值随写入者变」，用另一层默认去管它等于换个地方猜同一件事——显式那一手不需要知道任何默认值。
+  静态面反过来钉它不许出现。
+  **修法落点**：`semantic.ps1` 里四处子进程输出（convert / generate / manifest / age）改成
+  `2> <临时件>` 或 `*> <临时件>`，再由 `Add-NativeStreamFileToLog` **嗅 BOM 后解码**（`FF FE`→Unicode、
+  `EF BB BF`→UTF-8 去 BOM、否则按 UTF-8）并逐行走同一处落笔；`[drill-dump]` 取证行从 `Add-Content`
+  换到同一处。守卫两头：行为面在容器可判（`nul=0`、`anchor8>=1 且 anchor16=0`、`bomcnt<=1`），
+  写法面由场景12 八条静态钉（`AppendAllText` 只一处拼法、`*>>`/`2>>` 直接进 `$env:BACKUP_LOG` 不许回来、
+  不许 `Add-Content` 写日志、回读先嗅 BOM、不许改用全局默认编码、每处子进程输出都挂回读）。
+  **四刀（全 CAUGHT，结果是容器实测而非我预期的形状）**：**m57** 把 manifest 那处退回
+  `2>> $env:BACKUP_LOG` → **只有静态面那 1 条红**，三条新行为判据一条没红——容器里两条路径都写 UTF-8，
+  这一维**没有容器可判的行为面**，证据只在真 5.1 上（`# host-enc red/std head=FFFE7000`），这正是判据
+  必须落写法的原因；**m58** 把 `Add-LogLineUtf8` 的编码换成 `UnicodeEncoding($false,$false)`
+  （＝UTF-16LE 无 BOM，**在容器里主动复现真机那一档**）→ **8 条红**，其中 `nul=1368`/`nul=6396` 与
+  `anchor8=0 anchor16=1` 三条是本轮新加的，和真机那行**逐字同形**；**m59** 才是把 `UTF8Encoding($false)`
+  翻成 `($true)` → **只有静态那条红、`bomcnt` 不红**（它证伪了我原先写进断言文案的理由，见上面②）；
+  **m60** 显式在每行前拼 `[char]0xFEFF` → **只有 `bomcnt` 那条红**（`bomcnt=8`）。m59 与 m60 配对才构成
+  `bomcnt<=1` 的完整存活证据——**只做前者会把它误判成死断言**。
+  **相邻而本轮不动的一支**：`backup.ps1:117` 的 `Tee-Object -Append` 写的也是同一本账，它的默认编码
+  同样随宿主变（§2 边界行用 ASCII `run boundary:` 正是为此）。这一发没有证据说它坏，就不动它，
+  也不把它写进「已修」——真机上它那一行的字节形状仍未量。
+  **仍未量的一维（别把修好读过头）**：5.1 在把子进程 stderr 交给 `2>` 之前按 `[Console]::OutputEncoding`
+  解码，所以那行的**中文尾串**在真机上是否原样，至今未量（runner 的代码页不是产品属性）。锚点保留的
+  理由正在这里——**别把「`anchor8` 绿了」读成「中文段完好」**，判据只落在那段两档宿主都保得住的 ASCII 上。
+  **另一条未量（别把修好读成已跨宿主验证）**：探针里代表选定写路径的那一行（`# host-enc apnd`）是
+  这一轮修完才加进夹具的，**轮 37103795583 跑的还是三档版**，所以 `[IO.File]::AppendAllText` +
+  `UTF8Encoding($false)` 在真 5.1 上到底落什么形状**尚未量**——它带一条跨宿主断言，下一轮那一行给得出
+  `head=70726F62 nul=0` 才算证住，给不出就是修法本身选错路（届时照 m58 的形状改判据，不是照旧默认值）。
+  后果这一层现在说得准了：真机注册的正是 `powershell.exe -File backup.ps1`，在修法之前
+  **每一个经重定向进日志的子进程输出行，在 Windows 夜间日志里都是 UTF-16LE**，操作员拿到的是一本
+  两种编码混写的账——不止那一行。措辞那一维仍然保留：
 
   `bg manifest --hash-drill-samples` 的信号行现在是
   `[manifest] drill-hash n/N 演练样本内容哈希已记入密封清单`，**ASCII 锚点 `drill-hash` 在前、中文尾串
@@ -727,7 +771,7 @@
    `type "开关文件" 1>&2`，**不要**用 `if exist (…) (set /p MSG=<文件 & echo %MSG% 1>&2)`——括号块
    按「块解析时」展开变量，`set /p` 还没执行 `%MSG%` 就已经定值，打出来的是字面量 `%MSG%`，
    日志里没有引擎原文。两条都不在 bash 侧存在，别拿 `.sh` 那一份的形状当两档宿主通用。
-   **PowerShell 侧的 E2E 现在有第三套：`test_drill_e2e.ps1`（10-03，13 场景 / 123 条通过断言，变异台账在文件头、第六轮到 m56）**，
+   **PowerShell 侧的 E2E 现在有第三套：`test_drill_e2e.ps1`（10-03，13 场景 / 容器 136 条通过断言，变异台账在文件头、第六轮到 m60）**，
    被测面是 `semantic.ps1` 的恢复演练（A2b 的 Windows 那一半，roadmap 差距清单 ⑤）。**取回侧在
    第五轮换成了 `restic dump`（机制与三条 PowerShell 实测事实见 §2「第五轮」那条），下面 ①–⑥ 是
    换机制前后都成立、且各自被一刀证明过的口径。**
