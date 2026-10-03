@@ -690,7 +690,10 @@ append_status_line() {
     local rc="$1" dur="$2"
     [[ -n "${BACKUP_BASE:-}" && -d "${BACKUP_BASE}/timeline" ]] || return 0
     local tl="$BACKUP_BASE/timeline"
-    local ts snapshots dr_pass=null dr_total=null dr_age=null
+    local ts snapshots engine dr_pass=null dr_total=null dr_age=null
+    # engine 是「引擎」（borg|restic），不是部署平台——PLATFORM 的取值是 macos/linux/windows，
+    # 10-04 真机首行把它写成 "macos" 才暴露：读者要的是「哪个引擎写的归档」
+    engine="borg"; [[ "${PLATFORM:-}" == windows ]] && engine="restic"
     ts="$(date +"%Y-%m-%dT%H:%M:%S%z")"; ts="${ts%??}:${ts: -2}"
     snapshots=$(find "$tl" -mindepth 4 -maxdepth 4 -type d 2>/dev/null | wc -l | tr -d ' ') || true
     if [[ -f "$tl/rescue-test.txt" ]]; then
@@ -716,7 +719,7 @@ append_status_line() {
     }
     {
         printf '{"format":"backguard/status/1","ts":"%s","device":"%s","engine":"%s","sha":"%s","rc":%s,"dur_s":%s,"engine_failed":%s,"cloud_push_failed":%s,"cv_state":"%s","cv_failed":%s,"cv_healed":%s,"cv_unknown":%s,"ig_state":"%s","ig_checks":%s,"ig_failed":%s,"drill_pass":%s,"drill_total":%s,"drill_age_d":%s,"snapshots":%s}\n' \
-            "$ts" "${DEVICE_ID:-unknown}" "${PLATFORM:-unknown}" "${RUN_GIT_SHA:-nogit}" \
+            "$ts" "${DEVICE_ID:-unknown}" "$engine" "${RUN_GIT_SHA:-nogit}" \
             "$rc" "$dur" "${failed:-0}" "${cloud_failed:-0}" \
             "$cv_state" "${verify_failed:-0}" "${verify_healed:-0}" "${verify_unknown:-0}" \
             "$ig_state" "$ig_checks" "${integrity_failed:-0}" \

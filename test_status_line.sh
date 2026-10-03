@@ -7,6 +7,9 @@
 #   s01 摘掉 EXIT trap 里的 append_status_line 调用   BITTEN count=1  首条=第 1 轮后文件必须存在
 #   s02 产出器把 $LOG 绝对路径写进字段               BITTEN count=2  首条=隐私扫描（$T 前缀）
 #   s03 `>>` 改 `>`（覆写）                          BITTEN count=1  首条=第 2 轮后必须两行
+#   s04 engine 字段照抄 PLATFORM                     BITTEN count=1  首条=engine 应为 borg|restic
+#       ——10-04 真机首行 `"engine":"macos"` 暴露的那一刀：夹具 PLATFORM=macos，PLATFORM 漏进
+#         engine 字段时本断言当场红
 # 不覆盖（如实登记）：restic 分支（windows 侧）的产出器由 test_status_emit_logic.ps1 与
 # windows job 的产品轮覆盖；云端自证/完整性在真云与 CI 真实备份 job 里另有判据。
 set -euo pipefail
@@ -75,6 +78,10 @@ if grep -qF "$T" "$STATUS_JSONL"; then fail "隐私：状态行里出现了夹�
 # 计数字段形状：SKIP_WEBDAV ⇒ cv_state=skipped；首轮完整性窗口刚开 ⇒ 跑过且 3 项
 grep -q '"cv_state":"skipped"' "$STATUS_JSONL" || fail "cv_state 应为 skipped（BACKUP_TARGETS 空）：$(cat "$STATUS_JSONL")"
 grep -q '"ig_state":"pass"' "$STATUS_JSONL" || fail "ig_state 应为 pass（首轮窗口刚开）：$(cat "$STATUS_JSONL")"
+# engine 是引擎（borg|restic），不是部署平台——10-04 真机首行写成 "macos"（PLATFORM 漏进了
+# engine 字段）才暴露：夹具 PLATFORM=macos，engine 必须是 borg。变异 s04 就是这一刀
+grep -qE '"engine":"(borg|restic)"' "$STATUS_JSONL" \
+    || fail "engine 应为 borg|restic（不是 PLATFORM）：$(cat "$STATUS_JSONL")"
 
 # ---------- 第 2 轮：追加成两行（覆写会停在 1 行）----------
 run_backup || fail "第 2 轮 backup.sh 没跑成（rc=$?）"
