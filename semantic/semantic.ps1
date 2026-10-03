@@ -165,9 +165,34 @@ function Restore-DrillFile {
     $rc = $LASTEXITCODE
     if ($env:BACKUP_LOG) {
         $tail = @($o | Where-Object { $_ } | Select-Object -Last 3)
+        # 落地树单独取证（10-03 第三轮的量法）：真 windows runner 上引擎报 rc=0、
+        # `Restored 9 / 1 files/dirs (13 B / 13 B)`（9 正好是归档路径的段数），而按 `-File`
+        # 递归枚举到的是 **0 个文件**——「文件根本没落盘」与「落盘了但枚举/判定看不见」在
+        # rescue-test.txt 里同形。所以这里连**目录**一起列（只列 target 之下的相对名），
+        # 并记最深那条的字符数：Windows 的 MAX_PATH 是 260，而归档内路径本身就有 130 字符，
+        # 拼上 target 就压到那条线上——长度是这一发唯一的嫌疑人，不写出来下一轮还是盲的。
+        $landed = @(Get-ChildItem -LiteralPath $Target -Recurse -ErrorAction SilentlyContinue)
+        # target 底下什么都没有时，光看 landed=0 仍分不开「落到了 target 的兄弟目录」与
+        # 「restic 写到别处去了」——所以只在这一档再往上列一层（**纯读**：不碰任何引擎命令，
+        # 见 AGENTS §2「探测不许与被测命令同形」）。
+        $where = "target"
+        if ($landed.Count -eq 0) {
+            $par = Split-Path -Parent $Target
+            $landed = @(Get-ChildItem -LiteralPath $par -ErrorAction SilentlyContinue)
+            $where = "parent"
+        }
+        $maxLen = 0
+        foreach ($it in $landed) { if ($it.FullName.Length -gt $maxLen) { $maxLen = $it.FullName.Length } }
+        $names = @($landed | Select-Object -First 12 | ForEach-Object {
+            $rel = "$($_.FullName)"
+            if ($rel.Length -gt $Target.Length) { $rel = $rel.Substring($Target.Length) }
+            ($rel -replace '^[\\/]+', '') + $(if ($_.PSIsContainer) { "/" } else { "" })
+        })
         try {
-            [void](Add-Content -LiteralPath $env:BACKUP_LOG -Value `
-                ("[drill-restore] rc=$rc include=$inc target=$Target" + "`n" + ($tail -join "`n")))
+            [void](Add-Content -LiteralPath $env:BACKUP_LOG -Value (
+                "[drill-restore] rc=$rc include=$inc target=$Target" + "`n" +
+                "[drill-restore] landed=$($landed.Count) entries listed under $where, deepest path $maxLen chars" + "`n" +
+                ($names -join "`n") + "`n" + ($tail -join "`n")))
         } catch { }
     }
     $rc

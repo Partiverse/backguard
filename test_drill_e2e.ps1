@@ -37,6 +37,9 @@
 #   ⑪取回侧三档坏法的**可诊断性**（10-03 第二轮补，静态面）：引擎 rc≠0 / rc=0 但没挑中（带落地
 #     文件数）/ 尺寸不符，三条必须各占一句且不许并回一句；有 FAIL 时夹具必须把逐条 FAIL 行与
 #     backup.log 的 [drill-restore] 段打进 step 输出。理由见下方台账 m16–m18 那段。
+#   ⑫落地树取证（10-03 第三轮补，静态面）：[drill-restore] 里必须带 landed 条目数 + 最深路径
+#     字符数，且那次枚举**不带 `-File`**（引擎报 `Restored 9 / 1 files/dirs` 而按文件枚举到 0
+#     个，这一对矛盾只有全条目枚举能分开），target 空时列父目录一档。见台账 m19–m21。
 #
 # **不覆盖**（如实登记）：
 #   - Windows 上 restic 归档内路径带盘符那一种形状（`C:/…` 被 bg 的 `_norm_path` 剥成 `Users/…`，
@@ -47,7 +50,7 @@
 #     守卫以桩证调用序列）。
 #   - 网盘（123Pan WebDAV）语义：场景9 的「云端」是本地目录 + 真 rclone，不是 WebDAV。
 #
-# 变异台账（10-03 起，21 刀 / 21 咬住；每刀一份独立工作树 + 回读校验落刀 + 三份文件
+# 变异台账（10-03 起，25 刀 / 25 咬住；每刀一份独立工作树 + 回读校验落刀 + 三份文件
 # 先过解析，判据取**首条 FAIL 是不是这一刀主张的那件事**，不只看 rc。驱动 `backguard-native:drill` 容器）：
 #   m01 密封侧不带 --hash-drill-samples → 场景1「内容哈希这一维真的生效」(hashed=0)
 #   m02 splat 退回带括号的 @($hashArgs) → 场景1 结论行判出「sample 没抽到条目」
@@ -83,6 +86,17 @@
 #       这一刀只有静态抓得到：正常一轮不走进这一档，行为面对它恒绿
 #   静态面为什么必须有：三种坏法在合并版消息下**逐字同形**，行为面断言只看得见「有 6 条 FAIL」，
 #   看不见它们是不是同一件事——10-03 第二轮那 13 条 FAIL 就是这么把下一轮变成盲的。
+#
+# —— 以下四刀是 10-03 第三轮补的（真 windows runner：引擎报 `Restored 9 / 1 files/dirs`
+#    而按 `-File` 枚举到 0 个文件——两个事实互相打架，取证行必须自己站得住）：
+#   m19 摘掉 [drill-restore] 的 landed 那一行（回到只有头 + 引擎原文）→ 场景12「落地树取证行在位」
+#   m20 给落地枚举加 `-File`（正是本轮踩过的那一档：9 个条目全是目录时它数成 0，
+#      取证行退化成与 FAIL 消息同形，两种坏法又合回一件事）→ 场景12「枚举连目录一起数」
+#   m21 摘掉 target 为空时列父目录那一档 → 场景12「target 为空时往上列一层」
+#   m22 整段取证写入 `if ($env:BACKUP_LOG)` 换成 `if ($false)` → 场景1「取证行真的落进
+#      backup.log」——这一刀只有行为面抓得到：静态面读的是源码，源码里那行始终在
+#   三刀全在静态面：容器里正常一轮 restic 真解出文件，行为面观察不到「全是目录」这种坏法
+#   （m22 是这一组里唯一走行为面的那一支：它验的是「写没写」，不是「写法对不对」）。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
 
@@ -319,32 +333,38 @@ if (-not $script:haveReal) {
     }
     $logText = if (Test-Path -LiteralPath $env:BACKUP_LOG -PathType Leaf) {
         (Read-U8 $env:BACKUP_LOG) -join "`n" } else { '' }
+    # 取证行**真的写出去了**才算数：Restore-DrillFile 那段 Add-Content 包在 `try { … } catch { }`
+    # 里（旁路不许把演练带走，§1.3），所以「写失败」与「这一轮没跑取回」在日志里同形。
+    # 场景1 走的是真 restic、真 BACKUP_LOG，这一条是这条写路径唯一的行为面证据。
+    Chk '场景1 落地树取证行真的落进 backup.log（catch 吞掉的写失败在这里露）' `
+        $logText.Contains('[drill-restore] landed=')
 
     # 现场回显：这一份守卫在真 windows runner 上红过一次（10-03 第二轮 13 条 FAIL），而 CI 日志
     # 里只有「DRILL-E2E-FAIL count=13」和一句分不开成因的 FAIL 行——断言判红却没有证据，
     # 下一轮还是盲的。所以**判红就把自己看到的两件事打到 stdout**：报告里逐条 FAIL 行
     # （现在分成「restic 退出码≠0」／「退出 0 但没挑中这条：落地 N 个文件」／「大小不符」三档），
-    # 以及 $env:BACKUP_LOG 里 Restore-DrillFile 落的 [drill-restore] 段（include/target/rc + 引擎原文尾三行）。
+    # 以及 $env:BACKUP_LOG 里 Restore-DrillFile 落的 [drill-restore] 段。
     # 这不是断言，不改结论；它只保证「红的那一轮」在日志里可读。
+    # 窗口宽度跟着取证行的格式走（10-03 第三轮）：一条 [drill-restore] 现在是
+    # 头（rc/include/target）+ 落地树（landed=/listed under/deepest path）+ 最多 12 条相对名
+    # + 引擎原文尾三行，最多 17 行。只打头三行等于把「落地 9 个条目但其中 0 个文件」这一件
+    # 本回合唯一的新事实丢掉，而它正是分得开「没落盘」与「枚举看不见」的那把刀。
     if (Test-Path -LiteralPath $rtPath -PathType Leaf) {
         $failLines = @((Read-U8 $rtPath) | Where-Object { $_.StartsWith('FAIL ') })
         if ($failLines.Count -gt 0) {
             Write-Host "--- 现场：rescue-test.txt 逐条 FAIL（$($failLines.Count) 条）---"
             $failLines | ForEach-Object { Write-Host $_ }
-            # [drill-restore] 一条是三行：头部（rc/include/target）+ 引擎原文尾三行里的前两行
-            # （Restore-DrillFile 用一次 Add-Content 写成多行），只打头一行等于把 restic 自己
-            # 说的那句话丢掉，而那正是这一步唯一能给出的成因。
             $logLines = @($logText -split "`n")
             $diag = New-Object System.Collections.Generic.List[string]
             for ($li = 0; $li -lt $logLines.Count; $li++) {
                 if ($logLines[$li].Contains('[drill-restore]')) {
-                    $upto = [Math]::Min($li + 3, $logLines.Count - 1)
+                    $upto = [Math]::Min($li + 16, $logLines.Count - 1)
                     for ($kj = $li; $kj -le $upto; $kj++) { $diag.Add($logLines[$kj]) }
                     $li = $upto
                 }
             }
             Write-Host "--- 现场：backup.log 的 [drill-restore] 段（$($diag.Count) 行）---"
-            $diag | Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
+            $diag | Select-Object -Last 90 | ForEach-Object { Write-Host $_ }
         }
     }
     $hm = [regex]::Match($logText, '\[manifest\] 演练样本内容哈希：(\d+)/(\d+)')
@@ -743,5 +763,18 @@ Chk '场景12 尺寸那一档仍在（与内容哈希无关的那一支，场景
 Chk '场景12 旧的合并消息不许回来' (-not $drillSrc.Contains('（取回失败或大小不符）'))
 Chk '场景12 rc 与「挑不出文件」不许并成一条判据' `
     (-not ($drillSrc -match '\$rc -ne 0 -or'))
+# 10-03 第三轮补的第二维：取证行本身。真 windows runner 这一轮给了两个互相打架的事实——
+# 引擎自己说 `Restored 9 / 1 files/dirs (13 B / 13 B)`，而按 `-File` 递归枚举到 0 个文件。
+# 「restic 没落盘」与「落的全是目录／枚举看不见」在 rescue-test.txt 里同形，只有落地树自己
+# 能分开它们，所以这三行的写法也在被测面内：
+#   ①取证行必须在（没有它，下一轮仍然只有 landed 这个词都读不到）；
+#   ②**枚举不许带 `-File`**——9 个条目如果全是目录，加 `-File` 就把它数成 0，而那正是本次
+#     要区分的那两种坏法之一，取证行会自己退化成与 FAIL 消息同形；
+#   ③target 底下空的时候列父目录（否则「落到 target 的兄弟目录」与「写到别处」还是分不开）。
+Chk '场景12 落地树取证行在位（landed= 与最深路径字符数）' `
+    ($drillSrc.Contains('[drill-restore] landed=') -and $drillSrc.Contains('deepest path'))
+Chk '场景12 落地树枚举连目录一起数（带 -File 就把 9 个条目数成 0，取证行自废）' `
+    $drillSrc.Contains('-LiteralPath $Target -Recurse -ErrorAction')
+Chk '场景12 target 为空时往上列一层（parent 分档在位）' $drillSrc.Contains('$where = "parent"')
 
 Result-Line
