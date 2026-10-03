@@ -721,6 +721,22 @@
   `is_absolute()`）是**唯一只有 Windows 车道能证伪的一条**——Linux 上两档都是绝对的，恒绿；
   第一档不进这条断言，因为 borg 在 Windows 上给的是无盘符形状，那是设计而非缺陷。
   这条与 §2「时间口径 demo/测试时间一律 naive」是同一类：**跨宿主的字面量形状不能当共同判据**。
+- **A1 状态地基 + A2 本地只读状态页的契约**（10-03 落地，research/12 §5；用户拍板「基于 borg
+  webgui 做增量开发」＝ A1+A2 这两档，B/C 桌面与集中面板仍不做）：
+  ①**STATUS.jsonl**：`backup.sh` EXIT trap 与 `backup.ps1` 末尾各追加一行（`append_status_line` /
+  `Add-StatusLine`，字段与顺序逐字对齐），只含计数与状态、**零文件名零绝对路径**——它随
+  timeline 上云，§1.1 对「新写的、会上云的明文产物」原文适用。**追加不改写**：这条 remote 上
+  rclone 只比大小，同尺寸覆写永远推不上云（§2 同一条）；「这轮跑没跑过自证/完整性」用显式
+  旗标（`*_RAN` / `$script:Round*Ran`），别从停在 0 的计数器反推——那会把「没跑」演成「全过」。
+  ②**webui.py**：stdlib `http.server`，绑 127.0.0.1（启动时显式拒绝非回环 `--bind`），只 GET、
+  **白名单路由**（/ /status.json /story /report/{integrity,cloud-verify,profile}，其余 404），
+  永不渲染 `runs/*.json`、`preflight-latest.json`、`manifest.json.enc`、`rescue-test.txt`
+  （§1.1「呈现即泄漏」的实现面——截图是合法外传路径，所以过滤必须发生在**读什么**，不是渲染层）。
+  它是纯旁路（§1.3）：只读、无写通道、崩了不影响备份；`ui.sh` 是启动器（Windows 上没有
+  bash，直跑 `python3 webui.py --base <BACKUP_BASE>` 即可，启动器缺口登记在 HANDOVER 续21）。
+  ③守卫：`test_status_line.sh` + `test_webui.sh`（linux job）、`test_status_emit_logic.ps1`
+  （windows job 两档宿主）；`verify-nightly.sh` 加了 STATUS.jsonl 一节（末行合法 JSON + rc=0 +
+  无绝对路径）。
 
 ## 3. 改动与验证流程
 
@@ -745,18 +761,24 @@
    单向包含 + 报告晚一轮上云 + 轮转，四条低频路径的**组合面**）/
    `test_bsd_probe.sh`（零备份轮探针：把纯函数从生产文件里**切**出来对着 python3 现算的真相
    断言——哈希轮流域 / 本地清单摘除与排序 / `rclone lsl` 含空格路径 / 目录级脱敏 / `date -r` /
-   演练 fail-closed）。
-   十五套都已挂 CI，**车道按实测墙钟分，不是按「谁新谁排前面」分**
-   （linux job 全跑，24 步；macos job 只留 backup+三条 assert / restore / rescue /
-   init / log_rotation / bsd_probe，其余四套重夹具 integrity/cloud_verify/cloud_failure/drill
+   演练 fail-closed）/
+   `test_status_line.sh`（A1 状态地基：真 borg 两轮，STATUS.jsonl 每轮一行追加 + 逐行合法
+   JSON + 零文件名零绝对路径；变异 s01 摘产出器 / s02 绝对路径入体 / s03 覆写，三刀全咬）/
+   `test_webui.sh`（A2 本地只读状态页：白名单路由 404 面 + 最新快照语义 + 隐私诱饵四件
+   （runs、rescue-test、preflight、密封件里埋 token，任何响应不许出现）+ POST 不通 +
+   拒绝非回环绑定；变异 w01 白名单放行，咬住）。
+   十七套都已挂 CI，**车道按实测墙钟分，不是按「谁新谁排前面」分**
+   （linux job 全跑，26 步；macos job 只留 backup+三条 assert / restore / rescue /
+   init / log_rotation / bsd_probe，其余重夹具 integrity/cloud_verify/cloud_failure/drill
    退回 linux-only）。缘故写在 docs/HANDOVER §11 的 10-02 午后块：免费 macos runner 上一个整轮
    `backup.sh` 要 6–13 分钟（本机 9 秒），一个 step 里放六个整轮的 `test_integrity.sh`
    正好撞满 step 级 `timeout-minutes: 40`，那一轮 macos 跑了 126 分钟仍红，而它后面三步
    一秒没执行——**这条 runner 上没有一步是便宜的，重排清单救不了，只能分车道**。
    `test_remote_caps.sh` 是手工能力探测，不入 CI。
-   **PowerShell 侧的逻辑测试现在有五套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）、
+   **PowerShell 侧的逻辑测试现在有六套挂进 CI**：`test_log_rotation_logic.ps1`（第一套）、
    `test_cloud_verify_logic.ps1`、`test_integrity_logic.ps1`、`test_retention_logic.ps1`、
-   `test_perms_logic.ps1`（后三套均 10-02），每套都是 windows job 两步——pwsh 7 排在产品轮之前、Windows PowerShell
+   `test_status_emit_logic.ps1`（10-03，STATUS.jsonl 产出器）、`test_perms_logic.ps1`，
+   每套都是 windows job 两步——pwsh 7 排在产品轮之前、Windows PowerShell
    5.1 排在最后，两档宿主语义都要过（5.1 那一步的正文只能有 ASCII，见 §2 编码那条）。
    **第六套 `test_rescue_e2e.ps1`（10-02，25 场景 / 102 条断言）不是逻辑测试而是 E2E**：它起真
    `restic`（`init` + 两次 `backup`，故意让 config 档案只有 1 个快照——单快照那一档正是摊平缺陷的
