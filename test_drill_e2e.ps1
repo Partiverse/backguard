@@ -14,8 +14,10 @@
 # 为什么这份守卫必须存在（不是把 bash 侧 test_drill_e2e.sh 复述一遍）：
 #   Windows 侧此前**根本没有演练**——semantic.ps1 只密封 manifest.json.enc 然后就结束了，所以
 #   「备份期记下源哈希」这一半即使做对了也仍是「记了没人用」。这一发把两半钉成一条链：
-#   密封里真带了 sha256（场景1g 读的是 `[manifest] 演练样本内容哈希：n/N` 那行现场信号，
-#   n=0 就是整段退化），演练里真按它比内容（场景2 换掉一个哈希必须当场露）。
+#   密封里真带了 sha256（场景1g 读的是 `[manifest] drill-hash n/N` 那行现场信号——锚点必须是
+#   ASCII，10-03 windows step 12 实测 5.1 上那行的中文段读不出来而同一轮 hashed=6 全对，
+#   n=0 就是整段退化），
+#   演练里真按它比内容（场景2 换掉一个哈希必须当场露）。
 #
 # 覆盖：
 #   ①全链路真跑（真 restic 三类别仓库 + 真 bg + 真 age）：快照目录、密封件、rescue-test.txt
@@ -109,6 +111,26 @@
 #   m50 ← m05 摘掉 30 天节流闸门 → 场景3 刚跑过 → Code=10
 #   m51 ← m08 判定改回「整行含 FAIL」→ 场景7 a-只有汇总行0失败 want=False
 #   m52 ← m09 结论行缺失/两行不判失败 → 场景7 c-结论行缺失 want=True
+#
+# —— 现场信号行的 **ASCII 锚点**（`drill-hash`）本身也在被测面内（10-03，5.1 那一步实测之后立的）：
+#   m53 摘掉 bg 的那句 print（`[manifest] drill-hash n/N …` 整行消失）
+#       → 本夹具两条一起红：场景1「现场信号那行真的进了备份日志」+ 场景4「第二轮的日志里没有
+#          记哈希那行 count=0」；bash 车道同时红在 `test_drill_e2e.sh:107`（E2E-FAIL「生产
+#          seal_manifest 没记下任何源哈希」）。count=2 skipped=0。
+#   m54 锚点换回纯中文旧措辞（`[manifest] 演练样本内容哈希：n/N 个已记入密封清单`）
+#       → 红的还是那两条，而 bash 车道的报错里**带着那行中文原文**（`…：[manifest] 演练样本
+#          内容哈希：6/7 个已记入密封清单`）——这就是「判据确实落在锚点上，不是落在那件事上」
+#          的证据：内容一模一样、只是没有 ASCII 锚点，守卫就判败。
+#       为什么要有 m54 这一刀：10-03 真 windows runner 的 step 12（Windows PowerShell 5.1）上，
+#       同一轮 `hashed=6 / sizeOnly=0`（这两个数来自 drill 解封后的报告，不来自日志）证明密封侧
+#       真记上了哈希，而 backup.log 里按中文匹配的那两条断言双双落空。那一行是 bg 的 stderr 经
+#       `2>> $env:BACKUP_LOG` 落进日志的唯一产物，缘故是 5.1 把**子进程的 stderr 按控制台代码页
+#       解码之后**才写盘，中文段落进去已不是原字节（机制是这一档宿主的已知行为、与现场对得上；
+#       **逐字节形态没在这轮量过**——要量的得在 5.1 上把那行的字节打出来，而这一发改的是锚点，
+#       不依赖那串中文还在）。真机部署走 `powershell.exe -File backup.ps1`（Task Scheduler），
+#       也就是说**在恰好最容易记 0 条哈希的那台宿主上，这行唯一的现场信号会先从日志里读不出来**
+#       ——所以修的是产品那行的锚点，不是教守卫去猜乱码。`verify-nightly.sh` 反过来两种措辞都认
+#       （部署树 5fb2c79 今晚还吐旧那行），那是版本漂移容忍，不是判据松掉。
 #
 # —— 沿用（被测文件本轮一行未改，`git status` 只有三行）：
 #   m14 `--exclude` 根本没拼进 rclone 命令行 → 场景10 rescue-test.txt 没上云
@@ -393,7 +415,11 @@ if (-not $script:haveReal) {
             $diag | Select-Object -Last 90 | ForEach-Object { Write-Host $_ }
         }
     }
-    $hm = [regex]::Match($logText, '\[manifest\] 演练样本内容哈希：(\d+)/(\d+)')
+    # 锚点取 `drill-hash`（ASCII）而不是那行中文：10-03 真 windows runner 的 step 12（Windows
+    # PowerShell 5.1）实测——同一轮 hashed=6 全对，而这两处按中文匹配的断言双双报红；缘故是 5.1 把
+    # bg 的 stderr 按控制台代码页解码后才写进 backup.log，中文段落进去已不是原字节（逐字节形态未量，
+    # 见文件头台账 m54）。判据落在两档宿主都保得住的那一段上（口径同 rescue.ps1 的 ASCII 契约行）。
+    $hm = [regex]::Match($logText, '\[manifest\] drill-hash (\d+)/(\d+)')
     Chk '场景1 现场信号那行真的进了备份日志' $hm.Success
     if ($hm.Success) {
         Chk '场景1 记哈希的分母 > 0（0/N＝这层证据整段退化）' ([int]$hm.Groups[2].Value -gt 0) $hm.Value
@@ -584,7 +610,7 @@ if (-not $script:haveReal) {
     Chk '场景4 空清单的报告写明原因（读的人知道是 bg 还是清单）' `
         (@(Read-U8 $rtPath | Where-Object { $_.StartsWith('RESULT: FAIL') -and $_.Contains('sample') }).Count -eq 1)
     # 记哈希那行整场只许出现一次：日志是累加的，所以判据是计数，不是「最后一行是什么」。
-    $hashLines2 = @([regex]::Matches((Read-U8 $env:BACKUP_LOG) -join "`n", '\[manifest\] 演练样本内容哈希'))
+    $hashLines2 = @([regex]::Matches((Read-U8 $env:BACKUP_LOG) -join "`n", '\[manifest\] drill-hash '))
     Chk '场景4 第二轮的日志里没有记哈希那行（开关真的管着密封侧）' ($hashLines2.Count -eq 1) "count=$($hashLines2.Count)"
 
     # ---------- 场景5：缺主身份 / 缺 age → 20 而不是「跑了 0 条」----------

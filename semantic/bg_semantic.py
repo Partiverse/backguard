@@ -993,8 +993,13 @@ def cmd_manifest(args: argparse.Namespace) -> None:
         n = hash_drill_samples(doc, args.sample_count, args.hash_max_bytes, seed)
         # 分母是「当晚实际抽中的个数」而不是传入的 count：count 是上限，抽到几个算几个。
         # 0/N 是这层证据失效唯一的现场信号（源路径形态对不上时它就静默退化成只比大小），
-        # 所以这行必须留在备份日志里
-        print(f"[manifest] 演练样本内容哈希：{n}/{picked} 个已记入密封清单",
+        # 所以这行必须留在备份日志里。
+        # **锚点是 ASCII（`drill-hash`）而不是中文**：Windows PowerShell 5.1 按控制台代码页解码
+        # 子进程的 stderr，再把它写进 backup.log——10-03 真 windows runner 的实测现场是：同一轮
+        # `hashed=6` 全对、`[drill-dump]` 那条 ASCII 取证行照样读得到，而按中文匹配的两处守卫双双落空
+        #（中文段到日志时已不是原字节）。判据只能落在这档宿主也保得住的那一段上；中文尾串留给人读，
+        # 坏了不影响取证。
+        print(f"[manifest] drill-hash {n}/{picked} 演练样本内容哈希已记入密封清单",
               file=sys.stderr)
     sys.stdout.buffer.write(manifest_bytes(doc))
 

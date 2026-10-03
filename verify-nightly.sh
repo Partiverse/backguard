@@ -121,15 +121,23 @@ else
 fi
 
 echo "== A2b：备份期样本内容哈希（恰好一行，n>0） =="
-hl=$(grep -a '演练样本内容哈希' "$L/backup.log" 2>/dev/null | tail -1)
+# 两种写法都认：`drill-hash` 是 10-03 之后 bg 那行的 ASCII 锚点（Windows PowerShell 5.1 上那行的
+# 中文段读不出来——它按控制台代码页解码子进程 stderr 之后才写盘），旧版部署树（5fb2c79）那晚的
+# 日志里还是纯中文那行——判据不能跟着部署点的新旧漂。
+# BSD grep 的交替一律 -E（BRE 的 \| 在 macOS 上是字面量）。
+hl=$(grep -aE 'drill-hash|演练样本内容哈希' "$L/backup.log" 2>/dev/null | tail -1)
 [[ -n "$hl" ]] && printf '      %s\n' "$hl" || chk fail "stderr 有 n/N 行" "一行都没有＝密封侧没走 --hash-drill-samples"
-if [[ "$hl" =~ 哈希：([0-9]+)/([0-9]+) ]]; then
+# n/N 不绑措辞：旧版那行是「…哈希：6/6」，10-03 起是「drill-hash 6/6 …」。取那行里唯一的
+# 「N/N」串就能两版都读，措辞再漂也不影响这一节。grep 无命中时 rc=1，pipefail 下管道整体非零，
+# 所以显式 `|| true`（死断言那一课：`X="$(grep …)"` 里「空结果」是被测情形时必须中和退出码）。
+nn=$( { printf '%s' "$hl" | grep -oE '[0-9]+/[0-9]+' | head -1 || true; } 2>/dev/null )
+if [[ "$nn" =~ ^([0-9]+)/([0-9]+)$ ]]; then
   [[ "${BASH_REMATCH[1]}" -gt 0 ]] && chk ok "已记哈希 n>0" "n=${BASH_REMATCH[1]} picked=${BASH_REMATCH[2]}" \
                                    || chk fail "已记哈希 n>0" "n=0 ＝这层证据整段退化（路径形态/抽样口径漂移）"
 elif [[ -n "$hl" ]]; then
-  # 有那行却抽不出 n/N＝措辞漂了。不另加分支的话这一节既不记 ok 也不记 fail，
+  # 有那行却抽不出 n/N＝措辞漂到没有数字了。不另加分支的话这一节既不记 ok 也不记 fail，
   # 「A2b 已验收」就会从一份没解析成功的报告里被读出来（fail-closed：解析不出来就是失败）
-  chk fail "n/N 行可解析" "行在但正则没命中：$hl"
+  chk fail "n/N 行可解析" "行在但没提出 n/N：$hl"
 fi
 if [[ -n "$snap" ]]; then
   hex=$(grep -alE '[0-9a-f]{64}' "$snap"/MANIFEST.txt "$snap"/STORY.md "$snap"/COVERAGE.txt "$snap"/restore.md 2>/dev/null)

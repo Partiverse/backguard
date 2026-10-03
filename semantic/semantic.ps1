@@ -491,7 +491,11 @@ function Invoke-SemanticLayer {
         # A2b：把「今晚 drill 会抽中的那几个文件」的源内容哈希记进密封清单。
         # 抽样口径两侧必须逐字一致（同一个 count、种子都默认「当天」）——记了没人用、
         # 用的没记，就等于这层证据从来没存在过，而报告上看着是「有 sha256 字段」的。
-        # 那一行 `[manifest] 演练样本内容哈希：n/N` 是唯一的现场信号，所以 stderr 必须进日志。
+        # 那一行 `[manifest] drill-hash n/N …` 是唯一的现场信号，所以 stderr 必须进日志。
+        # 判据锚点取 ASCII 的 `drill-hash`：10-03 真 windows runner 的 5.1 那一步实测——PowerShell
+        # 5.1 按控制台代码页解码子进程 stderr 后才写进 backup.log，同一轮 `[drill-dump]` 那条 ASCII
+        # 取证行读得到、`hashed=6` 也对，而按中文匹配的两处断言双双落空（中文段落进日志后已不是那串字）。
+        # 口径同 rescue.ps1 的 ASCII 契约行。
         $hashArgs = @()
         if ((Get-DrillSwitch) -eq "1") {
             $hashArgs = @('--hash-drill-samples', '--sample-count', (Get-DrillCount),

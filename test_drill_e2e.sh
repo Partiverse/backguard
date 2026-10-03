@@ -101,8 +101,11 @@ declare -F seal_manifest >/dev/null || fail "semantic.sh 没有 seal_manifest（
 SEM_KEYS_DIR="$KEYS" SEM_DRILL_COUNT=99 SEM_DRILL_HASH_MAX_BYTES=2048 \
     seal_manifest "$T/run.json" "$SNAP" || fail "seal_manifest 失败"
 [[ -s "$SNAP/manifest.json.enc" ]] || fail "seal_manifest 没产出 manifest.json.enc"
-# 生产的密封必须真的带上记哈希那组参数：日志里那句「N/M 个已记入」是唯一的现场证据
-grep -qE '演练样本内容哈希：[1-9][0-9]*/' "$T/sem.log" \
+# 生产的密封必须真的带上记哈希那组参数：日志里那句「drill-hash N/M」是唯一的现场证据
+# （锚点是 ASCII 而不是那行中文——Windows PowerShell 5.1 按控制台代码页解码子进程 stderr 之后
+#  才写进 backup.log，中文段落进去已不是原字节；10-03 真 runner 实测。口径同 rescue.ps1 的
+#  ASCII 契约行，机制与逐条现场见 test_drill_e2e.ps1 文件头台账 m53/m54）
+grep -qE 'drill-hash [1-9][0-9]*/' "$T/sem.log" \
     || fail "生产 seal_manifest 没记下任何源哈希（备份日志里那行是 0/…）：$(cat "$T/sem.log")"
 # 明文层不该有清单落进快照目录（隐私红线：完整文件名只进密文账本）
 [[ ! -e "$SNAP/manifest.json" ]] || fail "快照目录残留未密封 manifest.json"
