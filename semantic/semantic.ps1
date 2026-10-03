@@ -113,6 +113,59 @@ function Resolve-BgEntry {
     @{ Bin = $python; Args = @($bgScript) }
 }
 
+# BEGIN-LOGWRITE
+# ---------- backup.log 的写编码（10-03 真 windows runner 量出来的第三档坏法）----------
+# 5.1 的**重定向操作符**走 Out-File 的默认编码 Unicode＝UTF-16LE。一手现场（轮 37103795583 的
+# step 12，同一份夹具在两档宿主各跑一次，取证行 `# host-enc`（该轮跑到的是三档版）+ `# log-bytes`）：
+#   5.1  `add size=29 head=EFBBBF70 anchor8=1`（`Add-Content -Encoding UTF8`＝UTF-8 **带 BOM**）
+#   5.1  `red size=38 head=FFFE7000 nul=14 anchor8=0 anchor16=1`（`*>>`＝UTF-16LE）
+#   5.1  `std size=38 head=FFFE7000 nul=14 anchor8=0 anchor16=1`（`>` 同上）
+#   pwsh7 三行全同形 `size=26 head=70726F62 nul=0 anchor8=1`
+# 于是那一本日志的实际形状是 `bom=EFBBBF nul=484 anchor8=0 anchor16=1 dump8=6`：现场信号行**确实在
+# 文件里**，只是以 UTF-16LE 存在，按 UTF-8 读时每个字符夹一个 NUL，守卫和操作员都读不出来——
+# 不是内容丢了，是**每一条的落盘编码由「谁写的、用哪条操作符」逐条决定**。
+# 两支登记为未量（别当已修）：①不带 `-Encoding` 的 `Add-Content`（旧版写 `[drill-dump]` 用的就是它）
+# 在 5.1 上到底是 ASCII 还是 Default——那一行本身是纯 ASCII，两种编码下字节相同，所以 `dump8=6`
+# 分不出它；②`backup.ps1:117` 的 `Tee-Object -Append` 写的同一本账，默认编码同样随宿主变。
+# 口径：这一层所有落笔由下面两个函数完成——显式 UTF-8 无 BOM，编码不再由宿主默认值决定。
+# 反面一条：不要改用 `$PSDefaultParameterValues['Out-File:Encoding']`，5.1 上 `utf8` 是
+# **带 BOM** 的那一档（同一轮 `# host-enc add head=EFBBBF70` 实测），而 `utf8NoBOM` 这个值 5.1
+# 上不存在（6.0 才加）——静态面反过来钉它不许出现。
+function Add-LogLineUtf8 {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    if (-not $env:BACKUP_LOG) { return }
+    try {
+        [void][System.IO.File]::AppendAllText($env:BACKUP_LOG, ($Text + "`r`n"),
+            (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Add-NativeStreamFileToLog {
+    # 「子进程输出先落临时文件、再进日志」这一步之所以要自己读字节：临时文件那一侧的编码正是
+    # 宿主不统一的地方（5.1＝UTF-16LE 带 FF FE，pwsh 7＝UTF-8 无 BOM）。按 BOM 判档读回，
+    # 再以 Add-LogLineUtf8 那一种编码写进日志——两档宿主得到同一本账。
+    param([string]$Path)
+    if (-not $Path) { return }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    $bytes = $null
+    try { $bytes = [System.IO.File]::ReadAllBytes($Path) } catch { return }
+    if (-not $bytes -or $bytes.Length -eq 0) { return }
+    $text = ''
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        $text = [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+    } elseif ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes, 3, $bytes.Length - 3)
+    } else {
+        # bg 是 Python，它写 stderr 用的是 UTF-8 原字节；5.1 把**错误记录**格式化后按 UTF-16LE
+        # 落盘，pwsh 7 按 UTF-8 落盘——两条都在这支或上一支里，剩下这一档只可能是原字节 UTF-8。
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    }
+    foreach ($ln in (($text -replace "`r`n", "`n") -split "`n")) {
+        if ($ln) { Add-LogLineUtf8 $ln }
+    }
+}
+# END-LOGWRITE
+
 function Invoke-Bg {
     param([Parameter(ValueFromRemainingArguments)][AllowEmptyCollection()] $Rest)
     # 每个含原生命令的作用域自己声明一档（外层的 Continue 靠动态作用域也管用，但「外层忘了」
@@ -205,14 +258,14 @@ function Dump-DrillFile {
     }
     if ($env:BACKUP_LOG) {
         # 引擎原文只进本地 backup.log，不进 rescue-test.txt（§1.1 不抄引擎输出），但「为什么失败」
-        # 只有 restic 自己知道——所以这一行带 rc、带组装出的路径、带字节数、带 stderr 尾巴
+        # 只有 restic 自己知道——所以这一行带 rc、带组装出的路径、带字节数、带 stderr 尾巴。
+        # 走 Add-LogLineUtf8 而不是 Add-Content：后者的落笔编码由宿主默认值决定（5.1 与 pwsh 7
+        # 不同档），而 restic 报错原文常带路径上的非 ASCII 名——那一行是不是被代码页折过，
+        # 本轮没有量（文件头登记为未量），但「由显式编码写」这件事不需要等量完才成立。
         $shown = $errText -replace "`r?`n", " | "
         if ($shown.Length -gt 240) { $shown = $shown.Substring($shown.Length - 240) }
-        try {
-            [void](Add-Content -LiteralPath $env:BACKUP_LOG -Value (
-                "[drill-dump] rc=$rc bytes=$written internal=$internal out=$OutFile" +
-                $(if ($shown) { " stderr=$shown" } else { '' })))
-        } catch { }
+        Add-LogLineUtf8 ("[drill-dump] rc=$rc bytes=$written internal=$internal out=$OutFile" +
+            $(if ($shown) { " stderr=$shown" } else { '' }))
     }
     # 返回对象而不是裸数组（§2：函数返回会把数组摊平，1 个元素出来是标量）
     @{ rc = $rc; bytes = $written; internal = "$internal"; out = "$OutFile" }
@@ -467,16 +520,22 @@ function Invoke-SemanticLayer {
     if ($env:SEM_LABEL) { $label = $env:SEM_LABEL }
 
     $runJson = Join-Path $tmp "run.json"
+    $bgAll = Join-Path $tmp "bg-out-convert.txt"
     Invoke-Bg convert --engine restic @classArgs @prevArgs @parentArgs `
-        --device $DeviceId --time $TimeIso --label $label --auto-strip --out $runJson *>> $env:BACKUP_LOG
-    if ($LASTEXITCODE -ne 0) {
+        --device $DeviceId --time $TimeIso --label $label --auto-strip --out $runJson *> $bgAll
+    $convRc = $LASTEXITCODE
+    Add-NativeStreamFileToLog $bgAll
+    if ($convRc -ne 0) {
         Write-Warning "[semantic] convert 失败（见 backup.log），跳过"
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
         return
     }
 
-    $genOut = Invoke-Bg generate --run $runJson --out $stage 2>> $env:BACKUP_LOG
-    if ($LASTEXITCODE -ne 0 -or -not $genOut) {
+    $genErr = Join-Path $tmp "bg-err-generate.txt"
+    $genOut = Invoke-Bg generate --run $runJson --out $stage 2> $genErr
+    $genRc = $LASTEXITCODE
+    Add-NativeStreamFileToLog $genErr
+    if ($genRc -ne 0 -or -not $genOut) {
         Write-Warning "[semantic] generate 失败（见 backup.log），跳过"
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
         return
@@ -493,12 +552,12 @@ function Invoke-SemanticLayer {
         # 用的没记，就等于这层证据从来没存在过，而报告上看着是「有 sha256 字段」的。
         # 那一行 `[manifest] drill-hash n/N …` 是唯一的现场信号，所以 stderr 必须进日志。
         # 判据锚点取 ASCII 的 `drill-hash`。**但这一档宿主上「日志里读不读得出」跟中文尾串无关**：
-        # 10-03 真 windows runner 连着两轮实测——按中文匹配的两处守卫双双落空（轮 37097873811），
-        # 锚点换成纯 ASCII 之后**同样两条**再落空一次（轮 37100491221 step 12），而同轮 `hashed=6`
-        # 全对、`Add-Content` 落的 `[drill-dump]` 那条照样读得到。坏的是这一行经 `2>>` 落盘时的
-        # 编码（5.1 的 `2>>` 走 Out-File 默认 UTF-16LE，与 Add-Content 的 ASCII 混在同一个文件里？
-        # ——待 `# log-bytes` 取证行判掉，见 test_drill_e2e.ps1 台账 m55/m56），不是那串中文。
-        # 口径同 rescue.ps1 的 ASCII 契约行。
+        # 10-03 真 windows runner 连着三轮实测——按中文匹配的两处守卫双双落空（轮 37097873811），
+        # 锚点换成纯 ASCII 之后**同样两条**再落空（轮 37100491221），第三轮由逐字节取证行定案
+        # （轮 37103795583 step 12：`nul=484 anchor8=0 anchor16=1 dump8=6`）：坏的是 `2>>` 这条
+        # **写路径**——5.1 按 Out-File 默认编码把整段落成 UTF-16LE，内容与锚点一个字节都没丢，只是
+        # 不在这本账的 UTF-8 读法里。所以修的是落笔方式（见文件头 Add-LogLineUtf8），不是措辞、
+        # 也不是守卫的判据。口径同 rescue.ps1 的 ASCII 契约行。
         $hashArgs = @()
         if ((Get-DrillSwitch) -eq "1") {
             $hashArgs = @('--hash-drill-samples', '--sample-count', (Get-DrillCount),
@@ -509,10 +568,15 @@ function Invoke-SemanticLayer {
         # 单个 argv 元素按空格拼起来交给 bg，argparse 于是报 `unrecognized arguments:
         # --hash-drill-samples --sample-count 99 …`——那行报错与「三个独立参数没被认出来」
         # 逐字同形，光看日志看不出来（10-03 容器首轮实测）。上面 convert 那处用的就是裸形。
-        Invoke-Bg manifest --run $runJson @hashArgs 2>> $env:BACKUP_LOG |
+        $manErr = Join-Path $tmp "bg-err-manifest.txt"
+        Invoke-Bg manifest --run $runJson @hashArgs 2> $manErr |
             Out-File -FilePath $manifestJson -Encoding utf8
-        & $ageBin -R $rec -o (Join-Path $snapshotDir "manifest.json.enc") $manifestJson 2>> $env:BACKUP_LOG
-        if ($LASTEXITCODE -eq 0) { Write-Host "[ OK ] [semantic] manifest.json.enc 已密封" -ForegroundColor Green }
+        Add-NativeStreamFileToLog $manErr
+        $ageErr = Join-Path $tmp "bg-err-age.txt"
+        & $ageBin -R $rec -o (Join-Path $snapshotDir "manifest.json.enc") $manifestJson 2> $ageErr
+        $ageRc = $LASTEXITCODE
+        Add-NativeStreamFileToLog $ageErr
+        if ($ageRc -eq 0) { Write-Host "[ OK ] [semantic] manifest.json.enc 已密封" -ForegroundColor Green }
         else { Write-Warning "[semantic] manifest 密封失败（不影响其余产物）" }
     }
 
