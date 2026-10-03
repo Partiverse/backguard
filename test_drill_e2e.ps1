@@ -31,100 +31,105 @@
 #   ⑧隐私与凭据收尾清扫：整棵夹具不许留明文 manifest.json，日志与报告不许含 restic 口令值
 #   ⑨红线 §1.1 的推送侧：Push-TreeToCloud 的 -ExcludeNames 真让 rescue-test.txt 上不了云，
 #     而对照组（不带该参数）真把它推上去了——非空断言；返回值仍是单个整数（§1.4 的数组摊平坑）
-#   ⑩--include 的形状：**用 argv 桩钉，不用真引擎钉**。posix 上「加不加前导斜杠」在 restic 那里
-#     等价（10-03 复测：`src-files/note.txt` 与 `/src-files/note.txt` 都取回得到），真引擎抓不到
-#     这一刀；桩把收到的 argv 原样落盘，判据是「反斜杠归成正斜杠、且不添前导斜杠」
-#   ⑪取回侧三档坏法的**可诊断性**（10-03 第二轮补，静态面）：引擎 rc≠0 / rc=0 但没挑中（带落地
-#     文件数）/ 尺寸不符，三条必须各占一句且不许并回一句；有 FAIL 时夹具必须把逐条 FAIL 行与
-#     backup.log 的 [drill-restore] 段打进 step 输出。理由见下方台账 m16–m18 那段。
-#   ⑫落地树取证（10-03 第三轮补，静态面）：[drill-restore] 里必须带 landed 条目数 + 最深路径
-#     字符数，且那次枚举**不带 `-File`**（引擎报 `Restored 9 / 1 files/dirs` 而按文件枚举到 0
-#     个，这一对矛盾只有全条目枚举能分开），target 空时列父目录一档。见台账 m19–m21。
-#   ⑬取回落点的逃生探测（10-03 第四轮补，行为面）：夹具拿一条真样本、按产品同形的调用点跑一次
-#     Restore-DrillFile，然后对整个临时树做**目录差分**——target 之外出现的任何新路径都是
+#   ⑩取回的字节保真（10-03 第五轮，行为面）：夹具自己做一个含 NUL 与非法 UTF-8 序列的 1 KiB 文件，
+#     路径带空格与 `[01]`，另放一条**同名同尺寸、内容不同**的诱饵进同一个快照，然后按产品调用点
+#     同形地调一次 Dump-DrillFile。判四件事：退出码 0（引号内的空格没把 argv 切成两项）、落盘字节数
+#     = 报告字节数 = 源尺寸、头 6 字节逐字节原样、内容哈希等于**指定的那条**而不等于诱饵。
+#     这一节换掉的是原来的「argv 桩钉 --include 形状」——桩测的是字符串，而这一发真正会坏的是字节
+#     （PowerShell 把原生命令 stdout 落盘的顺手写法一律按文本重编码，见 semantic.ps1 的注释）。
+#   ⑪取回侧三档坏法的**可诊断性**（静态面）：dump 退出码档（带归档内路径）/ 字节数档（清单 vs 取回）/
+#     「仅比大小」档，三条各占一句且不许并回一句；旧的合并消息与旧的「退出 0 但没挑中这条」都不许回来。
+#   ⑫取回**机制**本身的契约（静态面，10-03 第五轮 re-ground）：stdout 必须走 `.BaseStream.CopyTo`、
+#     不许用 `Start-Process` 重定向、不许回到 `restore --target`、前导斜杠补回那一句在位、
+#     参数拼法不许用 5.1 没有的 `ArgumentList`、取证行 [drill-dump] 带 rc 与字节数。
+#     判「代码里有没有 X」之前先**整行剥注释**（这份文件的注释里就写着被禁的那几个词），
+#     并给剥离本身配一条存活判据（剥完必须还认得出被测函数）。
+#   ⑬取回落点的逃生探测 + 归档内路径真身（行为面）：夹具拿一条真样本、按产品调用点同形地跑一次
+#     Dump-DrillFile，对整棵临时树做**路径差分**——指定的那个文件之外出现任何新路径都是
 #     「演练写到别处」的确证（真机上＝覆盖用户活着的源文件，数据面事故）。同一段差分再拿一个
-#     诱饵文件跑第二次，必须报出它，这才是上面那条判据的存活证据。另配 `restic ls` 只读回显
-#     **归档内路径的真身**：清单里那份是 bg 归一化后的输出，「盘符冒号在不在」正是待证的事，
-#     不能拿待证的东西当证据。
+#     诱饵文件跑第二次，必须报出它，这才是上面那条判据的存活证据。两条与形状无关、因此两档宿主
+#     都可判的判据：`restic ls` 交回的归档内路径必须与组装出的那条**逐字同形**（少补/多补前导斜杠
+#     在这里露），且落盘字节数必须等于清单尺寸（引擎退 0 而产物是空的＝另一种坏法）。
 #
 # **不覆盖**（如实登记）：
-#   - Windows 上 restic 归档内路径带盘符那一种形状（`C:/…` 被 bg 的 `_norm_path` 剥成 `Users/…`，
-#     于是清单里的 path 是真归档路径的**后缀**）。容器证不到这一支：posix 上 `_norm_path` 只剥掉
-#     前导斜杠，「把斜杠加回去」恒等于原形状，两种 --include 都能取回。场景11 钉住的是实现契约
-#     （不添前导斜杠），真引擎那一支由 windows job 的同一份夹具跑真 restic 判，红了看得见。
-#     10-03 第四轮的 场景13 把这一支变成**可观测**的：归档内路径真身（`restic ls`）+ 落点差分
-#     两档宿主都跑，但容器里它只会绿——盘符那一段形状是 windows runner 独有的现场。
+#   - Windows 上归档内路径带盘符那一种形状（`C:/…` 被 restic 存成 `C/Users/…`，于是清单里的 path
+#     是真归档路径的**后缀**）。容器造不出盘符，这一支由 windows job 用同一份夹具跑：场景11/13 的
+#     判据都不拿字面量形状当判据，而是**当场向 `restic ls` 取真身再逐字比**，所以它在两档宿主上判
+#     的是同一件事。（10-03 之前这一支只能靠 argv 桩钉实现契约，因为 `--include` 是模式不是路径，
+#     posix 上加不加前导斜杠等价——换成 `dump` 之后它降级成「容器只会绿、真宿主才红」的普通档。）
+#   - `Arguments` 字符串里路径含**单引号**时 posix 的 .NET 解析会把它当定界符切开（登记在
+#     semantic.ps1 的注释里）。生产这一档只跑在 Windows（Go 的 argv 解析不认单引号），夹具的临时
+#     路径也不含它，所以两档宿主都测不到——不是「测过没事」。
 #   - age 对 passphrase 只读终端的交互解封（恢复码路径 B，CI 打不了字；由 init-keys/rescue 那两份
 #     守卫以桩证调用序列）。
-#   - 网盘（123Pan WebDAV）语义：场景9 的「云端」是本地目录 + 真 rclone，不是 WebDAV。
+#   - 网盘（123Pan WebDAV）语义：场景10 的「云端」是本地目录 + 真 rclone，不是 WebDAV。
 #
-# 变异台账（10-03 起，29 刀 / 29 咬住；每刀一份独立工作树 + 回读校验落刀 + 三份文件
-# 先过解析，判据取**首条 FAIL 是不是这一刀主张的那件事**，不只看 rc。驱动 `backguard-native:drill` 容器）：
-#   m01 密封侧不带 --hash-drill-samples → 场景1「内容哈希这一维真的生效」(hashed=0)
-#   m02 splat 退回带括号的 @($hashArgs) → 场景1 结论行判出「sample 没抽到条目」
-#       （这一刀就是首轮那个真 bug：三个参数粘成一个 argv，而 bg 的报错与「参数真不认识」同形）
-#   m03 只验「算得出哈希」不比值 → 场景2「判定为失败」
-#   m04 抽到 0 条不判失败（退回 bash 旧口径 0/0）→ 场景4「空清单的报告写明原因」
-#   m05 摘掉 30 天节流闸门 → 场景3「刚跑过 → Code=10」
-#   m06 缺 age/主身份/密封件不报 Code=20 → 场景5「快照目录没密封件 → Code=20」
-#   m07 样本仓库不按类别查（拿第一个仓库硬解）→ 场景1「无失败项」(PASS=2 FAIL=4)
-#   m08 判定改回 grep 整行含 FAIL → 场景7 a-「只有汇总行 0 失败」want=False
-#   m09 结论行缺失/两行不判失败 → 场景7 c-「结论行缺失」want=True
-#   m10 --include 强制前导斜杠 → 场景11「include 只把反斜杠归成正斜杠」
-#       **这一刀容器里本来咬不住**（posix 上 restic 对加不加前导斜杠等价，10-03 复测两种写法都
-#       取回得到），是场景11 的 argv 桩把它变成可判的；不删刀，把逃逸原因登记在这里
-#   m11 取回命中改成按文件名相等（不按后缀）→ 场景1「无失败项」(PASS=0 FAIL=6)
-#   m12 「仅比大小」的标注被砍短 → 场景4「每条 PASS 都写明依据」
-#   m13 摘掉尺寸闸门 → 场景4「尺寸不符当场露」
-#   m14 --exclude 根本没拼进 rclone 命令行 → 场景10「rescue-test.txt 没上云」
-#   m15 时间轴调用点漏登记排除名（推送侧函数照旧，只有接线漏）→ 场景10「调用点登记了排除名」
-#       这一刀的 catcher 只有静态断言：行为面（m14 那一档）抓不到「函数对、接线错」
+# 变异台账（口径：一刀一份独立工作树 + 回读校验落刀 + 改动后的三份文件先过解析；判据取
+# **首条 FAIL 是不是这一刀主张的那件事**，不只看 rc。驱动 `backguard-native:drill` 容器，
+# 每刀日志落在挂进容器的宿主目录 /tmp/bg-mut-r{5,6,7}-*/<id>/run.log——容器内 /tmp 随容器消失）。
 #
-# —— 以下六刀是 10-03 第二轮之后补的（真 windows runner 报 13 条 FAIL 而 CI 日志读不出成因）：
-#    三刀证明「拆开之后确实分得开」（行为面），三刀证明「不许合回去」（场景12 静态面）——
-#   mA 后缀判定锚到不可能的前缀（restic 真解出 1 个文件、rc 仍 0）→ 报「restic 退出 0 但没挑中
-#      这条：落地 1 个文件」，与 rc≠0 那条不同形；现场回显把 include/target 打进 CI 日志
-#   mB restore 加一个不存在的开关（引擎自己报错）→ 报「restic 退出码 1≠0」并打出引擎原文
-#      `unknown flag: --no-such-flag`——10-03 首轮想要而没拿到的那件证据，现在判红就进 CI 日志
-#   mC 把清单里的 size 改错（尺寸那一档）→ 报「大小不符：清单 1234567 B，取回 13 B」（场景4 原有）
-#   m16 判据合回「rc≠0 或 挑不出文件」一句 → 场景12「rc 与挑不出文件不许并成一条判据」
-#   m17 引擎报错那一档的消息换回旧的合并句（语法保持合法）→ 场景12「旧的合并消息不许回来」
-#       与「引擎报错那一档单独成行」两条同红
-#   m18 落地文件数换成常量 0 → 场景12「退出 0 却没挑中那一档单独成行、且带落地文件数」
-#       这一刀只有静态抓得到：正常一轮不走进这一档，行为面对它恒绿
-#   静态面为什么必须有：三种坏法在合并版消息下**逐字同形**，行为面断言只看得见「有 6 条 FAIL」，
-#   看不见它们是不是同一件事——10-03 第二轮那 13 条 FAIL 就是这么把下一轮变成盲的。
+# **10-03 第五轮（取回机制换成 `restic dump`）在当前代码上重跑 25 刀：24 CAUGHT + 1 逃逸登记**
+# （m33 是刀本身磨错，重磨为 m33b 已咬住）。旧编号里钉住实现落在本轮 diff 范围内的都换了新编号
+# 重跑（映射见下）；m14/m15 的被测文件 `backup.ps1` 本轮一行未改，沿用其结论；
+# m10/m11/mA/mB/m16–m21 **随机制一起作废**，逐条写明原因——留着条目不写原因就是死刀。
 #
-# —— 以下四刀是 10-03 第三轮补的（真 windows runner：引擎报 `Restored 9 / 1 files/dirs`
-#    而按 `-File` 枚举到 0 个文件——两个事实互相打架，取证行必须自己站得住）：
-#   m19 摘掉 [drill-restore] 的 landed 那一行（回到只有头 + 引擎原文）→ 场景12「落地树取证行在位」
-#   m20 给落地枚举加 `-File`（正是本轮踩过的那一档：9 个条目全是目录时它数成 0，
-#      取证行退化成与 FAIL 消息同形，两种坏法又合回一件事）→ 场景12「枚举连目录一起数」
-#   m21 摘掉 target 为空时列父目录那一档 → 场景12「target 为空时往上列一层」
-#   m22 整段取证写入 `if ($env:BACKUP_LOG)` 换成 `if ($false)` → 场景1「取证行真的落进
-#      backup.log」——这一刀只有行为面抓得到：静态面读的是源码，源码里那行始终在
-#   三刀全在静态面：容器里正常一轮 restic 真解出文件，行为面观察不到「全是目录」这种坏法
-#   （m22 是这一组里唯一走行为面的那一支：它验的是「写没写」，不是「写法对不对」）。
+# —— 本轮新刀（m27–m39：dump 机制本身 + 三档判据 + 场景12/13 的自证）：
+#   m27 stdout 换成文本读法（`ReadToEnd` + `UTF8.GetBytes`）→ 场景11 落盘字节数：disk=2056
+#       reported=2056（1024 B 的二进制被重编码撑成两倍），同刀再咬头 6 字节 `00 EF BF BD …`
+#   m28 argv 去掉每项各自的引号 → 场景11 dump 退出码 rc=1（路径里的空格把一项切成多项）
+#   m29 摘掉前导斜杠补回 → 场景13 「组装出的路径与 restic ls 逐字同形」（internal 少一个 `/`），
+#       同一条在场景11 也红——两档宿主都可判，这是换机制换来的最大一处覆盖面
+#   m30 机制换回 `restore --include --target` → 场景1 无失败项
+#   m31 参数拼法换成 `ArgumentList` → 场景12 静态那条（5.1 的 .NET Framework 没有这个属性）
+#   m32 差分「见过就跳过」换成「恒跳过」→ 场景13 差分判据是活的（decoy_hits=0）
+#   m33 前缀判据 `-eq 0` 换成 `-ge 0`——**ESCAPED，刀本身磨错**：`IndexOf` 找不到时给 -1，
+#       `-ge 0` 照样放行诱饵，测的是「换个语义」而不是「恒真」。落刀前先问「替换后的表达式恒吗」
+#   m33b m33 重磨为 `-ge -1`（恒真）→ 场景13 差分判据是活的 + 诱饵真的点名到自己
+#   m34 靶子不写回原字节 → 场景13 靶子已写回原字节（夹具不许自己留脏基线，后面几段靠它）
+#   m35 归档内路径真身换成 `restic snapshots`（不交路径）→ 场景13 restic ls 交出归档内路径
+#   m36 取证行整段 `if ($env:BACKUP_LOG)` → `if ($false)` → 场景1 取证行真的落进 backup.log。
+#       **这一刀只有行为面抓得到**：静态面读的是源码，那行始终在（旧编号 m22 的同一条主张）
+#   m37 同名同尺寸诱饵换成别的扩展名（于是不在快照内）→ 场景11 两条都在归档里
+#   m38 场景12 的注释剥离换成「全留」（`{ $true }`）→ 「上一版『退出 0 但没挑中这条』不许回来」
+#       这一档负判据的**分母自证**：剥离如果把被测函数也剥掉了，「代码里没有 X」就恒真
+#   m39 头 6 字节换成纯 ASCII（`ABCDEF`）→ 只有场景11 头 6 字节那条红——证明 NUL/非法 UTF-8
+#       才是文本通道那一维的靶子，换成 ASCII 靶子就消失了
 #
-# —— 场景13（逃生探测）**没有对应的产品变异**，这是设计而不是欠账：它测的是「取回落在哪里」
-#    这个尚未确定的量，摘掉任何一段实现都只会让它变成「什么都没落」而不是「落到外面」，
-#    后者才是这一发要防的坏法，而那只能由真宿主现场给出。它的存活证据在自己身上：同一段
-#    目录差分拿诱饵文件跑第二次必须报出它（m23 类坏法＝差分自己死了：枚举被 `-ErrorAction
-#    SilentlyContinue` 吞掉、比较器选错、target 前缀判据恒真——三种都让 escaped=0 变得毫无意义，
-#    而诱饵那一刀会当场报出 decoy_hits=0）。
+# —— 本轮重跑的旧刀（新编号 ← 旧编号；钉住实现落在本轮改过的 `Invoke-Drill` / 密封侧）：
+#   m40 ← m13 摘掉尺寸闸门（`$res.bytes -ne [long]$ssize` → `$false`）→ 场景4 尺寸不符当场露
+#   m42 ← m03 内容哈希只验「算得出」不比值 → 场景2 判定为失败
+#   m43 ← m12 「仅比大小：清单未记内容哈希」标注砍短 → 场景4 每条 PASS 都写明依据
+#   m44 ← m04 抽不到条目改写成 `RESULT: 0 PASS / 0 FAIL` → 场景4 抽不到条目判失败
+#   m46 ← m06 缺料三查（age / 主身份 / 密封件）整段短路 → 场景5 快照目录没密封件 → Code=20
+#   m47 ← m07 样本仓库不按类别查（拿第一个仓库硬解）→ 场景1 无失败项（跨类别错配）
+#   m48 ← m01 密封侧不带 `--hash-drill-samples` → 场景1 内容哈希这一维真的生效（hashed=0）
+#   m49 ← m02 splat 退回带括号的 `@($hashArgs)` → 场景1 结论行五个计数都解析得出
+#       这一刀就是首轮那个真 bug：三个参数粘成一个 argv，bg 的报错与「参数真没被认出来」逐字同形；
+#       现场写出的是 `RESULT: FAIL（sample 没抽到条目…）`——「密封成功」那道自报什么都没证明
+#   m50 ← m05 摘掉 30 天节流闸门 → 场景3 刚跑过 → Code=10
+#   m51 ← m08 判定改回「整行含 FAIL」→ 场景7 a-只有汇总行0失败 want=False
+#   m52 ← m09 结论行缺失/两行不判失败 → 场景7 c-结论行缺失 want=True
 #
-# —— 以下四刀是 10-03 第四轮补的（场景13 这台差分机自己的存活证据；驱动 /tmp/mut_p13.sh + m24 重跑）：
-#   m23 差分「见过就跳过」换成「恒跳过」（`$seen13.Contains($fn)` → `$true`）→ 逃生判据仍绿、
-#      只有「差分判据是活的」报 decoy_hits=0——正是这一刀想要的形状：判据死了而现场全绿
-#   m24 target 前缀判据退化成恒真（`-eq 0` → `-ge -1`）→ 同一条报红
-#      **第一版这里踩过一发刀本身**：先写成 `-ge 0`，而 `IndexOf` 找不到时给 -1，`-ge 0` 依旧
-#      放行诱饵，测的是另一个语义不是「恒真」——落刀前先问「这个替换后的表达式恒吗」
-#   m25 靶子不写回原字节 → 「靶子已写回原字节」（夹具不许自己留脏状态，否则下一段的基线是假的）
-#   m26 归档内路径回显换成 `restic snapshots`（不交路径）→ 「restic ls 交出归档内路径」
-#   **登记测不到的两支**：①「取回不许写到 target 之外」这条判据本身在容器里恒绿——容器里 restic
-#   不逃（真 windows runner 才是它的现场）；②`cache13` 那档排除（restic 的 cache 目录被夹具指进
-#   临时树）防的是**假报警**，容器里那一轮一个新条目都不产生，所以它没有对应的红刀。
-#   两支都由 windows job 那一档宿主负责，别当已覆盖。
+# —— 沿用（被测文件本轮一行未改，`git status` 只有三行）：
+#   m14 `--exclude` 根本没拼进 rclone 命令行 → 场景10 rescue-test.txt 没上云
+#   m15 时间轴调用点漏登记排除名（推送函数照旧，只有接线漏）→ 场景10 调用点登记了排除名
+#       这两刀钉的是 `backup.ps1`；catcher 只有静态那条抓得到「函数对、接线错」这一类
+#
+# —— 作废（钉住的实现随机制一起没了）：
+#   m10 `--include` 强制前导斜杠 → 旧场景11 的 argv 桩。桩测的是字符串，而 posix 上加不加前导
+#       斜杠在 restic 那里**等价**（10-03 实测两种写法都取回得到），这一刀在容器里本来就咬不住；
+#       换成 dump 之后同一维由 m29 接管（对着 `restic ls` 逐字比，两档宿主可判），桩整个删除
+#   m11 取回命中改按文件名相等（不按后缀）→ dump 没有「挑哪一条」这一步，落点就是我们给的路径
+#   mA  后缀判定锚到不可能的前缀 / mB restore 加一个不存在的开关 → 都是 `restore` 时代的分档证据；
+#       引擎报错那一档现在由 m28（行为面：rc≠0 当场可见）+ 场景12（静态面：消息写法）两头顶住
+#   m16–m18 三档消息「不许并回一句」的旧写法 → 场景12 里同名判据换了新文案，等价的坏法由
+#       m30/m31/m38 覆盖
+#   m19–m21 落地树枚举取证（`landed=N` / 枚举不许带 `-File` / target 为空时列父目录）→ dump 只有
+#       一个落点、没有第二套计数，这三行连消息一起从产品里删了；场景12 的反断言钉「不许回来」
+#
+# **登记测不到的两支**（不变）：①「取回不许写到指定落点之外」这条判据在容器里恒绿——容器里
+#   restic 不逃，真 windows runner 才是它的现场；②`cache13` 那档排除防的是**假报警**，容器那一轮
+#   一个新条目都不产生，所以它没有对应的红刀。两支都由 windows job 那一档宿主负责，别当已覆盖。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
 
@@ -361,22 +366,19 @@ if (-not $script:haveReal) {
     }
     $logText = if (Test-Path -LiteralPath $env:BACKUP_LOG -PathType Leaf) {
         (Read-U8 $env:BACKUP_LOG) -join "`n" } else { '' }
-    # 取证行**真的写出去了**才算数：Restore-DrillFile 那段 Add-Content 包在 `try { … } catch { }`
+    # 取证行**真的写出去了**才算数：Dump-DrillFile 那段 Add-Content 包在 `try { … } catch { }`
     # 里（旁路不许把演练带走，§1.3），所以「写失败」与「这一轮没跑取回」在日志里同形。
     # 场景1 走的是真 restic、真 BACKUP_LOG，这一条是这条写路径唯一的行为面证据。
-    Chk '场景1 落地树取证行真的落进 backup.log（catch 吞掉的写失败在这里露）' `
-        $logText.Contains('[drill-restore] landed=')
+    Chk '场景1 取回取证行真的落进 backup.log（catch 吞掉的写失败在这里露）' `
+        $logText.Contains('[drill-dump] rc=')
 
     # 现场回显：这一份守卫在真 windows runner 上红过一次（10-03 第二轮 13 条 FAIL），而 CI 日志
     # 里只有「DRILL-E2E-FAIL count=13」和一句分不开成因的 FAIL 行——断言判红却没有证据，
     # 下一轮还是盲的。所以**判红就把自己看到的两件事打到 stdout**：报告里逐条 FAIL 行
-    # （现在分成「restic 退出码≠0」／「退出 0 但没挑中这条：落地 N 个文件」／「大小不符」三档），
-    # 以及 $env:BACKUP_LOG 里 Restore-DrillFile 落的 [drill-restore] 段。
+    # （现在是「restic dump 退出码≠0（带组装出的归档内路径）」／「大小不符（带两边字节数）」
+    # ／「内容哈希不符（带清单值与取回值）」三档），以及 $env:BACKUP_LOG 里 Dump-DrillFile
+    # 落的 [drill-dump] 行（rc / bytes / internal / out / stderr 尾巴）。
     # 这不是断言，不改结论；它只保证「红的那一轮」在日志里可读。
-    # 窗口宽度跟着取证行的格式走（10-03 第三轮）：一条 [drill-restore] 现在是
-    # 头（rc/include/target）+ 落地树（landed=/listed under/deepest path）+ 最多 12 条相对名
-    # + 引擎原文尾三行，最多 17 行。只打头三行等于把「落地 9 个条目但其中 0 个文件」这一件
-    # 本回合唯一的新事实丢掉，而它正是分得开「没落盘」与「枚举看不见」的那把刀。
     if (Test-Path -LiteralPath $rtPath -PathType Leaf) {
         $failLines = @((Read-U8 $rtPath) | Where-Object { $_.StartsWith('FAIL ') })
         if ($failLines.Count -gt 0) {
@@ -385,13 +387,9 @@ if (-not $script:haveReal) {
             $logLines = @($logText -split "`n")
             $diag = New-Object System.Collections.Generic.List[string]
             for ($li = 0; $li -lt $logLines.Count; $li++) {
-                if ($logLines[$li].Contains('[drill-restore]')) {
-                    $upto = [Math]::Min($li + 16, $logLines.Count - 1)
-                    for ($kj = $li; $kj -le $upto; $kj++) { $diag.Add($logLines[$kj]) }
-                    $li = $upto
-                }
+                if ($logLines[$li].Contains('[drill-dump]')) { $diag.Add($logLines[$li]) }
             }
-            Write-Host "--- 现场：backup.log 的 [drill-restore] 段（$($diag.Count) 行）---"
+            Write-Host "--- 现场：backup.log 的 [drill-dump] 行（$($diag.Count) 条）---"
             $diag | Select-Object -Last 90 | ForEach-Object { Write-Host $_ }
         }
     }
@@ -652,22 +650,22 @@ if (-not $script:haveReal) {
     Chk '场景8 rescue-test.txt 里没有口令' (-not $rtAll.Contains($script:pw))
     Remove-Item -LiteralPath $plain -Force -ErrorAction SilentlyContinue
 
-    # ---------- 场景13：取回到底落在哪——逃生探测（10-03 第四轮：先让它可诊断，再动手修）----------
-    # 现场是那一对互相打架的事实：取证行 `landed=3 entries listed under target`（列出来的三条
-    # 全是目录：C/、C\Users/、C\Users\runneradmin/），而引擎自己说 `Restored 9 / 1 files/dirs`。
-    # 9 正好是归档内路径的段数，所以最可疑的解释是**路径中间某段被当成绝对路径**（`C`、`C:`
-    # 还是 `/C:` 尚未确定），于是那 1 个文件写到了 target 之外。在真机上这句话的意思是
-    # 「每晚的恢复演练会覆盖用户活着的源文件」——那是数据面事故，不是取证噪声。
-    # 所以这一段判的不是「取回对不对」，而是「取回有没有跑出 target」。三条口径：
-    #  ① **探测 = 只读**：除被测那一次 Restore-DrillFile 之外，本段只跑 `restic ls`（只读）。
-    #     拿它交出**归档内路径的真身**——清单里那份是 bg 归一化过的输出，「盘符冒号到底在不在」
-    #     正是待证的那件事，不能拿它自己的输出当证据。
-    #  ② 逃生判据的**存活证据**：同一段目录差分拿诱饵文件再跑一次，必须报出恰好 1 条。
-    #     windows runner 上期望这条判据红、posix 上期望它绿——没有对照，「escaped=0」与
-    #     「差分自己是死的」（枚举被 -ErrorAction 吞掉、HashSet 比较器选错）在日志里同形。
-    #  ③ 靶子=夹具自己的源文件：先把内容换成一次性标记再跑取回，若标记消失就是「写回了活路径」
-    #     的确证（归档里那份内容与源文件同字节，光比内容永远看不出被覆盖）。测完写回原字节。
-    #     它躺在夹具的临时树里，被覆盖也只伤夹具自己。
+    # ---------- 场景13：取回落点与归档内路径形状——探测（10-03 第四轮的差分机，第五轮换被测面）----------
+    # 上一轮这一段是为了回答「restic 报 Restored 9 / 1 而 target 之下只枚举到 3 个目录，文件到底
+    # 落到哪儿去了」。答案（真 windows runner，轮 37093574349）：**没落到 target 之外**
+    # （escaped=0，活文件字节没变），而是短 target（95 字符）那一次真的落了 9 个条目含 1 个文件、
+    # 长 target（132 字符，与产品同形）那一次只有 3 个——差别只有 target 长度，成因未定。
+    # 产品侧已改用 `restic dump`，根本不拼目录树，所以这一段的判据跟着换两件事，而**逃生探测留着**：
+    #  ① 落点判据变成「只写我们指定的那一个文件」：整棵临时树差分，target 之外（out 文件与
+    #     backup.log 之外）出现任何新路径都是「演练写到别处」的确证——真机上那是覆盖用户活文件的
+    #     那类事故。探测本身只读：除被测那一次 Dump-DrillFile 之外只跑 `restic ls`（§2「探测=只读」）。
+    #  ② **组装出的归档内路径与 `restic ls` 逐字相同**：这一条把「前导斜杠」那一维变成两档宿主都
+    #     可判——上一轮它只能靠 argv 钉（posix 上 restic 对加不加前导斜杠等价，真引擎抓不到），
+    #     而 `dump` 要的是**精确路径**：`ls` 交出的是引擎认的那条真身（posix `/tmp/…`、
+    #     Windows `/C/Users/…`），代码少补一个斜杠就当场不同形，两档宿主都红。
+    #  ③ 存活证据照旧：同一段差分拿诱饵文件再跑一次必须报出它，否则「escaped=0」与「差分自己是死的」
+    #     在日志里同形。
+    #  ④ 靶子=夹具自己的源文件（写一次性标记再跑取回，标记消失＝被写回活路径的确证）；测完写回原字节。
     $d13 = New-Dir 'probe13'
     $plain13 = Join-Path $d13 'manifest.json'
     $u13 = Run-Native @($script:age, '-d', '-i', $keys.ident, '-o', $plain13, $encPath)
@@ -699,8 +697,7 @@ if (-not $script:haveReal) {
         $bytes13 = [System.IO.File]::ReadAllBytes($live13)
         $marker13 = 'escape-probe-' + [guid]::NewGuid().ToString('N')
         Write-U8 $live13 ($marker13 + "`n")
-        $out13 = Join-Path $d13 'out-13'
-        [void](New-Item -ItemType Directory -Force -Path $out13)
+        $out13 = Join-Path $d13 'dump-13.bin'
         # restic 的 cache 目录在 $env:LOCALAPPDATA（夹具把它指进临时树），它不属于演练的取回面，
         # 差分必须把它摘掉——否则「cache 新建了一个 pack 子目录」会被报成逃生，判据就废了。
         $cache13 = $env:LOCALAPPDATA
@@ -715,9 +712,9 @@ if (-not $script:haveReal) {
         $cwdHadC13 = Test-Path -LiteralPath $cwdC13 -PathType Container
         $repoHadC13 = Test-Path -LiteralPath (Join-Path $Repo 'C') -PathType Container
 
-        # 就这一次：与产品调用点逐字同形（semantic.ps1 的 Restore-DrillFile 调用）
-        $rc13 = Restore-DrillFile -Bin $script:restic -Repo "$($item13.repo)" -Snap "$($item13.snap)" `
-            -Include $inc13 -Target $out13
+        # 就这一次：与产品调用点逐字同形（semantic.ps1 的 Dump-DrillFile 调用）
+        $res13 = Dump-DrillFile -Bin $script:restic -Repo "$($item13.repo)" -Snap "$($item13.snap)" `
+            -ArchivePath $inc13 -OutFile $out13
 
         $new13 = @(); $cache13New = 0
         foreach ($p in @(Get-ChildItem -LiteralPath $script:root -Recurse -Force -ErrorAction SilentlyContinue)) {
@@ -731,19 +728,20 @@ if (-not $script:haveReal) {
             $new13 += $fn
         }
         $esc13 = @($new13)
-        $under13 = @(Get-ChildItem -LiteralPath $out13 -Recurse -Force -ErrorAction SilentlyContinue)
-        $fileUnder13 = @($under13 | Where-Object { -not $_.PSIsContainer })
+        $dumpBytes13 = if (Test-Path -LiteralPath $out13 -PathType Leaf) {
+            ([System.IO.File]::ReadAllBytes($out13)).Length } else { -1 }
         $cwdCNow13 = Test-Path -LiteralPath $cwdC13 -PathType Container
         $repoCNow13 = Test-Path -LiteralPath (Join-Path $Repo 'C') -PathType Container
         $liveTxt13 = try { [System.IO.File]::ReadAllText($live13) } catch { '' }
         $liveHit13 = (-not $liveTxt13.Contains($marker13))
 
         # 回显先于断言：红了的那一轮必须在 CI 日志里看得见落点，光有 count 分不开三种坏法
-        Write-Host ("# p13 rc=" + $rc13 + " include=" + $inc13)
-        Write-Host ("# p13 target=" + $out13 + " target_len=" + $out13.Length)
-        Write-Host ("# p13 tree_base=" + $baseCount13 + " under_target=" + $under13.Count +
-            " files_under_target=" + $fileUnder13.Count + " escaped=" + $esc13.Count +
-            " cache_dir_new=" + $cache13New)
+        Write-Host ("# p13 rc=" + $res13.rc + " archive-path=" + $inc13)
+        Write-Host ("# p13 internal=" + $res13.internal + " internal_len=" + "$($res13.internal)".Length)
+        Write-Host ("# p13 out=" + $out13 + " out_len=" + $out13.Length +
+            " bytes_on_disk=" + $dumpBytes13 + " bytes_reported=" + $res13.bytes +
+            " escaped=" + $esc13.Count + " cache_dir_new=" + $cache13New +
+            " tree_base=" + $baseCount13)
         foreach ($e in @($esc13 | Select-Object -First 10)) { Write-Host "# p13 escaped-path: $e" }
         Write-Host ("# p13 cwd=" + (Get-Location).Path + " cwd_C_dir=" +
             $(if ($cwdCNow13) { "yes(before=$cwdHadC13)" } else { 'no' }) +
@@ -751,22 +749,29 @@ if (-not $script:haveReal) {
         Write-Host ("# p13 live_marker_survived=" + $(if ($liveHit13) { 'no' } else { 'yes' }))
         $ls13 = Run-Native @($script:restic, '-r', "$($item13.repo)", 'ls', "$($item13.snap)")
         $lsName13 = @($ls13.lines | Where-Object { $_.Contains($name13) })
-        Chk '场景13 restic ls 交出归档内路径（--include 比的就是这个形状的真身）' `
+        Chk '场景13 restic ls 交出归档内路径（dump 要的精确路径就以它为准）' `
             (@($lsName13).Count -ge 1) "rc=$($ls13.rc) lines=$(@($lsName13).Count)"
         foreach ($l in @($lsName13 | Select-Object -First 3)) { Write-Host "# p13 internal-path: $l" }
+        # 逐字同形（大小写差一档宿主不背：Windows 归档内路径的大小写由 restic 存的那一刻定）
+        $lsSame13 = @($lsName13 | Where-Object {
+            $_.Length -eq "$($res13.internal)".Length -and
+            $_.IndexOf("$($res13.internal)", [System.StringComparison]::OrdinalIgnoreCase) -eq 0 })
+        Chk '场景13 组装出的归档内路径与 restic ls 逐字同形（少补/多补前导斜杠在这里露）' `
+            (@($lsSame13).Count -ge 1) "internal=$($res13.internal) ls=$(@($lsName13 | Select-Object -First 2) -join ' | ')"
 
-        Chk '场景13 取回不许写到 target 之外（跑出去＝演练覆盖活文件的前半）' `
+        Chk '场景13 取回只写指定的那一个文件（别处出现新条目＝演练写到用户活路径的前半）' `
             (@($esc13).Count -eq 0) "escaped=$(@($esc13).Count) first=$(if (@($esc13).Count -gt 0) { $esc13[0] } else { '' })"
-        Chk '场景13 逃生不许覆盖活着的源文件（数据面事故，与取证无关）' (-not $liveHit13) `
+        Chk '场景13 取回不许覆盖活着的源文件（数据面事故，与取证无关）' (-not $liveHit13) `
             "live=$live13 marker_gone=$liveHit13"
         Chk '场景13 盘符段没被当成相对路径写进当前目录或源码树' `
             (($cwdHadC13 -or (-not $cwdCNow13)) -and ($repoHadC13 -or (-not $repoCNow13))) `
             "cwd_C=$cwdCNow13 repo_C=$repoCNow13"
-        Chk '场景13 target 之下确实落了东西（0 条是另一种坏法，别混成逃生）' `
-            (@($under13).Count -gt 0) "under=$(@($under13).Count) files=$(@($fileUnder13).Count) rc=$rc13"
+        Chk '场景13 取回真的写满字节（0 或 -1＝引擎退 0 而产物是空的，那是另一种坏法）' `
+            ($dumpBytes13 -eq [long]$s13.size -and $res13.bytes -eq $dumpBytes13) `
+            "on_disk=$dumpBytes13 reported=$($res13.bytes) manifest_size=$($s13.size) rc=$($res13.rc)"
 
         # 对照：同一段差分换个「一定算新生」的输入再跑一次。这一条两档宿主都必须绿，
-        # 它是上面三条逃生判据的存活证据——没有它，escaped=0 与差分死掉长得一模一样。
+        # 它是上面那条落点判据的存活证据——没有它，escaped=0 与差分死掉长得一模一样。
         $decoy13 = New-Dir 'decoy13'
         $decoyFile13 = Join-Path $decoy13 'planted.txt'
         Write-U8 $decoyFile13 'planted by the guard, not by restic'
@@ -873,76 +878,131 @@ if (-not $rcloneCmd) {
     }
 }
 
-# ---------- 场景11：--include 的形状（钉 argv，不靠真引擎）----------
-# 为什么这一条不能用真 restic 证：`_norm_path` 在 posix 上只剥掉前导斜杠（盘符段那一支根本不触发），
-# 所以「把斜杠加回去」在容器里恒等于原形状——10-03 实测：相对备份的 `src-files/note.txt` 与
-# `/src-files/note.txt` 两种 --include 都取回得到，变异「强制前导斜杠」因此在容器里咬不住。
-# 真宿主不一样：restic 在 Windows 把 `C:/…` 存成快照根下的第一层，而 bg 把盘符段剥掉了，清单里的
-# path 是**真归档路径的后缀**——这时给 --include 加前导斜杠等于把它锚到快照根，第一层就对不上
-# （`Users` 对 `C:`），restic 一个文件都不解而**退出码仍是 0**：「取回失败」会伪装成「本轮没有样本」。
-# 所以这里用桩记录真实 argv，两档宿主同一条判据；真引擎那一段（场景1）在 windows job 上照跑。
-$incSample = 'C:\Users\partiverse\bgsrc\report.txt'
-$incWant = 'C:/Users/partiverse/bgsrc/report.txt'
-$stubDir = New-Dir 'argv-stub'
-$stubLog = Join-Path $stubDir 'argv.txt'
-[void](Write-U8 $stubLog '')
-$stubExt = if ($script:isWin) { 'cmd' } else { 'sh' }
-$stubPath = Join-Path $stubDir ('restic-stub.' + $stubExt)
-if ($script:isWin) {
-    # `%*` 原样吐出全部入参（项间单空格），所以夹具给的样本路径故意不含空格：含空格时 cmd 自己
-    # 就把边界丢了，那是桩的限制不是被测面的限制，别拿它做判据
-    Write-U8 $stubPath "@echo off`r`necho %*>>`"%STUB_LOG%`"`r`n"
+# ---------- 场景11：dump 的三件事——字节保真 / 怪名字 / 精确路径（真引擎；10-03 第五轮换被测面）----------
+# 这一节整段换掉是机制变更的结果，不是补断言。上一版用 argv 桩钉 `--include` 的形状，理由是
+# 「加不加前导斜杠」在 posix 上真引擎分不开（restic 两种写法都接受），变异在容器里必然逃逸；
+# 换成 `restic dump` 之后这一维由场景13 的「组装出的路径与 restic ls 逐字同形」承担，两档宿主
+# 都可判，桩就没了存在理由。更要紧的是**桩测错了对象**：它钉「拼出来的字符串长什么样」，而这一发
+# 真正会坏的是**字节**——PowerShell 把原生命令 stdout 落盘的所有「顺手写法」都按文本重编码
+# （10-03 容器实测：600 B 二进制经 `Start-Process -RedirectStandardOutput` 变成 1187 B，多出来
+# 的全是逐个替换出来的 EF BF BD），于是内容哈希永远不符，而 restic 自己一个字都没错。
+# 三件事各自对应一种坏法：
+#  ① 字节保真：内容里放 NUL 与非法 UTF-8 序列（FF FE 80、截断的 C3 28）。任何文本通道都会改它们。
+#  ② 怪名字：目录名与文件名都含空格，文件名另带 `[01]`——AGENTS §2「判断字面量路径永远别用
+#     -like」那一维的被测面。换成正则或通配的实现当场红（`[01]` 在 -like 里是字符类、在正则里是
+#     字符集），而引号内的空格是 argv 切分的经典靶子。
+#  ③ 同名同尺寸诱饵：另一棵子树里一条**同名、同尺寸、内容不同**的文件，两条都在同一个快照内。
+#     「按后缀挑一条」的实现挑中哪一半没有证据；dump 只认精确路径，所以哈希必须等于指定那条。
+if (-not $script:haveReal) {
+    Skip '场景11（需要真 restic）' 'deps missing：字节保真、怪名字路径与同名诱饵三支都测不到'
 } else {
-    Write-U8 $stubPath "#!/bin/sh`nprintf `"%s\n`" `"`$*`" >> `"`$STUB_LOG`"`nexit 0`n"
-    try { chmod 755 $stubPath } catch { }
+    $env:RESTIC_PASSWORD = $script:pw   # Dump-DrillFile 不传口令，靠的就是进程环境（同生产那条）
+    $binSrc = New-Dir 'bin-src'
+    [void][System.IO.Directory]::CreateDirectory((Join-Path $binSrc 'space dir'))
+    [void][System.IO.Directory]::CreateDirectory((Join-Path $binSrc 'other'))
+    $pat11 = New-Object 'byte[]' 1024
+    $pat11d = New-Object 'byte[]' 1024
+    for ($i = 0; $i -lt 1024; $i++) {
+        $pat11[$i] = [byte](($i * 7 + 3) -band 0xFF)
+        $pat11d[$i] = [byte](($i * 7 + 4) -band 0xFF)
+    }
+    # 前 6 字节钉成「任何文本编码通道都过不去」的那几种：NUL、FF FE 80（UTF-8 非法）、C3 28（截断）
+    $head11 = @(0x00, 0xFF, 0xFE, 0x80, 0xC3, 0x28)
+    for ($i = 0; $i -lt $head11.Count; $i++) { $pat11[$i] = [byte]$head11[$i] }
+    # 名字逐字相同、尺寸逐字相同、内容逐字节不同——「仅比大小」那一档在这一对文件上是死的
+    $tgt11 = Join-Path (Join-Path $binSrc 'space dir') 'a b [01].bin'
+    $decoy11f = Join-Path (Join-Path $binSrc 'other') 'a b [01].bin'
+    [System.IO.File]::WriteAllBytes($tgt11, $pat11)
+    [System.IO.File]::WriteAllBytes($decoy11f, $pat11d)
+    $repo11 = Join-Path (New-Dir 'bin-repo') 'r11'
+    $i11 = Run-Native @($script:restic, '-r', $repo11, 'init')
+    $b11 = Run-Native @($script:restic, '-r', $repo11, 'backup', $binSrc)
+    Chk '场景11 夹具：怪名字的两条二进制文件真的进了快照' `
+        ($i11.rc -eq 0 -and $b11.rc -eq 0) "init=$($i11.rc) backup=$($b11.rc) $($b11.text)"
+    $snap11 = Get-LatestSnap $repo11
+    Chk '场景11 快照 id 取到（取不到时下面每条都红，先把它单独钉住）' ([bool]$snap11) "snap=$snap11"
+    $ls11 = Run-Native @($script:restic, '-r', $repo11, 'ls', $snap11)
+    $sameName11 = @( @($ls11.lines) | Where-Object { $_.Contains('a b [01].bin') } )
+    Chk '场景11 同名同尺寸的两条都在归档里（诱饵必须在快照内，不在磁盘上）' `
+        (@($sameName11).Count -eq 2) ($sameName11 -join ' | ')
+    $one11 = @( @($sameName11) | Where-Object { $_.Contains('space dir') -and $_.StartsWith('/') } )
+    Chk '场景11 指定的那一条在 ls 里唯一（两条同名，按后缀挑的实现分不开）' `
+        (@($one11).Count -eq 1) ($one11 -join ' | ')
+    $internal11 = if (@($one11).Count -eq 1) { [string]@($one11)[0] } else { '' }
+    if ($internal11) {
+        # 喂进去的是**清单那一档形状**：ls 交出带前导斜杠的真身，bg 的 _norm_path 把斜杠剥掉，
+        # 所以「剥掉再喂」才是产品调用点收到的参数，「组装时补回来」才是被测的那一句。
+        $fed11 = $internal11.Substring(1)
+        $out11 = Join-Path (New-Dir 'bin-out') 'dumped.bin'
+        $res11 = Dump-DrillFile -Bin $script:restic -Repo $repo11 -Snap $snap11 `
+            -ArchivePath $fed11 -OutFile $out11
+        $got11 = if (Test-Path -LiteralPath $out11 -PathType Leaf) {
+            [System.IO.File]::ReadAllBytes($out11) } else { New-Object 'byte[]' 0 }
+        Write-Host ("# p11 internal=" + $internal11 + " len=" + $internal11.Length)
+        Write-Host ("# p11 rc=" + $res11.rc + " reported=" + $res11.bytes +
+            " on_disk=" + $got11.Length + " out=" + $out11)
+        Chk '场景11 dump 退出码 0（空格与方括号在引号内是字面量，没被切成两项）' `
+            ($res11.rc -eq 0) "rc=$($res11.rc) internal=$($res11.internal)"
+        Chk '场景11 组装的归档内路径逐字回到 ls 那条（少补前导斜杠在这里露）' `
+            ($res11.internal.Length -eq $internal11.Length -and
+                $res11.internal.IndexOf($internal11, [System.StringComparison]::Ordinal) -eq 0) `
+            "got=$($res11.internal) want=$internal11"
+        Chk '场景11 落盘字节数 = 报告字节数 = 源文件字节数（文本重编码会把 1024 变成别的数）' `
+            ($got11.Length -eq 1024 -and [int]$res11.bytes -eq 1024) `
+            "disk=$($got11.Length) reported=$($res11.bytes)"
+        Chk '场景11 取回件头 6 字节原样（NUL 与非法 UTF-8 被换成 EF BF BD＝走了文本通道）' `
+            ($got11.Length -gt 5 -and $got11[0] -eq 0 -and $got11[1] -eq 0xFF -and
+                $got11[2] -eq 0xFE -and $got11[3] -eq 0x80 -and $got11[4] -eq 0xC3 -and
+                $got11[5] -eq 0x28) `
+            $(if ($got11.Length -gt 5) { ($got11[0..5] | ForEach-Object { $_.ToString('X2') }) -join ' ' } else { 'too short' })
+        $shaTgt11 = (Get-FileHash -Algorithm SHA256 -LiteralPath $tgt11).Hash
+        $shaDec11 = (Get-FileHash -Algorithm SHA256 -LiteralPath $decoy11f).Hash
+        $shaGot11 = if ($got11.Length -gt 0) { (Get-FileHash -Algorithm SHA256 -LiteralPath $out11).Hash } else { '' }
+        Chk '场景11 取回内容与指定的那一条逐字节相同（哈希，不只尺寸）' `
+            ($shaGot11 -eq $shaTgt11) "got=$shaGot11 want=$shaTgt11"
+        Chk '场景11 取回的不是那条同名诱饵（两条同尺寸同名，只有精确路径分得开）' `
+            ($shaGot11 -ne $shaDec11 -and [bool]$shaGot11) "got=$shaGot11 decoy=$shaDec11"
+    }
 }
-# 桩把 argv 写到哪，由进程环境变量告诉它（Restore-DrillFile 不接受自定义 env，子进程继承本进程）
-$env:STUB_LOG = $stubLog
-try {
-    [void](Restore-DrillFile -Bin $stubPath -Repo 'C:\bg\restic-files' -Snap 'c0ffee4' `
-        -Include $incSample -Target $stubDir)
-} finally {
-    Remove-Item env:STUB_LOG -ErrorAction SilentlyContinue
-}
-$toks = @(((Read-U8 $stubLog) -join ' ') -split '\s+' | Where-Object { $_ })
-$iIdx = [Array]::IndexOf($toks, '--include')
-Chk '场景11 桩真的收到了 --include' ($iIdx -ge 0) "toks=$($toks -join '|')"
-Chk '场景11 restore 与快照 id 各占一个 argv 项（没被拼成一串）' `
-    (($toks -contains 'restore') -and ($toks -contains 'c0ffee4')) ($toks -join '|')
-$gotInc = if ($iIdx -ge 0 -and ($iIdx + 1) -lt $toks.Count) { $toks[$iIdx + 1] } else { '' }
-Chk '场景11 include 只把反斜杠归成正斜杠' ($gotInc -eq $incWant) "got=$gotInc"
-Chk '场景11 不给 include 加强制前导斜杠（加了就锚到快照根，取回 0 文件却退 0）' `
-    ($gotInc.Length -gt 0 -and -not $gotInc.StartsWith('/')) "got=$gotInc"
 
-# ---------- 场景12：取回侧的三种坏法在报告里必须分开（10-03 拆开的，别再合回去）----------
-# 为什么这一维只能静态钉：它的价值恰恰是「红的那一轮，日志里读得出是哪种坏法」，而三种坏法
-# 在合并版消息「（取回失败或大小不符）」下逐字同形——10-03 第二轮真 windows runner 的 13 条
-# FAIL 就是靠这句话把「引擎报错」和「退出 0 但挑不出文件」混成一件事，下一轮仍是盲的。
-# 行为面已经量过（三刀各造一种）：后缀锚死 → 「退出 0 但没挑中这条：落地 1 个文件」；
-# 假开关 → 「restic 退出码 1≠0」＋ [drill-restore] 的引擎原文；改尺寸 → 「大小不符：清单…取回…」。
-# 这里钉的是**不许退回合并判据**：`$rc -ne 0 -or $hit.Count -eq 0` 这种写法本身判红。
-# 只扫 semantic.ps1——bash 侧 semantic.sh 那句合并消息仍在（Windows 才需要这一维，
-# posix 上没有盘符形状，两种坏法在那边本来就分不出来），扫它是误伤同事的实现。
-$drillSrc = (Read-U8 $semPs) -join "`n"
-Chk '场景12 引擎报错那一档单独成行' $drillSrc.Contains('restic 退出码')
-Chk '场景12 退出 0 却没挑中那一档单独成行、且带落地文件数' `
-    ($drillSrc.Contains('没挑中这条') -and $drillSrc.Contains('$($all.Count) 个文件'))
-Chk '场景12 尺寸那一档仍在（与内容哈希无关的那一支，场景4 靠它）' $drillSrc.Contains('大小不符')
+# ---------- 场景12：取回机制与三档判据的契约（纯静态，恒跑；10-03 第五轮 re-ground 到 dump）----------
+# 为什么这一维只能静态钉：它钉的是「不许退回上一版的坏法」，而三种坏法在合并消息下逐字同形——
+# 10-03 第二轮真 windows runner 的 13 条 FAIL 就是靠一句「restic 退出码≠0 **或**没挑中这条」把两件
+# 不同的事混成一件，下一轮仍是盲的。行为面已各自量过：引擎报错 → 「restic dump 退出码…没解出来」
+# （场景1 全链路 + 假开关那刀）；字节不满 → 「大小不符：清单…取回…B」（改尺寸那刀）；
+# 清单未记哈希 → 「仅比大小…」（场景5 的缺料调用）。这里钉的是**写法不许合回去**，
+# 以及机制本身（这三种坏法都是换机制才修掉的，所以机制写法也在被测面内）。
+# 只扫 semantic.ps1——bash 侧 semantic.sh 那句合并消息仍在（posix 没有盘符形状，两种坏法在那边
+# 本来就分不出来），扫它是误伤同事的实现。
+# **整行注释先剥掉再判「代码里有没有 X」**（AGENTS §2 立过的口径）：这份文件的注释里就写着
+# `restore --include --target` 与 `Start-Process -RedirectStandardOutput`（那两段是「为什么不用它」
+# 的论证），不剥的话下面三条负判据恒假——恒假的负判据与「实现违规」在日志里都是同一句红。
+$drillSrcAll = Read-U8 $semPs
+$drillSrc = @( $drillSrcAll | Where-Object { -not $_.TrimStart().StartsWith('#') } ) -join "`n"
+# 剥离自身的存活证据：剥完还得认得出被测函数在。否则「代码里没有 --target」可能只是因为
+# 整份被剥空了——那是一条恒真的负判据（同场景13 的诱饵对照，一个道理）。
+Chk '场景12 剥注释后被测函数仍在（负判据的分母没被剥掉）' $drillSrc.Contains('function Dump-DrillFile')
+Chk '场景12 引擎报错那一档单独成行（带归档内路径，不只带 rc）' `
+    ($drillSrc.Contains('dump 退出码') -and $drillSrc.Contains('$($res.internal)'))
+Chk '场景12 字节那一档单独成行（清单尺寸 vs 取回字节）' `
+    ($drillSrc.Contains('大小不符') -and $drillSrc.Contains('取回 $($res.bytes) B'))
+Chk '场景12 「只比大小」那一档仍在（清单未记哈希时不许冒充按内容比过）' `
+    $drillSrc.Contains('仅比大小：清单未记内容哈希')
 Chk '场景12 旧的合并消息不许回来' (-not $drillSrc.Contains('（取回失败或大小不符）'))
-Chk '场景12 rc 与「挑不出文件」不许并成一条判据' `
-    (-not ($drillSrc -match '\$rc -ne 0 -or'))
-# 10-03 第三轮补的第二维：取证行本身。真 windows runner 这一轮给了两个互相打架的事实——
-# 引擎自己说 `Restored 9 / 1 files/dirs (13 B / 13 B)`，而按 `-File` 递归枚举到 0 个文件。
-# 「restic 没落盘」与「落的全是目录／枚举看不见」在 rescue-test.txt 里同形，只有落地树自己
-# 能分开它们，所以这三行的写法也在被测面内：
-#   ①取证行必须在（没有它，下一轮仍然只有 landed 这个词都读不到）；
-#   ②**枚举不许带 `-File`**——9 个条目如果全是目录，加 `-File` 就把它数成 0，而那正是本次
-#     要区分的那两种坏法之一，取证行会自己退化成与 FAIL 消息同形；
-#   ③target 底下空的时候列父目录（否则「落到 target 的兄弟目录」与「写到别处」还是分不开）。
-Chk '场景12 落地树取证行在位（landed= 与最深路径字符数）' `
-    ($drillSrc.Contains('[drill-restore] landed=') -and $drillSrc.Contains('deepest path'))
-Chk '场景12 落地树枚举连目录一起数（带 -File 就把 9 个条目数成 0，取证行自废）' `
-    $drillSrc.Contains('-LiteralPath $Target -Recurse -ErrorAction')
-Chk '场景12 target 为空时往上列一层（parent 分档在位）' $drillSrc.Contains('$where = "parent"')
+Chk '场景12 上一版「退出 0 但没挑中这条」那一档不许回来（枚举已删，留着就是死消息）' `
+    (-not $drillSrc.Contains('没挑中这条'))
+Chk '场景12 rc 与字节数不许并成一条判据' (-not ($drillSrc -match '\$res\.rc -ne 0 -or'))
+Chk '场景12 stdout 走字节通道 BaseStream（文本读法会重编码；行为面证据在场景11）' `
+    $drillSrc.Contains('.BaseStream.CopyTo')
+Chk '场景12 不许改用 Start-Process 重定向落盘（10-03 实测它把 600 B 变成 1187 B）' `
+    (-not $drillSrc.Contains('Start-Process'))
+Chk '场景12 不许回到 restore --target（Windows 上落点与枚举分不开的那一版）' `
+    (-not $drillSrc.Contains('--target'))
+Chk '场景12 前导斜杠补回那一句在位（dump 要精确路径；行为面在场景13 与 ls 逐字比）' `
+    $drillSrc.Contains("StartsWith('/')")
+Chk '场景12 参数拼法不许换成 ArgumentList（5.1 的 .NET Framework 上没有这个属性）' `
+    (-not $drillSrc.Contains('ArgumentList'))
+Chk '场景12 取证行落在 backup.log（[drill-dump] 带 rc 与字节数）' `
+    ($drillSrc.Contains('[drill-dump] rc=') -and $drillSrc.Contains('bytes='))
 
 Result-Line

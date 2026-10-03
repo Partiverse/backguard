@@ -130,7 +130,10 @@ function Invoke-Bg {
 
 # ---------- 恢复演练（roadmap A2b 的 Windows 那一半，对位 semantic.sh:369 run_drill）----------
 # 三个开关与 bash 逐字同名（SEM_DRILL / SEM_DRILL_COUNT / SEM_DRILL_FORCE），默认值也同：
-# 两份实现只在引擎上分开（borg extract vs restic restore），口径分了家就会有一天一边跑一边不跑。
+# 两份实现只在引擎上分开（borg extract vs restic dump），口径分了家就会有一天一边跑一边不跑。
+# 取回的**引擎命令**这一档两份不同（bash 用 `restore --include --target`，这里用 `dump`），
+# 理由是 10-03 真 windows runner 的一手证据，见下面 Dump-DrillFile 的注释；判定口径
+# （三档坏法分开 + 先尺寸后内容哈希）仍然逐条对齐。
 function Get-DrillSwitch { if ($env:SEM_DRILL) { $env:SEM_DRILL } else { "1" } }
 function Get-DrillCount {
     if ($env:SEM_DRILL_COUNT -match '^\d+$') { $env:SEM_DRILL_COUNT } else { "5" }
@@ -139,63 +142,80 @@ function Get-DrillHashMaxBytes {
     if ($env:SEM_DRILL_HASH_MAX_BYTES -match '^\d+$') { $env:SEM_DRILL_HASH_MAX_BYTES } else { "8388608" }
 }
 
-# 取回单个文件。--include 只把 `\` 归一成 `/`，**不补前导斜杠**：清单里那份路径是 bg 归一化
-# 过的（前导 / 与 Windows 盘符段都被剥掉），而 restic 的过滤规则是「不带前导 / 的多段模式在
-# 路径任意位置匹配」——10-03 用真 restic 量过九种形态（归档路径 /tmp/bg-include-exp/src/sub/
-# note.txt）：`tmp/bg-include-exp/src/sub/note.txt`（＝剥掉首段后的 raw）取回 1 个文件，
-# 而补了前导斜杠的 `/tmp/bg-include-exp/src/sub/note.txt` 取回 0 个。Windows 上归档路径是
-# `C:/Users/…`，剥掉盘符的 raw 正好是「少一个前导段」那一档，所以补斜杠等于每夜必取不回。
-# 代价是模式比精确锚定松（同后缀的别的子树也可能被解出来），所以判据不是 rc 而是「落地文件
-# 按后缀挑出来 + 比尺寸 + 比备份期记下的内容哈希」——同后缀同尺寸但不是那个文件，正由哈希拦下。
-function Restore-DrillFile {
+# 取回单个文件：`restic dump <快照> <归档内完整路径>`，stdout 按**字节**写进我们指定的那一个文件。
+#
+# 为什么不是 `restore --include --target`（10-03 真 windows runner 的一手证据）：那条命令在这台宿主
+# 上 rc=0、`Summary: Restored 9 / 1 files/dirs (13 B / 13 B)`，而 target 之下递归枚举只得到 3 个条目
+# （`C`、`C\Users`、`C\Users\runneradmin`，最深 152 字符）——深的那几段既没落盘也没有报错。同一份夹具
+# 里把 target 从 132 字符换成 95 字符（场景13 的短 target 那一档）就解出 9 个条目含 1 个文件，两次调用
+# 的 repo/快照/--include 逐字相同，差别只有 target 长度。**成因未定**（restic 少写 vs 枚举看不见深路径，
+# 两个候选都没被这一轮的证据排掉，登记在 HANDOVER），但两种坏法 `dump` 一起绕开：它根本不拼目录树。
+# 顺带消掉两类宿主相关面：按后缀挑文件要的 `EndsWith(…, [StringComparison])` 在 5.1 上不存在（§2），
+# 而 `UseShellExecute=false` 的原生命令 stderr 也不再有能力变成终止性异常（§2 另一条）。
+#
+# stdout 必须走 `Process.StandardOutput.BaseStream`：10-03 容器实测 `Start-Process -RedirectStandardOutput`
+# 把 600 B 的二进制烤成 1187 B（0x7B 之后全是 `EF BF BD`＝U+FFFD），也就是 PowerShell 的两条「重定向到文件」
+# 便利路径都会按文本解码再编码——内容哈希从此永远对不上，而 rc 仍是 0。
+function Dump-DrillFile {
     param(
         [string]$Bin = "restic",
         [Parameter(Mandatory)][string]$Repo,
         [Parameter(Mandatory)][string]$Snap,
-        [Parameter(Mandatory)][string]$Include,
-        [Parameter(Mandatory)][string]$Target
+        [Parameter(Mandatory)][string]$ArchivePath,   # 清单里那份归一化路径（前导 / 已被 bg 剥掉）
+        [Parameter(Mandatory)][string]$OutFile
     )
-    $ErrorActionPreference = "Continue"   # restic 的进度与警告写在 stderr
-    $inc = $Include -replace '\\', '/'
-    # 引擎原文只进本地 backup.log，不进 rescue-test.txt：报告里现在虽然分得开「引擎报错」与
-    # 「退出 0 但挑不出文件」（10-03 拆的），但**为什么**报错只有 restic 自己知道。
-    # 10-03 真 windows runner 就是靠这条才看得见（清单路径 `C/Users/…` vs 源路径 `C:\Users\…`）。
-    $o = @(& $Bin -r $Repo restore $Snap --include $inc --target $Target 2>&1 |
-        ForEach-Object { "$_" })
-    $rc = $LASTEXITCODE
+    $ErrorActionPreference = "Continue"
+    $norm = ($ArchivePath -replace '\\', '/')
+    # `restic ls` 交回的归档内路径是**带前导斜杠**的（posix `/tmp/…`、Windows `/C/Users/…`——10-03
+    # 真 runner 场景13 实测），而 bg 的清单把前导斜杠剥掉了。补回来才是引擎认的那一条。
+    $internal = if ($norm.StartsWith('/')) { $norm } else { '/' + $norm }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Bin
+    # 每一项各自包引号：真机路径带空格（`C:\Users\John Smith\…`）时裸拼会被切成两项；方括号与
+    # `[01]` 这类字符在引号内是字面量，不进任何正则/通配语义。
+    # 这里用 `Arguments` 字符串而不是 `ArgumentList` 集合：后者是 .NET Core 才有的属性，
+    # Windows PowerShell 5.1（.NET Framework）上取不到，而这一档宿主是 CI 必须过的第二档——
+    # 一条代码路径两档宿主同形，比「两档各一条」少一类漂移。代价是 posix 上 .NET 会按 shell
+    # 语义解析（单引号也是定界符），路径里带 `'` 时会被切开；这一档生产上跑在 Windows（Go 的
+    # argv 解析不认单引号），容器 lane 的夹具路径也不含它，登记为已知未测面而不是猜测性加固。
+    $psi.Arguments = '-r "' + $Repo + '" dump "' + $Snap + '" "' + $internal + '"'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $rc = -1; $written = 0; $errText = ''
+    $fs = $null; $proc = $null
+    try {
+        $fs = [System.IO.File]::Create($OutFile)
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        [void]$proc.Start()
+        # stderr 异步读：同步读会等它到 EOF，而它到 EOF 要等进程结束，进程又在等 stdout 的管道被掏空
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        $proc.StandardOutput.BaseStream.CopyTo($fs)
+        $proc.WaitForExit()
+        $rc = $proc.ExitCode
+        $written = $fs.Position
+        try { $errText = $errTask.Result } catch { $errText = '' }
+    } catch {
+        try { $errText = "$($_.Exception.Message)" } catch { $errText = '' }
+    } finally {
+        if ($fs) { $fs.Dispose() }
+        if ($proc) { $proc.Dispose() }
+    }
     if ($env:BACKUP_LOG) {
-        $tail = @($o | Where-Object { $_ } | Select-Object -Last 3)
-        # 落地树单独取证（10-03 第三轮的量法）：真 windows runner 上引擎报 rc=0、
-        # `Restored 9 / 1 files/dirs (13 B / 13 B)`（9 正好是归档路径的段数），而按 `-File`
-        # 递归枚举到的是 **0 个文件**——「文件根本没落盘」与「落盘了但枚举/判定看不见」在
-        # rescue-test.txt 里同形。所以这里连**目录**一起列（只列 target 之下的相对名），
-        # 并记最深那条的字符数：Windows 的 MAX_PATH 是 260，而归档内路径本身就有 130 字符，
-        # 拼上 target 就压到那条线上——长度是这一发唯一的嫌疑人，不写出来下一轮还是盲的。
-        $landed = @(Get-ChildItem -LiteralPath $Target -Recurse -ErrorAction SilentlyContinue)
-        # target 底下什么都没有时，光看 landed=0 仍分不开「落到了 target 的兄弟目录」与
-        # 「restic 写到别处去了」——所以只在这一档再往上列一层（**纯读**：不碰任何引擎命令，
-        # 见 AGENTS §2「探测不许与被测命令同形」）。
-        $where = "target"
-        if ($landed.Count -eq 0) {
-            $par = Split-Path -Parent $Target
-            $landed = @(Get-ChildItem -LiteralPath $par -ErrorAction SilentlyContinue)
-            $where = "parent"
-        }
-        $maxLen = 0
-        foreach ($it in $landed) { if ($it.FullName.Length -gt $maxLen) { $maxLen = $it.FullName.Length } }
-        $names = @($landed | Select-Object -First 12 | ForEach-Object {
-            $rel = "$($_.FullName)"
-            if ($rel.Length -gt $Target.Length) { $rel = $rel.Substring($Target.Length) }
-            ($rel -replace '^[\\/]+', '') + $(if ($_.PSIsContainer) { "/" } else { "" })
-        })
+        # 引擎原文只进本地 backup.log，不进 rescue-test.txt（§1.1 不抄引擎输出），但「为什么失败」
+        # 只有 restic 自己知道——所以这一行带 rc、带组装出的路径、带字节数、带 stderr 尾巴
+        $shown = $errText -replace "`r?`n", " | "
+        if ($shown.Length -gt 240) { $shown = $shown.Substring($shown.Length - 240) }
         try {
             [void](Add-Content -LiteralPath $env:BACKUP_LOG -Value (
-                "[drill-restore] rc=$rc include=$inc target=$Target" + "`n" +
-                "[drill-restore] landed=$($landed.Count) entries listed under $where, deepest path $maxLen chars" + "`n" +
-                ($names -join "`n") + "`n" + ($tail -join "`n")))
+                "[drill-dump] rc=$rc bytes=$written internal=$internal out=$OutFile" +
+                $(if ($shown) { " stderr=$shown" } else { '' })))
         } catch { }
     }
-    $rc
+    # 返回对象而不是裸数组（§2：函数返回会把数组摊平，1 个元素出来是标量）
+    @{ rc = $rc; bytes = $written; internal = "$internal"; out = "$OutFile" }
 }
 
 # 结论判定，逐字照抄 bash 的两条教训：汇总行写作「N PASS / 0 FAIL」，含字面 FAIL——按整行匹配
@@ -308,35 +328,22 @@ function Invoke-Drill {
                     $failn++
                     continue
                 }
-                $outDir = Join-Path $tmp ("out-" + $n)
-                [void](New-Item -ItemType Directory -Force -Path $outDir)
-                $rc = Restore-DrillFile -Bin $ResticBin -Repo "$($item.repo)" -Snap "$($item.snap)" `
-                    -Include $spath -Target $outDir
-                # restic 解包把**归档内的完整路径**落在 target 之下（实测 out-5/tmp/…/note.txt），
-                # 所以挑命中按后缀比，不去猜它前面那几段是什么。后缀就是清单里那份归一化路径。
-                $norm = ($spath -replace '\\', '/')
-                $cmpType = [System.StringComparison]::OrdinalIgnoreCase
-                # 落地清单单独留一份：「restic 解出 0 个文件」与「解出了 N 个但后缀比不中」是
-                # 两种完全不同的坏法（前者＝--include 没命中归档内形状，后者＝落地形状变了），
-                # 而 10-03 第二轮的合并消息把 rc≠0 与「挑不出文件」压成同一句话，于是真宿主上
-                # 那 13 条 FAIL 一个字都没告诉我们其中哪一种。
-                $all = @(Get-ChildItem -LiteralPath $outDir -Recurse -File -ErrorAction SilentlyContinue)
-                $hit = @($all | Where-Object {
-                    ($_.FullName -replace '\\', '/').EndsWith($norm, $cmpType) })
+                $outFile = Join-Path $tmp ("f-" + $n + ".bin")
+                $res = Dump-DrillFile -Bin $ResticBin -Repo "$($item.repo)" -Snap "$($item.snap)" `
+                    -ArchivePath $spath -OutFile $outFile
                 $wantSha = ""
                 if ($s.PSObject.Properties['sha256']) { $wantSha = "$($s.sha256)" }
-                if ($rc -ne 0) {
-                    # 引擎原文的最后三行已经进了 $env:BACKUP_LOG 的 [drill-restore] 段；
-                    # 这份文件按设计只留本地（§1.1），但仍不该往里抄引擎输出——类别与 rc 够了
-                    $rep.Add("FAIL [$cls] ${spath}（restic 退出码 ${rc}≠0：取回命令本身失败，" +
-                        "原文见 backup.log 的 [drill-restore]）")
+                # 三档坏法各成一行，别合回去（10-03 第二轮那 13 条 FAIL 就是被合并句压成一件事）：
+                # 引擎报错／取回字节与清单不符／大小一致而内容不同。dump 没有「挑不挑得中」这一步，
+                # 所以旧的那档「退出 0 但没挑中这条」自动消失——它本来就是为了分开两种坏法而存在的。
+                if ($res.rc -ne 0) {
+                    # 引擎原文的尾巴已经进了 $env:BACKUP_LOG 的 [drill-dump] 行；这份文件按设计
+                    # 只留本地（§1.1），但仍不该往里抄引擎输出——类别、rc 与组装的路径够了
+                    $rep.Add("FAIL [$cls] ${spath}（restic dump 退出码 $($res.rc)≠0：归档内这条路径 " +
+                        "$($res.internal) 没解出来，原文见 backup.log 的 [drill-dump]）")
                     $failn++
-                } elseif ($hit.Count -eq 0) {
-                    $rep.Add("FAIL [$cls] ${spath}（restic 退出 0 但没挑中这条：落地 " +
-                        "$($all.Count) 个文件）")
-                    $failn++
-                } elseif ($hit[0].Length -ne [long]$ssize) {
-                    $rep.Add("FAIL [$cls] ${spath}（大小不符：清单 ${ssize} B，取回 $($hit[0].Length) B）")
+                } elseif ($res.bytes -ne [long]$ssize) {
+                    $rep.Add("FAIL [$cls] ${spath}（大小不符：清单 ${ssize} B，取回 $($res.bytes) B）")
                     $failn++
                 } elseif (-not $wantSha) {
                     # 清单没记哈希就如实写明这一条只证到了大小——不标注，读报告的人会把
@@ -346,7 +353,7 @@ function Invoke-Drill {
                 } else {
                     $gotSha = ""
                     try {
-                        $gotSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $hit[0].FullName).Hash.ToLowerInvariant()
+                        $gotSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $res.out).Hash.ToLowerInvariant()
                     } catch { $gotSha = "" }
                     if ($gotSha -and $gotSha -eq $wantSha) {
                         $rep.Add("PASS [$cls] ${spath} (${ssize} B, 内容哈希一致)")
