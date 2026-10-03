@@ -129,6 +129,10 @@ function Resolve-BgEntry {
 # 在 5.1 上到底是 ASCII 还是 Default——那一行本身是纯 ASCII，两种编码下字节相同，所以 `dump8=6`
 # 分不出它；②`backup.ps1:117` 的 `Tee-Object -Append` 写的同一本账，默认编码同样随宿主变。
 # 口径：这一层所有落笔由下面两个函数完成——显式 UTF-8 无 BOM，编码不再由宿主默认值决定。
+# 这一手在真 5.1 上量到了（轮 37117929544 的 step 12）：`# host-enc apnd size=26 head=70726F62
+# nul=0 anchor8=1`，与 pwsh 7 那一行逐字节同形；同轮 `# log-bytes` 从上一轮的
+# `nul=484 anchor8=0 anchor16=1` 变成 `nul=0 anchor8=1 anchor16=0`，`DRILL-E2E-OK skipped=0 ok=136`
+# 两档宿主同数。同轮 `red`/`std` 照旧 `head=FFFE7000`——宿主那两条操作符没变，变的只是不再用它们落笔。
 # 反面一条：不要改用 `$PSDefaultParameterValues['Out-File:Encoding']`，5.1 上 `utf8` 是
 # **带 BOM** 的那一档（同一轮 `# host-enc add head=EFBBBF70` 实测），而 `utf8NoBOM` 这个值 5.1
 # 上不存在（6.0 才加）——静态面反过来钉它不许出现。

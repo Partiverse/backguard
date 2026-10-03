@@ -246,10 +246,15 @@
   **仍未量的一维（别把修好读过头）**：5.1 在把子进程 stderr 交给 `2>` 之前按 `[Console]::OutputEncoding`
   解码，所以那行的**中文尾串**在真机上是否原样，至今未量（runner 的代码页不是产品属性）。锚点保留的
   理由正在这里——**别把「`anchor8` 绿了」读成「中文段完好」**，判据只落在那段两档宿主都保得住的 ASCII 上。
-  **另一条未量（别把修好读成已跨宿主验证）**：探针里代表选定写路径的那一行（`# host-enc apnd`）是
-  这一轮修完才加进夹具的，**轮 37103795583 跑的还是三档版**，所以 `[IO.File]::AppendAllText` +
-  `UTF8Encoding($false)` 在真 5.1 上到底落什么形状**尚未量**——它带一条跨宿主断言，下一轮那一行给得出
-  `head=70726F62 nul=0` 才算证住，给不出就是修法本身选错路（届时照 m58 的形状改判据，不是照旧默认值）。
+  **那一条未量已经在真 5.1 上证住（轮 37117929544 的 step 12，一手取证行逐字照抄）**：
+  `# host-enc apnd size=26 head=70726F62 nul=0 anchor8=1 anchor16=0`——`[IO.File]::AppendAllText` +
+  `UTF8Encoding($false)` 这一档落笔在两档宿主上**逐字节同形**，选路正确。同一轮里 5.1 自己的
+  `# log-bytes tag=s1` 从上一轮的 `nul=484 anchor8=0 anchor16=1` 变成 **`nul=0 anchor8=1 anchor16=0`**
+  （`bom=EFBBBF bomcnt=1` 仍在，那是宿主写第一行时给的前导字节，不是逐行累积），场景4 同形
+  `tag=s4 size=9013 nul=0 anchor8=1 dump8=30 bomcnt=1`，`DRILL-E2E-OK skipped=0 ok=136` 两档宿主同数。
+  同一轮的 `red`/`std` 两行**照旧是 `head=FFFE7000 nul=14`**——重定向操作符的行为一点没变（那不是
+  产品能改的宿主语义），变的只是产品不再用它。还有一维随这一轮一起量掉：`ok=` 在两档宿主同形
+  （都 136），此前那句「`ok=` 是否同形未量」不再成立。
   后果这一层现在说得准了：真机注册的正是 `powershell.exe -File backup.ps1`，在修法之前
   **每一个经重定向进日志的子进程输出行，在 Windows 夜间日志里都是 UTF-16LE**，操作员拿到的是一本
   两种编码混写的账——不止那一行。措辞那一维仍然保留：
@@ -676,8 +681,17 @@
   落盘再读回来解析——「只判内存字符串」是死断言），四条判据 `entries>files`（枚举真含目录）/ `files`
   与产品自报对得上 / `deepest>to_len`（落点在 `-To` 之下而不是别处）。容器实测
   `to_len=57 entries=6 files=3 deepest=122`。三刀各自咬住（登记为本文件台账的 **m19/m20/m21**，见下）。
-  **长 `-To` 那一档仍未测**——drill 坏在 132 字符的 target，而这里的夹具 target 只有 57，所以真机上
-  这一行给不给得出「只落三个目录」的形状，属于下一轮 windows job 的一手证据，不在这里预设结论。
+  **真 windows runner 兑现了这条取证行（轮 37117929544 的 step 13 与 step 14，两档宿主同一行）**：
+  `# rescue-landed to_len=92 entries=11 files=3 deepest=192`。按这一发事先登记的闸门读：**`entries > files`
+  ⇒ 落点树里除了那 1 个取回文件还有一整串目录条目**（`files=3` ＝ 夹具自己的 2 个诱饵 + 1 个取回，
+  与产品自报对得上），也就是 `restore --include --target` 在真宿主上**把盘符目录树重建进 `-To` 里**
+  （`deepest=192` 而 `-To` 只有 92 字符，那 100 字符就是重建出来的层级）。于是「长 `-To` 那一档未测」
+  这一支**当场测掉并且给了答案**：形状与容器那一发同档（容器 `to_len=57 entries=6 files=3 deepest=122`，
+  也是 `entries > files`），不是只在真机上才坏。**所以下一步有证据了**：`rescue.ps1:232` 给人拿到的
+  不是一棵平铺的树，而是 `<To>\C\Users\…\文件`——逃生工具在恢复现场多出一层盘符，人已确认要的是平铺。
+  改法（把取回落到 `<To>` 之后按相对路径摊平，或改用 `restic dump` 那条已经证过的字节通道）属产品行为
+  变更，**本轮不动**，等用户点头再动；判据一头（场景10b 只观察）已经在两档宿主上都跑绿，改的时候它直接
+  就是回归基线：期望从 `entries > files` 翻成 `entries == files`。
 - **「归档内路径」的字符串形状与 pathlib 在宿主上算出什么是两件事，凡把两者写死的夹具都只在一档宿主成立**
   （10-03 第二轮红在 `semantic (windows-latest)` 的 unit tests 才露出来，实测 AssertionError）：
   `Path("/", "C:", "Users", "x", "a.txt")` 在 posix 上是 `/C:/Users/x/a.txt`，在 Windows 上归一化成
