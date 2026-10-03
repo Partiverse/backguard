@@ -266,6 +266,10 @@ verify_unknown=0
 verify_healed=0
 VERIFY_LINES=()
 CLOUD_VERIFY_REPORT=""
+# 「这一轮到底跑没跑过」的旗标：SKIP_WEBDAV / 未到窗口时函数不会被调，计数器停在 0——
+# 只看计数器分不清「没跑」与「跑了且全过」（STATUS.jsonl 的 cv/ig state 靠它们区分）
+CLOUD_VERIFY_RAN=0
+INTEGRITY_RAN=0
 
 note_verify() {   # $1=检查名 $2=PASS|FAIL|SKIP|UNKNOWN|HEALED $3=详情
     VERIFY_LINES+=("$(printf '%-8s %-30s %s\n' "$2" "$1" "$3")")
@@ -408,6 +412,7 @@ verify_config_hash() {   # $1=本地仓库目录 $2=云端仓库前缀 $3=检查
 run_cloud_verify() {
     local tgt dest pair cls repo
     VERIFY_LINES=()
+    CLOUD_VERIFY_RAN=1
     verify_failed=0
     verify_unknown=0
     verify_healed=0
@@ -486,6 +491,7 @@ run_integrity_check() {
         return 0
     }
     INTEGRITY_LINES=()
+    INTEGRITY_RAN=1
     integrity_failed=0
     # 报告落在时间轴根。borg 那一路由语义层建这个目录，restic 这一路（Windows 的 backup.sh）
     # 不跑语义层——没人建它就写不出来，而「报告没落盘」在这一步的语义等于「这月的证据没了」
@@ -666,6 +672,56 @@ log_run_boundary() {
     dur=$(( $(date +%s) - ${RUN_START_TS:-$(date +%s)} ))
     printf '[%s] run 边界: sha=%s rc=%s dur=%ss\n' \
         "$(date '+%Y-%m-%d %H:%M:%S')" "${RUN_GIT_SHA:-nogit}" "$rc" "$dur" >> "$LOG" || true
+    append_status_line "$rc" "$dur"
+}
+
+# ---------- A1 状态地基（research/12 §5）：每轮一行追加进 timeline/STATUS.jsonl ----------
+# 读者是 webui.py（A2 本地只读状态页）、CLI 与未来的任何壳。只含计数与状态：
+# **零文件名、零绝对路径**——这份文件随 timeline 推送一起上云，而红线 §1.1 的适用范围
+# 原文就写着「任何新写的、会随时间轴上云的明文产物同受这条约束，包括机器报告」。
+# 两条既有纪律在这里会合：
+#   ①旁路（§1.3）：取不到的写 null、写不进的放弃，绝不反过来把备份拖死——整条挂在
+#     EXIT trap 里，与边界行同一条命；
+#   ②追加不改写：rclone 在 123Pan 这类 remote 上只比大小，**同尺寸覆写永远推不上云**
+#     （AGENTS §2）——JSONL 每轮 +1 行保证尺寸单调增，云端副本才跟得上本地。
+# 「这轮跑没跑过自证/完整性」用显式旗标（*_RAN）而不是从计数器反推：SKIP_WEBDAV 时
+# 计数器停在初始值 0，与「跑了且 0 失败」从外面看是同一个形状。
+append_status_line() {
+    local rc="$1" dur="$2"
+    [[ -n "${BACKUP_BASE:-}" && -d "${BACKUP_BASE}/timeline" ]] || return 0
+    local tl="$BACKUP_BASE/timeline"
+    local ts snapshots dr_pass=null dr_total=null dr_age=null
+    ts="$(date +"%Y-%m-%dT%H:%M:%S%z")"; ts="${ts%??}:${ts: -2}"
+    snapshots=$(find "$tl" -mindepth 4 -maxdepth 4 -type d 2>/dev/null | wc -l | tr -d ' ') || true
+    if [[ -f "$tl/rescue-test.txt" ]]; then
+        # 演练是 30 天节流的旁路，这份结论是**最近一次**演练的，不是本轮的——
+        # 年龄（天）一并给出，读的人才知道这颗证据有多新鲜
+        local res
+        if res=$(grep -m1 -oE 'RESULT: [0-9]+ PASS / [0-9]+ FAIL' "$tl/rescue-test.txt" 2>/dev/null); then
+            dr_pass="${res#RESULT: }"; dr_pass="${dr_pass%%[[:space:]]PASS*}"
+            dr_total="${res##*/ }"; dr_total="${dr_total%%[[:space:]]FAIL*}"
+        fi
+        dr_age=$(( ( $(date +%s) - "$(file_mtime "$tl/rescue-test.txt")" ) / 86400 )) || dr_age=null
+    fi
+    local cv_state=skipped ig_state=skipped ig_checks=0
+    [[ "${CLOUD_VERIFY_RAN:-0}" == "1" ]] && {
+        if [[ ${verify_failed:-0} -gt 0 ]]; then cv_state=fail
+        elif [[ ${verify_healed:-0} -gt 0 ]]; then cv_state=healed
+        else cv_state=pass; fi
+    }
+    [[ "${INTEGRITY_RAN:-0}" == "1" ]] && {
+        ig_checks=${#INTEGRITY_LINES[@]}
+        if [[ ${integrity_failed:-0} -gt 0 ]]; then ig_state=fail
+        elif [[ $ig_checks -gt 0 ]]; then ig_state=pass; fi
+    }
+    {
+        printf '{"format":"backguard/status/1","ts":"%s","device":"%s","engine":"%s","sha":"%s","rc":%s,"dur_s":%s,"engine_failed":%s,"cloud_push_failed":%s,"cv_state":"%s","cv_failed":%s,"cv_healed":%s,"cv_unknown":%s,"ig_state":"%s","ig_checks":%s,"ig_failed":%s,"drill_pass":%s,"drill_total":%s,"drill_age_d":%s,"snapshots":%s}\n' \
+            "$ts" "${DEVICE_ID:-unknown}" "${PLATFORM:-unknown}" "${RUN_GIT_SHA:-nogit}" \
+            "$rc" "$dur" "${failed:-0}" "${cloud_failed:-0}" \
+            "$cv_state" "${verify_failed:-0}" "${verify_healed:-0}" "${verify_unknown:-0}" \
+            "$ig_state" "$ig_checks" "${integrity_failed:-0}" \
+            "$dr_pass" "$dr_total" "$dr_age" "$snapshots"
+    } >> "$tl/STATUS.jsonl" || true
 }
 
 # ---------- 主流程 ----------
@@ -808,7 +864,9 @@ main() {
         warn "未配置备份目标（BACKUP_TARGETS/WEBDAV_REMOTE 均空）——本次仅本地备份"
     fi
 
-    local failed=0
+    # failed 提升为全局：EXIT trap 里的 STATUS.jsonl 产出器（append_status_line）与边界行
+    # 是同一批读者，local 在 trap 里不可见（bash 动态作用域不穿透函数边界）
+    failed=0
     local -a sem_archives=()
     # 云端自证要拿「本地仓库在哪」当输入，两个引擎分支各登记一次（类别:路径）
     local -a repo_pairs=()

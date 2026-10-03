@@ -76,7 +76,7 @@ jobs:
       - name: Lint
         run: |
           shellcheck --version
-          shellcheck -S warning -f gcc backup.sh restore.sh semantic/semantic.sh drill.sh rescue.sh 2>&1 | tee /tmp/lint.txt
+          shellcheck -S warning -f gcc backup.sh restore.sh semantic/semantic.sh drill.sh rescue.sh ui.sh 2>&1 | tee /tmp/lint.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             grep -E '^[^ :]+:[0-9]+:[0-9]+' /tmp/lint.txt | sed 's/^/::error::/' | head -20 || true
@@ -264,6 +264,24 @@ jobs:
           # 以及两份实现对 rc=3 / rc=12 判得不一样时的可见性。restic 只装在 linux job
           # （apt 那行）；macos job 没装，同一条夹具在那边会打 E2E-SKIP 后如实退
           bash test_restic_retention.sh
+
+      - name: E2E status line (A1 foundation)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # A1 状态地基（research/12 §5）：真 borg 跑两轮 backup.sh，STATUS.jsonl 每轮追加一行、
+          # 逐行合法 JSON、零文件名零绝对路径（红线 §1.1——这份文件随 timeline 上云）。
+          # borg + python3 都在 linux job 的 apt 那一行里
+          bash test_status_line.sh
+
+      - name: E2E webui read-only page
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # A2 本地只读状态页（webui.py）：白名单路由 + 最新快照语义 + 隐私诱饵
+          # （runs/*.json、rescue-test、preflight、密封件里埋 token，任何响应不许出现）+
+          # 只读（POST 不通）+ 拒绝非回环绑定。零备份轮，秒级
+          bash test_webui.sh
 
       - name: E2E month jump (low-frequency paths compose)
         timeout-minutes: 40
@@ -600,6 +618,21 @@ jobs:
           & "$PWD\test_retention_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::restic 保留策略逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
+              exit 1
+          }
+
+      - name: Status emit logic (A1)
+        # STATUS.jsonl 产出器（Add-StatusLine，research/12 §5 的 A1 状态地基）的字段/顺序/
+        # 隐私/编码面：从 backup.ps1 按 BEGIN-STATUS 哨兵切出，对着夹具 timeline 摆布状态位。
+        # bash 侧的行为面由 linux job 的「E2E status line」覆盖；这一步管 ps1 侧自己的形状，
+        # 以及 UTF-8 无 BOM 的字节判据（§11 续18/续19 的定案，5.1 与 pwsh 7 两档宿主同形才算数）
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_status_emit_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::STATUS 产出器逻辑测试 rc=$LASTEXITCODE——见上面的 FAIL 行"
               exit 1
           }
 
@@ -1459,6 +1492,20 @@ jobs:
           & "$PWD\test_retention_logic.ps1"
           if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::Windows PowerShell 5.1 cannot run retention logic: rc=$LASTEXITCODE"
+              exit 1
+          }
+
+      - name: Status emit logic on Windows PowerShell 5.1
+        # Same suite, same reason as the other 5.1 steps: the status line is written by
+        # [IO.File]::AppendAllText + UTF8Encoding($false) precisely so both hosts produce
+        # byte-identical shapes (HANDOVER §11 续18/续19); this step is where 5.1 proves it.
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $env:PATH = "$env:RUNNER_TEMP\bin;$env:PATH"
+          & "$PWD\test_status_emit_logic.ps1"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Windows PowerShell 5.1 cannot run status emit logic: rc=$LASTEXITCODE"
               exit 1
           }
 

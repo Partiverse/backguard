@@ -245,6 +245,73 @@ function Get-RunGitSha {
 }
 # END-BOUNDARY
 
+# BEGIN-STATUS —— 同上约定：这一段被 test_status_emit_logic.ps1 按哨兵原样切走单独跑。
+# A1 状态地基（research/12 §5）：每轮一行追加进 timeline\STATUS.jsonl，与 backup.sh 的
+# append_status_line 同形同序（字段一个不多一个不少，改前先对那边）。读者是 webui.py、
+# CLI 与未来的任何壳。三条纪律：
+#   ①零文件名、零绝对路径——文件随 timeline 推送一起上云，红线 §1.1 原文写着
+#     「任何新写的、会随时间轴上云的明文产物同受这条约束，包括机器报告」；
+#   ②旁路（§1.3）：取不到的写 null，写不进的放弃，绝不反过来打断备份；
+#   ③追加不改写：这条 remote 上 rclone 只比大小，同尺寸覆写永远推不上云——JSONL
+#     每轮 +1 行保证尺寸单调增，云端副本才跟得上本地（AGENTS §2）。
+function Add-StatusLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$BackupBase,
+        [int]$Rc = 0,
+        [int]$DurationSec = 0
+    )
+    $ErrorActionPreference = "Continue"   # 见文件头「5.1 宿主口径」
+    try {
+        $tl = Join-Path $BackupBase "timeline"
+        if (-not (Test-Path -LiteralPath $tl -PathType Container)) { return }
+        $drillPass = "null"; $drillTotal = "null"; $drillAge = "null"
+        $rescue = Join-Path $tl "rescue-test.txt"
+        if (Test-Path -LiteralPath $rescue -PathType Leaf) {
+            # 演练是 30 天节流的旁路，这份结论是最近一次演练的，不是本轮的——年龄一并给出
+            $m = [regex]::Match((Get-Content -LiteralPath $rescue -Raw),
+                'RESULT: (\d+) PASS / (\d+) FAIL')
+            if ($m.Success) { $drillPass = $m.Groups[1].Value; $drillTotal = $m.Groups[2].Value }
+            $drillAge = [string] [int] ((New-TimeSpan -Start (Get-Item -LiteralPath $rescue).LastWriteTime -End (Get-Date)).TotalDays)
+        }
+        $cvState = "skipped"; $igState = "skipped"; $igChecks = 0
+        if ($script:RoundCvRan) {
+            if ($script:VerifyFailed -gt 0) { $cvState = "fail" }
+            elseif ($script:VerifyHealed -gt 0) { $cvState = "healed" }
+            else { $cvState = "pass" }
+        }
+        if ($script:RoundIgRan) {
+            $igChecks = @($script:IntegrityLines).Count
+            if ($script:IntegrityFailed -gt 0) { $igState = "fail" }
+            elseif ($igChecks -gt 0) { $igState = "pass" }
+        }
+        # 快照计数：timeline/YYYY/MM/DD/HHMM-标签 的第 4 层（与 Prune-LocalTimeline 同一口径）
+        $snapshots = 0
+        foreach ($y in @(Get-ChildItem -LiteralPath $tl -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ("$($y.Name)" -notmatch '^\d{4}$') { continue }
+            foreach ($m in @(Get-ChildItem -LiteralPath $y.FullName -Directory -Force -ErrorAction SilentlyContinue)) {
+                foreach ($d in @(Get-ChildItem -LiteralPath $m.FullName -Directory -Force -ErrorAction SilentlyContinue)) {
+                    $snapshots += @(Get-ChildItem -LiteralPath $d.FullName -Directory -Force -ErrorAction SilentlyContinue).Count
+                }
+            }
+        }
+        $sha = Get-RunGitSha
+        $line = '{{"format":"backguard/status/1","ts":"{0}","device":"{1}","engine":"restic","sha":"{2}","rc":{3},"dur_s":{4},"engine_failed":{5},"cloud_push_failed":{6},"cv_state":"{7}","cv_failed":{8},"cv_healed":{9},"cv_unknown":{10},"ig_state":"{11}","ig_checks":{12},"ig_failed":{13},"drill_pass":{14},"drill_total":{15},"drill_age_d":{16},"snapshots":{17}}}' -f `
+            (Get-Date -Format "yyyy-MM-ddTHH:mm:sszzz"), "$env:DEVICE_ID", $sha, $Rc, $DurationSec, `
+            [int]$script:RoundEngineFailed, [int]$script:RoundCloudFailed, $cvState, `
+            [int]$script:VerifyFailed, [int]$script:VerifyHealed, [int]$script:VerifyUnknown, `
+            $igState, $igChecks, [int]$script:IntegrityFailed, `
+            $drillPass, $drillTotal, $drillAge, $snapshots
+        # 显式 UTF-8 无 BOM：§11 续18/续19 的定案——5.1 的重定向操作符写 UTF-16LE、
+        # Add-Content 的 utf8 带 BOM，只有 AppendAllText + UTF8Encoding($false) 两档宿主同形
+        [IO.File]::AppendAllText((Join-Path $tl "STATUS.jsonl"), $line + "`n",
+            (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        # 旁路口径：少一行证据，不改结论（与 Write-RunBoundary 的 catch 同一条命）
+        Write-Host "STATUS-WRITE-FAILED $($_.Exception.Message)"
+    }
+}
+# END-STATUS
+
 # BEGIN-VERIFY —— 同上约定：这一段被 test_cloud_verify_logic.ps1 按哨兵原样切走单独跑
 # A6 L1 云端副本自证（与 backup.sh 的 run_cloud_verify 同形）。为什么必须有：这条 remote 上
 # rclone 的比较退化成「只比大小」，原地同长度重写永远推不上云而 `copy` 照样退出 0（10-01 实测：
@@ -952,6 +1019,10 @@ function Start-PartiverseBackup {
         }
     }
 
+    # 局部计数器 → 状态位（Add-StatusLine 在脚本末尾才读）：一处汇总，不去碰循环里的
+    # `+=`（碰散了下次重构必漏一处）
+    $script:RoundEngineFailed = $failed
+    $script:RoundCloudFailed = $cloudFailed
     if ($failed -eq 0 -and $cloudFailed -eq 0) {
         # 这一轮备份成功的那些仓库，两条旁路共用同一份登记表：自证要知道「该有哪些仓库」，
         # 完整性校验要知道「该读哪些仓库」。两处各建一遍＝其中一处漏登记，而漏的那一类永远
@@ -969,6 +1040,7 @@ function Start-PartiverseBackup {
                 # 它自己随下一轮才上云（先比对、后落笔）。
                 $v = Invoke-CloudVerify -Targets $targets -BackupBase $BACKUP_BASE -RepoPairs $repoPairs `
                     -ReportPath (Join-Path $BACKUP_BASE "timeline\CLOUD-VERIFY.txt") -Sha (Get-RunGitSha)
+                $script:RoundCvRan = $true
                 if ($v.Healed -gt 0) {
                     Write-Warning "[verify] $($v.Healed) 个仓库 config 与云端不一致，已当场强制补传修好——这类不一致推送永远不会自己带走（详见 $($v.Report)）"
                 }
@@ -978,6 +1050,7 @@ function Start-PartiverseBackup {
                 $verifyFailed = $v.Failed
             } catch {
                 # 旁路没资格终止本体（§1.3）：自证自己炸了只是少一份证据，不改备份结论
+                $script:RoundCvRan = $true   # 跑了但半路死：状态行照实记，别把「没跑」演成「全过」
                 Write-Warning "[verify] 自证流程异常退出（少一份证据，不改备份结论）: $($_.Exception.Message)"
             }
         }
@@ -998,8 +1071,10 @@ function Start-PartiverseBackup {
                 $integrity = Invoke-IntegrityCheck -RepoPairs $repoPairs `
                     -ReportPath (Join-Path $BACKUP_BASE "timeline\INTEGRITY.txt") `
                     -LogPath $BACKUP_LOG -Sha (Get-RunGitSha)
+                $script:RoundIgRan = $true
             } catch {
                 # 旁路没资格终止本体（§1.3）：校验自己炸了只是少一份证据，不改备份结论
+                $script:RoundIgRan = $true
                 Write-Warning "[integrity] 存储完整性校验流程异常退出（少一份证据，不改备份结论）: $($_.Exception.Message)"
             }
             if ($integrity -and $integrity.Failed -gt 0) {
@@ -1122,6 +1197,12 @@ function Initialize-PartiverseBackup {
 
 $script:RunStartTs = Get-Date
 $script:RunRc = 0
+# STATUS.jsonl（Add-StatusLine）读的状态位：初值在这里给齐——Start-PartiverseBackup 的
+# 局部计数器在函数返回后不可见，而产出器在脚本最末尾才跑
+$script:RoundEngineFailed = 0
+$script:RoundCloudFailed = 0
+$script:RoundCvRan = $false
+$script:RoundIgRan = $false
 switch ($Task) {
     "Init"  { Initialize-PartiverseBackup }
     "Backup" {
@@ -1150,5 +1231,8 @@ if ($Task -eq "Backup") {
         $dur = [int] (New-TimeSpan -Start $script:RunStartTs -End (Get-Date)).TotalSeconds
         Write-RunBoundary -Path $bpath -Sha (Get-RunGitSha) -Rc $script:RunRc -DurationSec $dur
     }
+    # STATUS.jsonl 与边界行同一落点同一口径：旁路，早退的轮次（timeline 不存在）自己跳过
+    if ($BACKUP_BASE) { Add-StatusLine -BackupBase $BACKUP_BASE -Rc $script:RunRc `
+        -DurationSec ([int] (New-TimeSpan -Start $script:RunStartTs -End (Get-Date)).TotalSeconds) }
     exit $script:RunRc
 }

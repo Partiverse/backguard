@@ -144,6 +144,28 @@ if [[ -n "$snap" ]]; then
   [[ -z "$hex" ]] && chk ok "明文产物无 64 位十六进制串" "" || chk fail "明文产物无 64 位十六进制串" "$hex"
 fi
 
+echo "== A1：STATUS.jsonl（每轮一行，webui 的地基） =="
+sj="$B/timeline/STATUS.jsonl"
+if [[ -f "$sj" ]]; then
+  last=$(tail -1 "$sj")
+  if printf '%s' "$last" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read()); assert r.get("format")=="backguard/status/1"' 2>/dev/null; then
+    chk ok "末行合法 JSON 且 format 在册" "rc=$(printf '%s' "$last" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read()).get("rc"))')"
+    [[ "$last" == *'"rc":0,'* ]] && chk ok "最近一轮 rc=0" "" || chk fail "最近一轮 rc=0" "$last"
+  else
+    chk fail "末行合法 JSON 且 format 在册" "$last"
+  fi
+  # 隐私红线对这份新产物同样适用（它随 timeline 上云）：绝对路径不许出现。
+  # 判据取 JSON 形状「":/」——字段值以 / 开头就是绝对路径进了体（format 里的内嵌斜杠
+  # 不长这样，别用「引号+斜杠」这种会误伤 `"backguard/status/1"` 的宽形状）
+  if grep -qF '":/' "$sj" 2>/dev/null; then
+    chk fail "状态行无绝对路径" "$(grep -m1 -F '":/' "$sj")"
+  else
+    chk ok "状态行无绝对路径" ""
+  fi
+else
+  chk fail "文件存在" "$sj 不存在（产出器没挂进 EXIT trap？）"
+fi
+
 echo "== 隐私红线抽查（明文层不含完整文件名） =="
 if [[ -n "$snap" ]]; then
   if grep -qsE '\.(jpg|jpeg|png|pdf|docx|xlsx|key|pem|txt)$' "$snap"/MANIFEST.txt; then
