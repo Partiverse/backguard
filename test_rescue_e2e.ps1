@@ -96,6 +96,15 @@
 #       ——这一条是给真宿主准备的：容器 `to_len=57 entries=6 files=3 deepest=122`，Windows 上
 #         若落点形状变成「只走到第三层就断」，这里先报出来而不是等产品的 FAIL 行。
 #         **长 `-To` 那一档仍未测**：drill 坏在 132 字符的 target，本夹具只有 57。
+#
+#   m22（10-03 深夜，任务 #52 摊平落地后）摘掉摊平判据（`$incKey` 置 $null，前缀剥除恒不命中
+#       → 恒走「整结构照搬」退路）
+#       BITTEN count=2  首条=场景10 摊平落点：文件直接在 -To 根下（实得 `-To/tmp/…/src-files/note.txt`）
+#       ——第二刀是场景10b 摊平契约（entries==files 变回 6>3，正是 10-03 真 runner 取证的形状）。
+#         退路本身是**故意的**（宁可多留层级不许挪丢文件），所以它必须在断言下显形而不是静默过。
+#   另：摊平判据里「剥盘符冒号」那一维（`-replace ':',''`）容器上不可咬（POSIX 路径无冒号，
+#   摘掉它容器照绿）——它由 windows job 两档宿主真跑同一份夹具覆盖：那边 -Find 交出的就是
+#   `C:/…` 形，剥错冒号场景10「直接在 -To 根下」当场红。别在容器里给这一维记 BITTEN。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
 
@@ -400,7 +409,9 @@ if (-not $script:haveReal) {
         @(Contract $gt 'got files=1').Count -eq 1) "实得: $(Contract $gt 'got')"
     $landed = Get-ChildItem -LiteralPath $to -Recurse -File -Force |
         Where-Object { $_.Name -eq 'note.txt' } | Select-Object -First 1
-    Chk '场景10 文件真的落在 -To 下面（保留仓库内结构）' ($null -ne $landed) "找遍 -To: $((Get-ChildItem -LiteralPath $to -Recurse -File -Force | ForEach-Object { $_.FullName }) -join ' ')"
+    Chk '场景10 文件真的落在 -To 下面' ($null -ne $landed) "找遍 -To: $((Get-ChildItem -LiteralPath $to -Recurse -File -Force | ForEach-Object { $_.FullName }) -join ' ')"
+    Chk '场景10 摊平落点：文件直接在 -To 根下，不在重建的路径树里（任务 #52）' (
+        $landed -and "$($landed.FullName)" -eq (Join-Path $to 'note.txt')) "实得: $($landed.FullName)"
     Chk '场景10 内容是最新快照那一份（v2）' ($landed -and (Get-Content -LiteralPath $landed.FullName -Raw) -match 'v2') `
         "实得: $(if ($landed) { Get-Content -LiteralPath $landed.FullName -Raw } else { '(没落地)' })"
     Chk '场景10 暂存目录用完自己收掉（不许留 .bg-rescue-*）' (
@@ -408,16 +419,15 @@ if (-not $script:haveReal) {
         "残留: $((Get-ChildItem -LiteralPath $to -Force -Directory | ForEach-Object { $_.Name }) -join ' ')"
 
     # ---------- 场景10b：落点取证行（10-03 演练那一发的教训——长度依赖只有真宿主看得见）----------
-    # 演练侧坏在「引擎报 `Restored 9 / 1 files/dirs` 而 target 之下递归枚举只有 3 个**目录**条目」，
-    # 两个候选（引擎少写 vs 枚举看不见深路径）都没被那一轮证据排掉，**成因未定**（登记在 AGENTS §2
-    # 「第五轮」）；`dump` 只是绕开了它，没有解释它。`rescue.ps1` 的 -Get 仍是
-    # `restore --include --target`，所以同一类坏法在这边到底有没有对应形状，**要量而不是猜**：
-    # 这一档夹具的 -To 是 temp 根下的一层（短），真机现场用户给的 -To 可能深得多。
-    # 三条设计约束：①**全条目枚举、不带 `-File`**——上一版演练取证用 `-File` 时，「只落了目录」与
-    # 「一个文件都没落」报出来同为 0，这一发不许再犯（所以下面那条判据是 `entries > files`，
-    # 它本身就是「枚举真的数到了目录」的存活证据）；②取证行**写盘再读回**——只判内存里那个字符串
-    # 等于拿它自己比它自己（场景5 那一类死断言），剥掉写入这行必须红；③数值与产品自报对得上：
-    # -To 里预置 2 个诱饵 + 取回 1 个，所以 `files >= 3`。
+    # 演练侧曾坏在「引擎报 `Restored 9 / 1 files/dirs` 而 target 之下递归枚举只有 3 个**目录**条目」；
+    # rescue.ps1 的 -Get 曾是 `restore --include --target`，10-03 真 runner 取证
+    # `entries=11 files=3 deepest=192`（容器同形）证出**盘符目录树被整个重建进 -To**——任务 #52，
+    # 10-03 起产品侧已改为按归一化后的 -Get 剥前缀摊平（rescue.ps1 Invoke-GetMode）。
+    # 这一段的形状契约随之翻转：**entries == files**——摊平后 -To 里不该再有任何目录条目；
+    # 「只落了目录、没落文件」那一档由紧随其后的 `files >= 3` 挡（诱饵 2 + 取回 1）。
+    # 三条设计约束不变：①**全条目枚举、不带 `-File`**——entries==files 要在「有目录」的旧形状下
+    # 报红才有意义，取证行自己得能数到目录；②取证行**写盘再读回**——只判内存里那个字符串
+    # 等于拿它自己比它自己（场景5 那一类死断言），剥掉写入这行必须红；③数值与产品自报对得上。
     $all10 = @(Get-ChildItem -LiteralPath $to -Recurse -Force -ErrorAction SilentlyContinue)
     $files10 = @($all10 | Where-Object { -not $_.PSIsContainer })
     $deep10 = 0
@@ -436,8 +446,8 @@ if (-not $script:haveReal) {
     $m10 = [regex]::Match("$($line10 | Select-Object -First 1)",
         '^# rescue-landed to_len=(?<tolen>\d+) entries=(?<entries>\d+) files=(?<files>\d+) deepest=(?<deepest>\d+)$')
     Chk '场景10b 四数从盘上那一行解析得出（写法漂了就解析不出）' ($m10.Success) "$($line10 | Select-Object -First 1)"
-    Chk '场景10b 全条目枚举真含目录（entries>files；退化成 -File 就相等）' (
-        $m10.Success -and [int]$m10.Groups['entries'].Value -gt [int]$m10.Groups['files'].Value) `
+    Chk '场景10b 摊平契约：-To 里没有目录条目（entries==files；盘符树回来了就 entries>files）' (
+        $m10.Success -and [int]$m10.Groups['entries'].Value -eq [int]$m10.Groups['files'].Value) `
         "$($line10 | Select-Object -First 1)"
     Chk '场景10b 取回的条数与产品自报对得上（-To 里 2 诱饵 + 1 取回）' (
         $m10.Success -and [int]$m10.Groups['files'].Value -ge 3) "$($line10 | Select-Object -First 1)"

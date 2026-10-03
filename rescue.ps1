@@ -482,12 +482,35 @@ function Invoke-GetMode {
         if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
         Fail "NOTHING_RESTORED" "没有取回任何文件——路径请从 -Find 的输出原样复制: $Get"
     }
-    foreach ($child in @(Get-ChildItem -LiteralPath $stage -Force)) {
-        Move-Item -LiteralPath $child.FullName -Destination $abs -Force
+    # 摊平（任务 #52）：`restore --target` 会把仓库内路径的**绝对形状**整个重建进暂存目录——
+    # POSIX 是 `/home/...` 去掉前导斜杠，Windows 是盘符目录树（restic 写盘时自己剥掉了文件名里
+    # 非法的冒号，`C:/Users/...` 落成 `C/Users/...`）。不摊平的话用户拿到的是 `-To\C\Users\...`
+    # 一棵带盘符前缀的树（10-03 真 runner 取证 `entries=11 files=3 deepest=192`，容器同形，
+    # 两边都不合预期）。口径：以**归一化后的 -Get**为界剥前缀，界下的相对结构原样保留
+    # （-Get 指目录时，目录内的子结构不动，只剥目录本身那截）；对不上界的一律整结构照搬——
+    # 宁可多留层级，不许挪丢文件。
+    $incKey = ((($Get -replace '\\', '/') -replace '^/', '') -replace ':', '').TrimEnd('/')
+    foreach ($f in @(Get-ChildItem -LiteralPath $stage -Recurse -File -Force)) {
+        $rel = ("$($f.FullName)".Substring("$stage".Length) -replace '\\', '/').Trim('/')
+        $sub = $rel
+        if ($incKey -and $rel -eq $incKey) {
+            $sub = ($rel -split '/')[-1]
+        } elseif ($incKey -and $rel.StartsWith("$incKey/", [System.StringComparison]::Ordinal)) {
+            $sub = $rel.Substring($incKey.Length + 1)
+        }
+        $parts = @($sub -split '/')
+        $destDir = $abs
+        if ($parts.Count -gt 1) {
+            $destDir = Join-P (@($abs) + @($parts[0..($parts.Count - 2)]))
+            if (-not (Test-Path -LiteralPath $destDir -PathType Container)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+            }
+        }
+        Move-Item -LiteralPath $f.FullName -Destination (Join-P $destDir $parts[-1]) -Force
     }
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     Write-Contract "got files=$got to=$abs"
-    Write-Host "[ OK ] 已取回 $got 个文件到 $abs（保留仓库内目录结构）"
+    Write-Host "[ OK ] 已取回 $got 个文件到 $abs（-Get 前缀已剥，以下结构保留）"
 }
 
 function Invoke-LedgerMode {
