@@ -34,6 +34,9 @@
 #   ⑩--include 的形状：**用 argv 桩钉，不用真引擎钉**。posix 上「加不加前导斜杠」在 restic 那里
 #     等价（10-03 复测：`src-files/note.txt` 与 `/src-files/note.txt` 都取回得到），真引擎抓不到
 #     这一刀；桩把收到的 argv 原样落盘，判据是「反斜杠归成正斜杠、且不添前导斜杠」
+#   ⑪取回侧三档坏法的**可诊断性**（10-03 第二轮补，静态面）：引擎 rc≠0 / rc=0 但没挑中（带落地
+#     文件数）/ 尺寸不符，三条必须各占一句且不许并回一句；有 FAIL 时夹具必须把逐条 FAIL 行与
+#     backup.log 的 [drill-restore] 段打进 step 输出。理由见下方台账 m16–m18 那段。
 #
 # **不覆盖**（如实登记）：
 #   - Windows 上 restic 归档内路径带盘符那一种形状（`C:/…` 被 bg 的 `_norm_path` 剥成 `Users/…`，
@@ -44,17 +47,17 @@
 #     守卫以桩证调用序列）。
 #   - 网盘（123Pan WebDAV）语义：场景9 的「云端」是本地目录 + 真 rclone，不是 WebDAV。
 #
-# 变异台账（10-03，15 刀 / 15 咬住；每刀一份独立工作树 + 回读校验落刀 + 三份文件先过解析，
-# 判据取**首条 FAIL 是不是这一刀主张的那件事**，不只看 rc。驱动 `backguard-native:drill` 容器）：
+# 变异台账（10-03 起，21 刀 / 21 咬住；每刀一份独立工作树 + 回读校验落刀 + 三份文件
+# 先过解析，判据取**首条 FAIL 是不是这一刀主张的那件事**，不只看 rc。驱动 `backguard-native:drill` 容器）：
 #   m01 密封侧不带 --hash-drill-samples → 场景1「内容哈希这一维真的生效」(hashed=0)
-#   m02 splat 退回带括号的 @($hashArgs) → 场景1 结论行判出 `RESULT: FAIL（sample 没抽到条目…）`
+#   m02 splat 退回带括号的 @($hashArgs) → 场景1 结论行判出「sample 没抽到条目」
 #       （这一刀就是首轮那个真 bug：三个参数粘成一个 argv，而 bg 的报错与「参数真不认识」同形）
 #   m03 只验「算得出哈希」不比值 → 场景2「判定为失败」
 #   m04 抽到 0 条不判失败（退回 bash 旧口径 0/0）→ 场景4「空清单的报告写明原因」
 #   m05 摘掉 30 天节流闸门 → 场景3「刚跑过 → Code=10」
 #   m06 缺 age/主身份/密封件不报 Code=20 → 场景5「快照目录没密封件 → Code=20」
 #   m07 样本仓库不按类别查（拿第一个仓库硬解）→ 场景1「无失败项」(PASS=2 FAIL=4)
-#   m08 判定改回 grep 'RESULT: .*FAIL' → 场景7 a-「只有汇总行 0 失败」want=False
+#   m08 判定改回 grep 整行含 FAIL → 场景7 a-「只有汇总行 0 失败」want=False
 #   m09 结论行缺失/两行不判失败 → 场景7 c-「结论行缺失」want=True
 #   m10 --include 强制前导斜杠 → 场景11「include 只把反斜杠归成正斜杠」
 #       **这一刀容器里本来咬不住**（posix 上 restic 对加不加前导斜杠等价，10-03 复测两种写法都
@@ -65,6 +68,21 @@
 #   m14 --exclude 根本没拼进 rclone 命令行 → 场景10「rescue-test.txt 没上云」
 #   m15 时间轴调用点漏登记排除名（推送侧函数照旧，只有接线漏）→ 场景10「调用点登记了排除名」
 #       这一刀的 catcher 只有静态断言：行为面（m14 那一档）抓不到「函数对、接线错」
+#
+# —— 以下六刀是 10-03 第二轮之后补的（真 windows runner 报 13 条 FAIL 而 CI 日志读不出成因）：
+#    三刀证明「拆开之后确实分得开」（行为面），三刀证明「不许合回去」（场景12 静态面）——
+#   mA 后缀判定锚到不可能的前缀（restic 真解出 1 个文件、rc 仍 0）→ 报「restic 退出 0 但没挑中
+#      这条：落地 1 个文件」，与 rc≠0 那条不同形；现场回显把 include/target 打进 CI 日志
+#   mB restore 加一个不存在的开关（引擎自己报错）→ 报「restic 退出码 1≠0」并打出引擎原文
+#      `unknown flag: --no-such-flag`——10-03 首轮想要而没拿到的那件证据，现在判红就进 CI 日志
+#   mC 把清单里的 size 改错（尺寸那一档）→ 报「大小不符：清单 1234567 B，取回 13 B」（场景4 原有）
+#   m16 判据合回「rc≠0 或 挑不出文件」一句 → 场景12「rc 与挑不出文件不许并成一条判据」
+#   m17 引擎报错那一档的消息换回旧的合并句（语法保持合法）→ 场景12「旧的合并消息不许回来」
+#       与「引擎报错那一档单独成行」两条同红
+#   m18 落地文件数换成常量 0 → 场景12「退出 0 却没挑中那一档单独成行、且带落地文件数」
+#       这一刀只有静态抓得到：正常一轮不走进这一档，行为面对它恒绿
+#   静态面为什么必须有：三种坏法在合并版消息下**逐字同形**，行为面断言只看得见「有 6 条 FAIL」，
+#   看不见它们是不是同一件事——10-03 第二轮那 13 条 FAIL 就是这么把下一轮变成盲的。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
 
@@ -301,6 +319,34 @@ if (-not $script:haveReal) {
     }
     $logText = if (Test-Path -LiteralPath $env:BACKUP_LOG -PathType Leaf) {
         (Read-U8 $env:BACKUP_LOG) -join "`n" } else { '' }
+
+    # 现场回显：这一份守卫在真 windows runner 上红过一次（10-03 第二轮 13 条 FAIL），而 CI 日志
+    # 里只有「DRILL-E2E-FAIL count=13」和一句分不开成因的 FAIL 行——断言判红却没有证据，
+    # 下一轮还是盲的。所以**判红就把自己看到的两件事打到 stdout**：报告里逐条 FAIL 行
+    # （现在分成「restic 退出码≠0」／「退出 0 但没挑中这条：落地 N 个文件」／「大小不符」三档），
+    # 以及 $env:BACKUP_LOG 里 Restore-DrillFile 落的 [drill-restore] 段（include/target/rc + 引擎原文尾三行）。
+    # 这不是断言，不改结论；它只保证「红的那一轮」在日志里可读。
+    if (Test-Path -LiteralPath $rtPath -PathType Leaf) {
+        $failLines = @((Read-U8 $rtPath) | Where-Object { $_.StartsWith('FAIL ') })
+        if ($failLines.Count -gt 0) {
+            Write-Host "--- 现场：rescue-test.txt 逐条 FAIL（$($failLines.Count) 条）---"
+            $failLines | ForEach-Object { Write-Host $_ }
+            # [drill-restore] 一条是三行：头部（rc/include/target）+ 引擎原文尾三行里的前两行
+            # （Restore-DrillFile 用一次 Add-Content 写成多行），只打头一行等于把 restic 自己
+            # 说的那句话丢掉，而那正是这一步唯一能给出的成因。
+            $logLines = @($logText -split "`n")
+            $diag = New-Object System.Collections.Generic.List[string]
+            for ($li = 0; $li -lt $logLines.Count; $li++) {
+                if ($logLines[$li].Contains('[drill-restore]')) {
+                    $upto = [Math]::Min($li + 3, $logLines.Count - 1)
+                    for ($kj = $li; $kj -le $upto; $kj++) { $diag.Add($logLines[$kj]) }
+                    $li = $upto
+                }
+            }
+            Write-Host "--- 现场：backup.log 的 [drill-restore] 段（$($diag.Count) 行）---"
+            $diag | Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
+        }
+    }
     $hm = [regex]::Match($logText, '\[manifest\] 演练样本内容哈希：(\d+)/(\d+)')
     Chk '场景1 现场信号那行真的进了备份日志' $hm.Success
     if ($hm.Success) {
@@ -428,7 +474,7 @@ if (-not $script:haveReal) {
              @($pass4 | Where-Object { $_.Contains('仅比大小：清单未记内容哈希') }).Count -eq $pass4.Count) `
             "pass=$($pass4.Count)"
 
-        # 同一份无哈希清单再把**大小**改错：这一支走的是「取回失败或大小不符」，与内容哈希
+        # 同一份无哈希清单再把**大小**改错：这一支走的是「大小不符」那一档，与内容哈希
         # 无关。没有这一段，「比大小」那道闸门在这份守卫里就只被「一切正常」的路径踩过。
         $p2b = Join-Path (New-Dir 'unseal2b') 'manifest.json'
         $u2b = Run-Native @($script:age, '-d', '-i', $keys.ident, '-o', $p2b, $snap2[0].FullName)
@@ -679,5 +725,23 @@ $gotInc = if ($iIdx -ge 0 -and ($iIdx + 1) -lt $toks.Count) { $toks[$iIdx + 1] }
 Chk '场景11 include 只把反斜杠归成正斜杠' ($gotInc -eq $incWant) "got=$gotInc"
 Chk '场景11 不给 include 加强制前导斜杠（加了就锚到快照根，取回 0 文件却退 0）' `
     ($gotInc.Length -gt 0 -and -not $gotInc.StartsWith('/')) "got=$gotInc"
+
+# ---------- 场景12：取回侧的三种坏法在报告里必须分开（10-03 拆开的，别再合回去）----------
+# 为什么这一维只能静态钉：它的价值恰恰是「红的那一轮，日志里读得出是哪种坏法」，而三种坏法
+# 在合并版消息「（取回失败或大小不符）」下逐字同形——10-03 第二轮真 windows runner 的 13 条
+# FAIL 就是靠这句话把「引擎报错」和「退出 0 但挑不出文件」混成一件事，下一轮仍是盲的。
+# 行为面已经量过（三刀各造一种）：后缀锚死 → 「退出 0 但没挑中这条：落地 1 个文件」；
+# 假开关 → 「restic 退出码 1≠0」＋ [drill-restore] 的引擎原文；改尺寸 → 「大小不符：清单…取回…」。
+# 这里钉的是**不许退回合并判据**：`$rc -ne 0 -or $hit.Count -eq 0` 这种写法本身判红。
+# 只扫 semantic.ps1——bash 侧 semantic.sh 那句合并消息仍在（Windows 才需要这一维，
+# posix 上没有盘符形状，两种坏法在那边本来就分不出来），扫它是误伤同事的实现。
+$drillSrc = (Read-U8 $semPs) -join "`n"
+Chk '场景12 引擎报错那一档单独成行' $drillSrc.Contains('restic 退出码')
+Chk '场景12 退出 0 却没挑中那一档单独成行、且带落地文件数' `
+    ($drillSrc.Contains('没挑中这条') -and $drillSrc.Contains('$($all.Count) 个文件'))
+Chk '场景12 尺寸那一档仍在（与内容哈希无关的那一支，场景4 靠它）' $drillSrc.Contains('大小不符')
+Chk '场景12 旧的合并消息不许回来' (-not $drillSrc.Contains('（取回失败或大小不符）'))
+Chk '场景12 rc 与「挑不出文件」不许并成一条判据' `
+    (-not ($drillSrc -match '\$rc -ne 0 -or'))
 
 Result-Line

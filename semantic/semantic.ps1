@@ -157,10 +157,9 @@ function Restore-DrillFile {
     )
     $ErrorActionPreference = "Continue"   # restic 的进度与警告写在 stderr
     $inc = $Include -replace '\\', '/'
-    # 引擎原文只进本地 backup.log，不进 rescue-test.txt：取回失败有两条完全不同的坏法
-    # （rc≠0 是引擎报错，rc=0 而挑不出文件是「模式没命中／落地形状变了」），报告里那一句
-    # 「取回失败或大小不符」分不开它们，而这两个问题的修法不一样。10-03 真 windows runner
-    # 就是靠这条才看得见（清单路径 `C/Users/…` vs 源路径 `C:\Users\…`）。
+    # 引擎原文只进本地 backup.log，不进 rescue-test.txt：报告里现在虽然分得开「引擎报错」与
+    # 「退出 0 但挑不出文件」（10-03 拆的），但**为什么**报错只有 restic 自己知道。
+    # 10-03 真 windows runner 就是靠这条才看得见（清单路径 `C/Users/…` vs 源路径 `C:\Users\…`）。
     $o = @(& $Bin -r $Repo restore $Snap --include $inc --target $Target 2>&1 |
         ForEach-Object { "$_" })
     $rc = $LASTEXITCODE
@@ -292,15 +291,27 @@ function Invoke-Drill {
                 # 所以挑命中按后缀比，不去猜它前面那几段是什么。后缀就是清单里那份归一化路径。
                 $norm = ($spath -replace '\\', '/')
                 $cmpType = [System.StringComparison]::OrdinalIgnoreCase
-                $hit = @(Get-ChildItem -LiteralPath $outDir -Recurse -File -ErrorAction SilentlyContinue |
-                    Where-Object { ($_.FullName -replace '\\', '/').EndsWith($norm, $cmpType) })
+                # 落地清单单独留一份：「restic 解出 0 个文件」与「解出了 N 个但后缀比不中」是
+                # 两种完全不同的坏法（前者＝--include 没命中归档内形状，后者＝落地形状变了），
+                # 而 10-03 第二轮的合并消息把 rc≠0 与「挑不出文件」压成同一句话，于是真宿主上
+                # 那 13 条 FAIL 一个字都没告诉我们其中哪一种。
+                $all = @(Get-ChildItem -LiteralPath $outDir -Recurse -File -ErrorAction SilentlyContinue)
+                $hit = @($all | Where-Object {
+                    ($_.FullName -replace '\\', '/').EndsWith($norm, $cmpType) })
                 $wantSha = ""
                 if ($s.PSObject.Properties['sha256']) { $wantSha = "$($s.sha256)" }
-                if ($rc -ne 0 -or $hit.Count -eq 0) {
-                    $rep.Add("FAIL [$cls] ${spath}（取回失败或大小不符）")
+                if ($rc -ne 0) {
+                    # 引擎原文的最后三行已经进了 $env:BACKUP_LOG 的 [drill-restore] 段；
+                    # 这份文件按设计只留本地（§1.1），但仍不该往里抄引擎输出——类别与 rc 够了
+                    $rep.Add("FAIL [$cls] ${spath}（restic 退出码 ${rc}≠0：取回命令本身失败，" +
+                        "原文见 backup.log 的 [drill-restore]）")
+                    $failn++
+                } elseif ($hit.Count -eq 0) {
+                    $rep.Add("FAIL [$cls] ${spath}（restic 退出 0 但没挑中这条：落地 " +
+                        "$($all.Count) 个文件）")
                     $failn++
                 } elseif ($hit[0].Length -ne [long]$ssize) {
-                    $rep.Add("FAIL [$cls] ${spath}（取回失败或大小不符：清单 ${ssize} B，取回 $($hit[0].Length) B）")
+                    $rep.Add("FAIL [$cls] ${spath}（大小不符：清单 ${ssize} B，取回 $($hit[0].Length) B）")
                     $failn++
                 } elseif (-not $wantSha) {
                     # 清单没记哈希就如实写明这一条只证到了大小——不标注，读报告的人会把
