@@ -58,9 +58,22 @@ line=$(printf '%s\n' "$today_lines" | tail -1)
 if [[ -n "$line" ]]; then
   [[ "$today_n" == "1" ]] && chk ok "当晚恰好一行" "$line" || chk fail "当晚恰好一行" "$today_n 行：$line"
   [[ "$line" == *"rc=0"* ]] && chk ok "rc=0" "" || chk fail "rc=0" "见上一行"
-  [[ "$line" == *"sha=$(git -C ~/leisure/Codebase-Driven-by-AI/backguard/v0 rev-parse --short HEAD)"* ]] \
-    && chk ok "sha=部署点 HEAD" "" \
-    || chk warn "sha=部署点 HEAD" "行里的 sha 与部署树 HEAD 不一致（或 nogit）"
+  # 边界行里的 sha 是**当晚那次运行时的部署树 HEAD**，而部署树可能在 nightly 之后才被 ff 到
+  # 更新的提交（观察期里「先验收昨晚、上午再推代码」是常态）。拿**相等**当判据就会把
+  # 「部署点追到了更靠后的提交」报成不一致——那是 warn 级的假坏消息，读的人会去查一条
+  # 根本没问题链路。正确判据是「相等或是 HEAD 的祖先」；不在祖先链上才是真坏消息
+  # （部署树被 reset 过，或 nightly 跑在一棵没提交的树上）。
+  logsha=$(printf '%s' "$line" | sed -n 's/.* run 边界: sha=\([0-9a-f]\{7,40\}\).*/\1/p')
+  depdir="$HOME/leisure/Codebase-Driven-by-AI/backguard/v0"
+  dephead=$(git -C "$depdir" rev-parse HEAD 2>/dev/null || true)
+  if [[ -n "$logsha" && -n "$dephead" ]] &&
+     git -C "$depdir" merge-base --is-ancestor "$logsha" HEAD 2>/dev/null; then
+    chk ok "sha 在部署点 HEAD 的祖先链上" "run=${logsha} head=${dephead:0:7}"
+  elif [[ -n "$logsha" && -n "$dephead" ]]; then
+    chk fail "sha 在部署点 HEAD 的祖先链上" "run=${logsha} 不在 head=${dephead:0:7} 的祖先链上（部署树被 reset 过？）"
+  else
+    chk warn "sha 在部署点 HEAD 的祖先链上" "取不到边界行里的 sha 或部署树 HEAD（sha=nogit / 无 git）：$line"
+  fi
 else
   chk fail "存在 run 边界行" "backup.log 里没有 $DAY 的边界行（部署点未追平？）"
 fi
