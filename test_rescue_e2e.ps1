@@ -83,6 +83,19 @@
 #         （violations=1，报的正是 `rescue.ps1:195 ResticBin`——5.1 宿主上那一行写 stderr 就抛）。
 #   驱动口径补一条：**只验「新行 == 新文本」不算落地校验**——m17 第一次把行号数到注释行上，
 #   替换后校验照样 landed=True，拿一份没变异的树跑出绿灯。落刀器现在先比对**旧行内容**再改。
+#
+#   m19（10-03，场景10b 落地树取证）整条目枚举偷偷换成 `-File`（→ entries 恒等于 files）
+#       BITTEN count=1  首条=场景10b 全条目枚举真含目录（entries>files；退化成 -File 就相等）
+#       ——这一刀钉的是「取证行给的 entries 到底是不是全条目」：不带 -File 才含目录，
+#         而 drill 那一发的病灶形状正是「target 底下只有目录」，取证行退化成只数文件就看不见它。
+#   m20 取证行只打 Write-Host、不 `Add-Content` 落盘（读回来是 0 行）
+#       BITTEN count=5  首条=场景10b 取证行真的落盘并读得回（只判内存字符串＝死断言）
+#       ——断言读的是**盘上那一行**，不是当场拼出来的内存串；否则「写法漂了」和「根本没写」同形。
+#   m21 deepest 判据换成写死的 `to_len-5`（比 -To 本身还短）
+#       BITTEN count=1  首条=场景10b 最深落点长过 -To 本身（落点树在 -To 之下，不是在别处）
+#       ——这一条是给真宿主准备的：容器 `to_len=57 entries=6 files=3 deepest=122`，Windows 上
+#         若落点形状变成「只走到第三层就断」，这里先报出来而不是等产品的 FAIL 行。
+#         **长 `-To` 那一档仍未测**：drill 坏在 132 字符的 target，本夹具只有 57。
 param([string]$Repo = '')
 if (-not $Repo) { $Repo = $PSScriptRoot }
 
@@ -393,6 +406,44 @@ if (-not $script:haveReal) {
     Chk '场景10 暂存目录用完自己收掉（不许留 .bg-rescue-*）' (
         @(Get-ChildItem -LiteralPath $to -Force -Directory | Where-Object { $_.Name -like '.bg-rescue-*' }).Count -eq 0) `
         "残留: $((Get-ChildItem -LiteralPath $to -Force -Directory | ForEach-Object { $_.Name }) -join ' ')"
+
+    # ---------- 场景10b：落点取证行（10-03 演练那一发的教训——长度依赖只有真宿主看得见）----------
+    # 演练侧坏在「引擎报 `Restored 9 / 1 files/dirs` 而 target 之下递归枚举只有 3 个**目录**条目」，
+    # 两个候选（引擎少写 vs 枚举看不见深路径）都没被那一轮证据排掉，**成因未定**（登记在 AGENTS §2
+    # 「第五轮」）；`dump` 只是绕开了它，没有解释它。`rescue.ps1` 的 -Get 仍是
+    # `restore --include --target`，所以同一类坏法在这边到底有没有对应形状，**要量而不是猜**：
+    # 这一档夹具的 -To 是 temp 根下的一层（短），真机现场用户给的 -To 可能深得多。
+    # 三条设计约束：①**全条目枚举、不带 `-File`**——上一版演练取证用 `-File` 时，「只落了目录」与
+    # 「一个文件都没落」报出来同为 0，这一发不许再犯（所以下面那条判据是 `entries > files`，
+    # 它本身就是「枚举真的数到了目录」的存活证据）；②取证行**写盘再读回**——只判内存里那个字符串
+    # 等于拿它自己比它自己（场景5 那一类死断言），剥掉写入这行必须红；③数值与产品自报对得上：
+    # -To 里预置 2 个诱饵 + 取回 1 个，所以 `files >= 3`。
+    $all10 = @(Get-ChildItem -LiteralPath $to -Recurse -Force -ErrorAction SilentlyContinue)
+    $files10 = @($all10 | Where-Object { -not $_.PSIsContainer })
+    $deep10 = 0
+    foreach ($it10 in $all10) {
+        $len10 = "$($it10.FullName)".Length
+        if ($len10 -gt $deep10) { $deep10 = $len10 }
+    }
+    $echo10 = "# rescue-landed to_len=$("$to".Length) entries=$($all10.Count) files=$($files10.Count) deepest=$deep10"
+    $echoFile10 = Join-Path $script:root 'rescue-landed.txt'
+    [void](Add-Content -LiteralPath $echoFile10 -Value $echo10)
+    Write-Host $echo10
+    $line10 = @(@(Get-Content -LiteralPath $echoFile10 -ErrorAction SilentlyContinue) |
+        Where-Object { $_.StartsWith('# rescue-landed ', [System.StringComparison]::Ordinal) })
+    Chk '场景10b 取证行真的落盘并读得回（只判内存字符串＝死断言）' ($line10.Count -eq 1) `
+        "实得 $($line10.Count) 行: $(($line10 | Out-String).Trim())"
+    $m10 = [regex]::Match("$($line10 | Select-Object -First 1)",
+        '^# rescue-landed to_len=(?<tolen>\d+) entries=(?<entries>\d+) files=(?<files>\d+) deepest=(?<deepest>\d+)$')
+    Chk '场景10b 四数从盘上那一行解析得出（写法漂了就解析不出）' ($m10.Success) "$($line10 | Select-Object -First 1)"
+    Chk '场景10b 全条目枚举真含目录（entries>files；退化成 -File 就相等）' (
+        $m10.Success -and [int]$m10.Groups['entries'].Value -gt [int]$m10.Groups['files'].Value) `
+        "$($line10 | Select-Object -First 1)"
+    Chk '场景10b 取回的条数与产品自报对得上（-To 里 2 诱饵 + 1 取回）' (
+        $m10.Success -and [int]$m10.Groups['files'].Value -ge 3) "$($line10 | Select-Object -First 1)"
+    Chk '场景10b 最深落点长过 -To 本身（落点树在 -To 之下，不是在别处）' (
+        $m10.Success -and [int]$m10.Groups['deepest'].Value -gt [int]$m10.Groups['tolen'].Value) `
+        "$($line10 | Select-Object -First 1)"
 
     # ---------- 场景 11：路径写错不能静默「成功」----------
     $bogus = Invoke-Rescue -ChildArgs @('-Base', $base, '-Class', 'files', '-Get', "$hitNote".Replace('note.txt', 'NOPE.txt'), '-To', (New-Dir 'restore-bogus')) `
