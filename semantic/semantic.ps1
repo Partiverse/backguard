@@ -120,7 +120,8 @@ function Resolve-BgEntry {
 #   5.1  `add size=29 head=EFBBBF70 anchor8=1`（`Add-Content -Encoding UTF8`＝UTF-8 **带 BOM**）
 #   5.1  `red size=38 head=FFFE7000 nul=14 anchor8=0 anchor16=1`（`*>>`＝UTF-16LE）
 #   5.1  `std size=38 head=FFFE7000 nul=14 anchor8=0 anchor16=1`（`>` 同上）
-#   pwsh7 三行全同形 `size=26 head=70726F62 nul=0 anchor8=1`
+#   pwsh7 三行全同形 `size=26 head=70726F62 nul=0 anchor8=1`（Linux 容器里同一张表是 `size=25`：
+#   宿主行尾约定不同，`size=` 从来不是判据，判的是 `head` / `nul` / `anchor8`）
 # 于是那一本日志的实际形状是 `bom=EFBBBF nul=484 anchor8=0 anchor16=1 dump8=6`：现场信号行**确实在
 # 文件里**，只是以 UTF-16LE 存在，按 UTF-8 读时每个字符夹一个 NUL，守卫和操作员都读不出来——
 # 不是内容丢了，是**每一条的落盘编码由「谁写的、用哪条操作符」逐条决定**。
