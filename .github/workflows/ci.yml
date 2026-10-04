@@ -76,7 +76,7 @@ jobs:
       - name: Lint
         run: |
           shellcheck --version
-          shellcheck -S warning -f gcc backup.sh restore.sh semantic/semantic.sh drill.sh rescue.sh ui.sh 2>&1 | tee /tmp/lint.txt
+          shellcheck -S warning -f gcc backup.sh restore.sh semantic/semantic.sh drill.sh rescue.sh ui.sh install-webui.sh 2>&1 | tee /tmp/lint.txt
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             grep -E '^[^ :]+:[0-9]+:[0-9]+' /tmp/lint.txt | sed 's/^/::error::/' | head -20 || true
@@ -434,6 +434,14 @@ jobs:
       - name: E2E BSD-only branch probe (no backup round)
         timeout-minutes: 10
         run: /opt/homebrew/bin/bash test_bsd_probe.sh
+
+      - name: E2E webui installer render surface
+        timeout-minutes: 10
+        run: /opt/homebrew/bin/bash test_webui_install.sh
+        # webui 常驻 agent 的「渲染面」：plutil -lint + 键面（Label/RunAtLoad/KeepAlive/日志路径）
+        # + 凭据纪律（webui 不读口令，模板一个凭据字样都不许长出来）+ WEBUI_NO_REGISTER 下
+        # 不落真实 LaunchAgents。只渲染不注册——launchctl 动的是 runner 真实的 launchd 域；
+        # 注册那半边（bootstrap 后 10s 内 8334 起 200）由脚本自带的现场判据在真机装的时候证。
 
   windows:
     runs-on: windows-latest
