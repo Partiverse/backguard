@@ -32,7 +32,7 @@ command -v plutil >/dev/null 2>&1 || { echo "E2E-SKIP: 需要 plutil（仅 macOS
 out="$(WEBUI_NO_REGISTER=1 bash "$V0_DIR/install-webui.sh")" || fail "install-webui.sh 渲染失败：$out"
 plist="$(printf '%s' "$out" | /usr/bin/sed -n 's/^PLIST=//p')"
 [[ -n "$plist" && -f "$plist" ]] || fail "没拿到渲染产物路径：$out"
-[[ "$plist" == /tmp/bg-webui-install.* ]] || fail "④ 渲染落进了真实 LaunchAgents（$plist）——测试模式必须进临时目录"
+[[ "$plist" == /tmp/bg-webui-install.* ]] || fail "④ 渲染落进了真实 LaunchAgents（${plist}）——测试模式必须进临时目录"
 
 # ① lint（脚本自己 lint 过一遍，这里对盘上产物再验一次：两层缺一不可）
 plutil -lint "$plist" >/dev/null || fail "① plutil -lint 不过：$plist"

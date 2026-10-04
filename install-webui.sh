@@ -80,7 +80,7 @@ for _ in $(seq 1 10); do
     sleep 1
 done
 if [[ -z "$ok" ]]; then
-    echo "E2E-FAIL: bootstrap 后 10s 内 8334 没起来（现场：$LOG_DIR/webui.err.log 与 launchctl print gui/$UID_NUM/$LABEL）"
+    echo "E2E-FAIL: bootstrap 后 10s 内 8334 没起来（现场：${LOG_DIR}/webui.err.log 与 launchctl print gui/${UID_NUM}/${LABEL}）"
     exit 1
 fi
-echo "webui 已常驻（gui/$UID_NUM/$LABEL）：http://127.0.0.1:8334/（开机自启 + 崩溃自动拉回）"
+echo "webui 已常驻（gui/${UID_NUM}/${LABEL}）：http://127.0.0.1:8334/（开机自启 + 崩溃自动拉回）"
