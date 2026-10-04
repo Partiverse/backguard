@@ -13,6 +13,11 @@
 #   wi02 摘掉 RunAtLoad 键        BITTEN count=1  首条=键面断言 RunAtLoad
 #   wi03 ProgramArguments 改指 /bin/echo
 #                                BITTEN count=1  首条=键面断言 ui.sh 路径
+#   另有一发**渲染面咬不到**（10-04 首装当场踩）：plist 写死 /bin/bash（3.2），ui.sh 一 source
+#   config.sh（关联数组＝bash 4+）就 unbound variable，KeepAlive 进 crash-loop——渲染断言全绿、
+#   只有真机注册那一步红。已修（挑 homebrew bash，与 init.sh 给 backup 的同一条逻辑）并登记：
+#   **launchd ProgramArguments 的解释器版本是渲染面测不到的维度**，它的判据在脚本自带的
+#   「bootstrap 后 10s 内 8334 起 200」那一步，真机装的时候证。
 # 不覆盖：真实注册/拉起/崩溃回收（KeepAlive 的「拉回」半边无法在 CI 里安全演练——杀进程
 # 会把 runner 的 launchd 域弄脏；真机手工跑一次 install-webui.sh 即是这条的现场证明）。
 set -uo pipefail

@@ -29,6 +29,15 @@ if [[ "$NO_REGISTER" == "1" ]]; then
 fi
 mkdir -p "$PLIST_DIR"
 PLIST="$PLIST_DIR/com.partiverse.webui.plist"
+# launchd 的 PATH 里只有系统 bash 3.2，而 ui.sh 要 source config.sh——关联数组是 bash 4+ 的
+# 东西（init.sh 给 backup 挑 bash 5 的同一条教训，10-04 首装当场踩：/bin/bash 下
+# `declare -A` 一行直接 unbound variable，KeepAlive 进 crash-loop）
+if [[ -x /opt/homebrew/bin/bash ]]; then LAUNCH_BASH=/opt/homebrew/bin/bash
+elif [[ -x /usr/local/bin/bash ]]; then LAUNCH_BASH=/usr/local/bin/bash
+else
+    echo "E2E-FAIL: 未找到 bash 5（config.sh 需要）——先 brew install bash 再重跑"
+    exit 1
+fi
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -36,7 +45,7 @@ cat > "$PLIST" <<PLIST
 <dict>
     <key>Label</key><string>com.partiverse.webui</string>
     <key>ProgramArguments</key>
-    <array><string>/bin/bash</string><string>$SCRIPT_DIR/ui.sh</string></array>
+    <array><string>$LAUNCH_BASH</string><string>$SCRIPT_DIR/ui.sh</string></array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>StandardOutPath</key><string>$LOG_DIR/webui.out.log</string>
