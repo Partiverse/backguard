@@ -147,7 +147,7 @@ pmarks=(LATEST-STORY-v2 LATEST-MANIFEST-v2 LATEST-COVERAGE-v2 LATEST-RESTORE-v2)
 for i in 0 1 2 3; do
     f="${pnames[i]}"; mark="${pmarks[i]}"
     [[ "$(code_of "http://127.0.0.1:$PORT/snapshot/$SNAP_NEW/$f")" == "200" ]] || fail "preview 最新快照 $f 不是 200"
-    grep -qF "$mark" /tmp/bg-webui-body || fail "preview $f 内容不对（缺 $mark）"
+    grep -qF "$mark" /tmp/bg-webui-body || fail "preview $f 内容不对（缺 ${mark}）"
     grep -qF 'OLDER-STORY-v1' /tmp/bg-webui-body && fail "preview $f 混进了旧快照内容"
     sweep "preview-new/$f"
 done
@@ -157,7 +157,7 @@ grep -qi '^content-type: text/plain; charset=utf-8' "$T/preview-head" || fail "p
 grep -qi '^x-content-type-options: nosniff' "$T/preview-head" || fail "preview 缺 nosniff"
 # HEAD 同 200
 hc="$(curl -s -I -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/snapshot/$SNAP_NEW/STORY.md")"
-[[ "$hc" == "200" ]] || fail "preview HEAD 不是 200（got $hc）"
+[[ "$hc" == "200" ]] || fail "preview HEAD 不是 200（got ${hc}）"
 # 指定旧快照拿旧件、不串到最新件（同 §①② 的互为对照手法）
 [[ "$(code_of "http://127.0.0.1:$PORT/snapshot/$SNAP_OLD/STORY.md")" == "200" ]] || fail "preview 旧快照 STORY 不是 200"
 grep -qF 'OLDER-STORY-v1' /tmp/bg-webui-body || fail "preview 指定旧快照没拿旧件"
