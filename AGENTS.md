@@ -729,7 +729,11 @@
   rclone 只比大小，同尺寸覆写永远推不上云（§2 同一条）；「这轮跑没跑过自证/完整性」用显式
   旗标（`*_RAN` / `$script:Round*Ran`），别从停在 0 的计数器反推——那会把「没跑」演成「全过」。
   ②**webui.py**：stdlib `http.server`，绑 127.0.0.1（启动时显式拒绝非回环 `--bind`），只 GET、
-  **白名单路由**（/ /status.json /story /report/{integrity,cloud-verify,profile}，其余 404），
+  **白名单路由**（/ /status.json /story /report/{integrity,cloud-verify,profile} 与
+  /snapshot/年/月/日/HHMM-标签/四件套（10-04 起：指定快照预览 §1.1 明文层四件
+  STORY.md/MANIFEST.txt/COVERAGE.txt/restore.md，三层校验＝层级正则＋精确文件白名单＋
+  resolve 落点闸——白名单名 symlink 无论指向 timeline 外还是根内禁区件都拒，拒绝面统一
+  404 不区分原因防枚举；层①另配 py 级 mock 断言，无 FS 参与两宿主同咬），其余 404），
   永不渲染 `runs/*.json`、`preflight-latest.json`、`manifest.json.enc`、`rescue-test.txt`
   （§1.1「呈现即泄漏」的实现面——截图是合法外传路径，所以过滤必须发生在**读什么**，不是渲染层）。
   它是纯旁路（§1.3）：只读、无写通道、崩了不影响备份；`ui.sh` 是启动器（Windows 上没有
@@ -764,10 +768,14 @@
    演练 fail-closed）/
    `test_status_line.sh`（A1 状态地基：真 borg 两轮，STATUS.jsonl 每轮一行追加 + 逐行合法
    JSON + 零文件名零绝对路径；变异 s01 摘产出器 / s02 绝对路径入体 / s03 覆写，三刀全咬）/
-   `test_webui.sh`（A2 本地只读状态页：白名单路由 404 面 + 最新快照语义 + 隐私诱饵四件
+   `test_webui.sh`（A2 本地只读状态页：白名单路由 404 面 + 最新快照语义 + 快照预览三层
+   校验（外向逃逸/内向禁区件 symlink 都有断言）+ 隐私诱饵四件
    （把**运行期生成的诱饵串**植进**本地临时夹具**的 runs、rescue-test、preflight、密封件
    四样，断言页面任何输出都**不含**它们——防泄漏方向的守卫，诱饵串不出夹具）+ POST 不通 +
-   拒绝非回环绑定；变异 w01 白名单放行，咬住）。
+   拒绝非回环绑定；变异 w01 白名单放行 / w02 层级正则短路（py 级 mock 断言两宿主同咬；
+   HTTP 面同名断言在 linux 车道因无 APFS 折叠测不到，缺口已登记） / w03 文件白名单放开 /
+   w04 外向逃逸闸摘除 / w05 恒取最新 / w06 Content-Type 掉队 / w07 内向禁区件闸摘除，
+   七刀全咬）。
    十七套都已挂 CI，**车道按实测墙钟分，不是按「谁新谁排前面」分**
    （linux job 全跑，26 步；macos job 只留 backup+三条 assert / restore / rescue /
    init / log_rotation / bsd_probe，其余重夹具 integrity/cloud_verify/cloud_failure/drill

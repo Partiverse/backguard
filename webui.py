@@ -5,7 +5,9 @@
 它读什么、不读什么是隐私红线的实现面（AGENTS §1.1——「呈现即泄漏」）：
 
   渲染：timeline/STATUS.jsonl（A1，零文件名）、INTEGRITY.txt、CLOUD-VERIFY.txt、
-        profile.json、最新一份快照的 STORY.md（明文层自身已按一级目录+计数渲染）
+        profile.json、快照的 §1.1 四件套——最新一份（/story）与指定一份
+        （/snapshot/YYYY/MM/DD/HHMM-标签/FILE，精确白名单 STORY.md/MANIFEST.txt/
+        COVERAGE.txt/restore.md）；明文层自身已按一级目录+计数渲染
   永不渲染：runs/*.json（全量文件名清单）、preflight-latest.json（绝对路径）、
         manifest.json.enc（密封件）、rescue-test.txt（唯一带完整文件名的产物）
 
@@ -16,10 +18,16 @@
 import argparse
 import html
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MAX_BODY = 2 * 1024 * 1024  # 单响应上限：报告与 STORY 都是 KB 级，防手滑把大件端出去
+
+# §1.1 四件套预览白名单：精确字符串集合（大小写敏感），天然排除 manifest.json.enc、
+# exclusions.json、runs/*.json 等一切带文件名/绝对路径的产物。判定必须发生在碰盘之前
+# ——macOS APFS 大小写不敏感，story.md 一旦拼进 Path 就会打开 STORY.md。
+SNAPSHOT_FILES = ("STORY.md", "MANIFEST.txt", "COVERAGE.txt", "restore.md")
 
 
 def latest_snapshot(timeline: Path):
@@ -41,6 +49,50 @@ def read_text(p: Path) -> str:
         return p.read_text(encoding="utf-8", errors="replace")[:MAX_BODY]
     except OSError:
         return ""
+
+
+def snapshot_file(tl: Path, path: str):
+    """/snapshot/YYYY/MM/DD/HHMM-标签/FILE 的唯一校验入口（新路由是全服务第一个
+    用户输入碰盘的路径，三层校验收在此处，其余路由维持永不 decode、永不 join 用户输入）。
+
+    三层全过才返回可读路径；任何一层不过返回 None，调用方一律 send_error(404)，
+    不区分原因、无差异化消息——不给路径枚举留 oracle：
+      ①层级形状：YYYY/MM/DD/HHMM-标签 逐段正则（标签与 Prune-LocalTimeline 的
+        rm -rf 白名单守卫同款，semantic.sh:164）；
+      ②文件白名单：末段 ∈ SNAPSHOT_FILES 精确集合，判定发生在路径拼装之前；
+      ③落点闸：resolve 后末段必须仍是白名单名（白名单名 symlink 指向 timeline 外
+        或指向 timeline 内禁区件 runs/*.json、rescue-test.txt，resolve 后末段都变成
+        目标真名被拒；后者单靠 is_relative_to 挡不住）、仍落在 timeline 根内且是常规文件。
+    对 RAW path 分段，绝不 unquote：%2e%2e 不匹配任何正则也不在集合里，自然 404；
+    空段/段数不符同样 404，目录永不列举。
+    """
+    parts = path.split("/")
+    if len(parts) != 7 or parts[1] != "snapshot":
+        return None
+    y, m, d, tag, fname = parts[2:7]
+    if not re.fullmatch(r"[0-9]{4}", y) \
+            or not re.fullmatch(r"(0[1-9]|1[0-2])", m) \
+            or not re.fullmatch(r"(0[1-9]|[12][0-9]|3[01])", d) \
+            or not re.fullmatch(r"[0-9]{4}-[a-z0-9-]+", tag):
+        return None
+    if fname not in SNAPSHOT_FILES:
+        return None
+    p = tl / y / m / d / tag / fname
+    try:
+        rp = p.resolve()
+        # resolve 后末段必须仍是白名单名：白名单名 symlink 无论指向 timeline 外
+        # （逃逸 canary）还是 timeline 内禁区件（runs/*.json、rescue-test.txt——
+        # 「永不渲染」清单），resolve 后末段都变成目标真名，在此被拒。内向分支单靠
+        # is_relative_to 挡不住（目标仍在根内）。语义层只写普通文件，正常快照
+        # resolve 不改名，零误伤（不能拿 abspath 逐字比：/tmp→/private/tmp 这类
+        # 前缀 symlink 会把正常文件一并拒掉）。
+        if rp.name not in SNAPSHOT_FILES:
+            return None
+        if not (rp.is_relative_to(tl.resolve()) and rp.is_file()):
+            return None
+    except OSError:
+        return None
+    return rp
 
 
 def status_rows(timeline: Path):
@@ -85,13 +137,19 @@ class Handler(BaseHTTPRequestHandler):
                     "/report/cloud-verify": "CLOUD-VERIFY.txt",
                     "/report/profile": "profile.json"}[path]
             body = read_text(tl / name)
+        elif path.startswith("/snapshot/"):
+            sp = snapshot_file(tl, path)
+            if sp is None:  # 坏形状/非白名单/快照不存在/symlink 逃逸：统一 404
+                self.send_error(404)
+                return
+            body = read_text(sp)
         else:
             self.send_error(404)
             return
         data = body.encode("utf-8")
         ctype = "application/json; charset=utf-8" if path == "/status.json" else \
                 "application/json; charset=utf-8" if path == "/report/profile" else \
-                "text/plain; charset=utf-8" if path.startswith(("/report", "/story")) else \
+                "text/plain; charset=utf-8" if path.startswith(("/report", "/story", "/snapshot")) else \
                 "text/html; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", ctype)
