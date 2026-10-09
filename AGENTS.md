@@ -1001,9 +1001,12 @@
   纪律优先，这不是缺口而是设计。所以「干净机器 + 云端目录 + 纸质恢复码」的盲恢复**硬性要求**
   密钥目录另有第二处离线副本（`DEPLOY.md` 步骤 ③ + `rescue.sh --guide` §4）；将来若要改主意，
   走的是一次凭据面变更决策，不是顺手往推送清单里加一行。
-- `~/leisure/Codebase-Driven-by-AI/backguard/`（即部署树 v0 的上一级）下的 `research/`、
-  `PRD.md`、`prototype/`、`pitch/` 是本地工件，**不在任何 git 仓库内**；
-  关键结论已内联进 docs/HANDOVER。换机或移动开发树时，这些工件不随本仓库 clone 走。
+- **调研与源头工件已入库（2026-10-05 起，HANDOVER 续 26）**：`docs/research/`（14 篇）、
+  `PRD.md`、`prototype/`（语义层源头，build.sh 产物 vendor 回 `semantic/`——改语义层源头后
+  必须回跑 build.sh 并同步）随本仓库走，**仓库内为权威副本**；`pitch/` 与 Mac 本地的
+  `research/`、`PRD.md`、`prototype/` 副本保留但不再更新（改文件请改仓库内那份）。
+  `pitch/` 仍是本地工件。观察期 workflow 在 `.zcode/workflows/observation-closure.dwf.ts`；
+  容器镜像配方在 `tools/Dockerfile.deps-image`。
 
 ## 5. 已知待办（代码小项；优先级与验证期安排见 HANDOVER §6）
 
